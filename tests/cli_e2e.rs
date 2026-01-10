@@ -22,6 +22,7 @@
 //! - Timing information
 
 use assert_cmd::Command;
+use assert_cmd::cargo::cargo_bin_cmd;
 use predicates::prelude::*;
 use std::fs;
 use std::path::PathBuf;
@@ -102,7 +103,7 @@ fn create_empty_archive() -> (TempDir, PathBuf) {
 
 /// Get the xf command ready for testing
 fn xf_cmd() -> Command {
-    Command::cargo_bin("xf").expect("Failed to find xf binary")
+    cargo_bin_cmd!("xf")
 }
 
 // =============================================================================
@@ -335,7 +336,10 @@ fn test_index_empty_archive() {
         .assert()
         .success();
 
-    test_log!("test_index_empty_archive completed in {:?}", start.elapsed());
+    test_log!(
+        "test_index_empty_archive completed in {:?}",
+        start.elapsed()
+    );
 }
 
 #[test]
@@ -388,8 +392,8 @@ fn test_index_unicode_content() {
 // =============================================================================
 
 /// Helper to create an indexed archive and return paths.
-/// Returns (archive_temp, output_dir, db_path, index_path).
-/// Note: archive_temp must be kept alive to prevent cleanup during tests,
+/// Returns (`archive_temp`, `output_dir`, `db_path`, `index_path`).
+/// Note: `archive_temp` must be kept alive to prevent cleanup during tests,
 /// even though we've already indexed the data.
 fn create_indexed_archive() -> (TempDir, TempDir, PathBuf, PathBuf) {
     let (archive_temp, archive_path) = create_minimal_archive();
@@ -620,8 +624,7 @@ fn test_search_json_output() {
             // Should at least have JSON-like structure
             assert!(
                 stdout.contains('[') || stdout.contains('{'),
-                "JSON output should contain JSON structure: {}",
-                stdout
+                "JSON output should contain JSON structure: {stdout}"
             );
         }
     }
@@ -778,8 +781,7 @@ fn test_index_performance_basic() {
     // Basic performance check - indexing a small archive should be fast
     assert!(
         index_time.as_secs() < 30,
-        "Indexing small archive took too long: {:?}",
-        index_time
+        "Indexing small archive took too long: {index_time:?}"
     );
 
     test_log!(
@@ -813,8 +815,7 @@ fn test_search_performance_basic() {
     // Search should be very fast (sub-second)
     assert!(
         search_time.as_secs() < 5,
-        "Search took too long: {:?}",
-        search_time
+        "Search took too long: {search_time:?}"
     );
 
     test_log!(

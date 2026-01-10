@@ -290,10 +290,7 @@ impl Config {
 
     /// Get the database path, using defaults if not configured.
     pub fn db_path(&self) -> PathBuf {
-        self.paths
-            .db
-            .clone()
-            .unwrap_or_else(crate::default_db_path)
+        self.paths.db.clone().unwrap_or_else(crate::default_db_path)
     }
 
     /// Get the index path, using defaults if not configured.
@@ -311,11 +308,12 @@ impl Config {
     /// Returns an error if the config directory cannot be determined,
     /// the parent directory cannot be created, or the file cannot be written.
     pub fn save(&self) -> std::io::Result<()> {
-        let config_path = Self::user_config_path()
-            .ok_or_else(|| std::io::Error::new(
+        let config_path = Self::user_config_path().ok_or_else(|| {
+            std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 "Could not determine config directory",
-            ))?;
+            )
+        })?;
 
         // Create parent directory if needed
         if let Some(parent) = config_path.parent() {

@@ -7,11 +7,11 @@
 //!
 //! Run with: `cargo bench --bench search_perf`
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use std::time::Duration;
 use tempfile::TempDir;
 
-use xf::model::*;
+use xf::model::{Like, Tweet};
 use xf::search::SearchEngine;
 use xf::storage::Storage;
 
@@ -37,13 +37,17 @@ fn generate_test_tweets(count: usize) -> Vec<Tweet> {
             let text_idx = i % sample_texts.len();
             let hashtag_idx = i % hashtags_pool.len();
 
+            let days = i64::try_from(count - i).unwrap_or(i64::MAX);
+            let favorites = i64::try_from(i % 100).unwrap_or(0);
+            let retweets = i64::try_from(i % 50).unwrap_or(0);
+
             Tweet {
-                id: format!("{}", 1000000000 + i),
-                created_at: chrono::Utc::now() - chrono::Duration::days((count - i) as i64),
+                id: format!("{}", 1_000_000_000usize + i),
+                created_at: chrono::Utc::now() - chrono::Duration::days(days),
                 full_text: format!("{} #{}", sample_texts[text_idx], hashtags_pool[hashtag_idx]),
                 source: Some("benchmark".to_string()),
-                favorite_count: (i % 100) as i64,
-                retweet_count: (i % 50) as i64,
+                favorite_count: favorites,
+                retweet_count: retweets,
                 lang: Some("en".to_string()),
                 in_reply_to_status_id: None,
                 in_reply_to_user_id: None,
@@ -70,9 +74,12 @@ fn generate_test_likes(count: usize) -> Vec<Like> {
 
     (0..count)
         .map(|i| Like {
-            tweet_id: format!("{}", 2000000000 + i),
+            tweet_id: format!("{}", 2_000_000_000usize + i),
             full_text: Some(sample_texts[i % sample_texts.len()].to_string()),
-            expanded_url: Some(format!("https://x.com/user/status/{}", 2000000000 + i)),
+            expanded_url: Some(format!(
+                "https://x.com/user/status/{}",
+                2_000_000_000usize + i
+            )),
         })
         .collect()
 }
@@ -84,7 +91,9 @@ fn create_benchmark_search_engine(tweet_count: usize) -> (SearchEngine, TempDir)
 
     let tweets = generate_test_tweets(tweet_count);
     let mut writer = engine.writer(50_000_000).expect("Failed to create writer");
-    engine.index_tweets(&mut writer, &tweets).expect("Failed to index tweets");
+    engine
+        .index_tweets(&mut writer, &tweets)
+        .expect("Failed to index tweets");
     writer.commit().expect("Failed to commit");
     engine.reload().expect("Failed to reload");
 
@@ -98,7 +107,9 @@ fn create_benchmark_storage(tweet_count: usize) -> (Storage, TempDir) {
     let mut storage = Storage::open(&db_path).expect("Failed to create storage");
 
     let tweets = generate_test_tweets(tweet_count);
-    storage.store_tweets(&tweets).expect("Failed to store tweets");
+    storage
+        .store_tweets(&tweets)
+        .expect("Failed to store tweets");
 
     (storage, temp_dir)
 }
@@ -115,17 +126,11 @@ fn bench_search_single_term(c: &mut Criterion) {
     group.sample_size(100);
 
     // Benchmark different result limits
-    for limit in [10, 50, 100, 500].iter() {
+    for limit in &[10, 50, 100, 500] {
         group.throughput(Throughput::Elements(1));
-        group.bench_with_input(
-            BenchmarkId::from_parameter(limit),
-            limit,
-            |b, &limit| {
-                b.iter(|| {
-                    engine.search(black_box("rust"), None, black_box(limit))
-                })
-            },
-        );
+        group.bench_with_input(BenchmarkId::from_parameter(limit), limit, |b, &limit| {
+            b.iter(|| engine.search(black_box("rust"), None, black_box(limit)));
+        });
     }
 
     group.finish();
@@ -145,16 +150,10 @@ fn bench_search_phrase(c: &mut Criterion) {
         "distributed systems",
     ];
 
-    for phrase in phrases.iter() {
-        group.bench_with_input(
-            BenchmarkId::from_parameter(phrase),
-            phrase,
-            |b, phrase| {
-                b.iter(|| {
-                    engine.search(black_box(&format!("\"{}\"", phrase)), None, 100)
-                })
-            },
-        );
+    for phrase in &phrases {
+        group.bench_with_input(BenchmarkId::from_parameter(phrase), phrase, |b, phrase| {
+            b.iter(|| engine.search(black_box(&format!("\"{phrase}\"")), None, 100));
+        });
     }
 
     group.finish();
@@ -174,16 +173,10 @@ fn bench_search_complex_boolean(c: &mut Criterion) {
         ("mixed", "(rust OR python) AND learning"),
     ];
 
-    for (name, query) in queries.iter() {
-        group.bench_with_input(
-            BenchmarkId::from_parameter(name),
-            query,
-            |b, query| {
-                b.iter(|| {
-                    engine.search(black_box(query), None, 100)
-                })
-            },
-        );
+    for (name, query) in &queries {
+        group.bench_with_input(BenchmarkId::from_parameter(name), query, |b, query| {
+            b.iter(|| engine.search(black_box(query), None, 100));
+        });
     }
 
     group.finish();
@@ -198,20 +191,12 @@ fn bench_search_with_type_filter(c: &mut Criterion) {
 
     // Search with type filter
     group.bench_function("with_tweet_filter", |b| {
-        b.iter(|| {
-            engine.search(
-                black_box("rust"),
-                Some(&[xf::search::DocType::Tweet]),
-                100,
-            )
-        })
+        b.iter(|| engine.search(black_box("rust"), Some(&[xf::search::DocType::Tweet]), 100));
     });
 
     // Search without filter for comparison
     group.bench_function("without_filter", |b| {
-        b.iter(|| {
-            engine.search(black_box("rust"), None, 100)
-        })
+        b.iter(|| engine.search(black_box("rust"), None, 100));
     });
 
     group.finish();
@@ -226,28 +211,25 @@ fn bench_indexing_tweets(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(15));
     group.sample_size(50);
 
-    for count in [100, 1000, 5000].iter() {
+    for count in &[100, 1000, 5000] {
         let tweets = generate_test_tweets(*count);
 
-        group.throughput(Throughput::Elements(*count as u64));
-        group.bench_with_input(
-            BenchmarkId::from_parameter(count),
-            &tweets,
-            |b, tweets| {
-                b.iter_with_setup(
-                    || {
-                        let temp_dir = TempDir::new().unwrap();
-                        let engine = SearchEngine::open(temp_dir.path()).unwrap();
-                        let writer = engine.writer(50_000_000).unwrap();
-                        (engine, writer, temp_dir)
-                    },
-                    |(engine, mut writer, _temp)| {
-                        engine.index_tweets(&mut writer, black_box(tweets)).unwrap();
-                        writer.commit().unwrap();
-                    },
-                )
-            },
-        );
+        let count_u64 = u64::try_from(*count).unwrap_or(u64::MAX);
+        group.throughput(Throughput::Elements(count_u64));
+        group.bench_with_input(BenchmarkId::from_parameter(count), &tweets, |b, tweets| {
+            b.iter_with_setup(
+                || {
+                    let temp_dir = TempDir::new().unwrap();
+                    let engine = SearchEngine::open(temp_dir.path()).unwrap();
+                    let writer = engine.writer(50_000_000).unwrap();
+                    (engine, writer, temp_dir)
+                },
+                |(engine, mut writer, _temp)| {
+                    engine.index_tweets(&mut writer, black_box(tweets)).unwrap();
+                    writer.commit().unwrap();
+                },
+            );
+        });
     }
 
     group.finish();
@@ -258,28 +240,25 @@ fn bench_indexing_likes(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(15));
     group.sample_size(50);
 
-    for count in [100, 1000, 5000].iter() {
+    for count in &[100, 1000, 5000] {
         let likes = generate_test_likes(*count);
 
-        group.throughput(Throughput::Elements(*count as u64));
-        group.bench_with_input(
-            BenchmarkId::from_parameter(count),
-            &likes,
-            |b, likes| {
-                b.iter_with_setup(
-                    || {
-                        let temp_dir = TempDir::new().unwrap();
-                        let engine = SearchEngine::open(temp_dir.path()).unwrap();
-                        let writer = engine.writer(50_000_000).unwrap();
-                        (engine, writer, temp_dir)
-                    },
-                    |(engine, mut writer, _temp)| {
-                        engine.index_likes(&mut writer, black_box(likes)).unwrap();
-                        writer.commit().unwrap();
-                    },
-                )
-            },
-        );
+        let count_u64 = u64::try_from(*count).unwrap_or(u64::MAX);
+        group.throughput(Throughput::Elements(count_u64));
+        group.bench_with_input(BenchmarkId::from_parameter(count), &likes, |b, likes| {
+            b.iter_with_setup(
+                || {
+                    let temp_dir = TempDir::new().unwrap();
+                    let engine = SearchEngine::open(temp_dir.path()).unwrap();
+                    let writer = engine.writer(50_000_000).unwrap();
+                    (engine, writer, temp_dir)
+                },
+                |(engine, mut writer, _temp)| {
+                    engine.index_likes(&mut writer, black_box(likes)).unwrap();
+                    writer.commit().unwrap();
+                },
+            );
+        });
     }
 
     group.finish();
@@ -294,27 +273,24 @@ fn bench_storage_write_tweets(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(15));
     group.sample_size(50);
 
-    for count in [100, 1000, 5000].iter() {
+    for count in &[100, 1000, 5000] {
         let tweets = generate_test_tweets(*count);
 
-        group.throughput(Throughput::Elements(*count as u64));
-        group.bench_with_input(
-            BenchmarkId::from_parameter(count),
-            &tweets,
-            |b, tweets| {
-                b.iter_with_setup(
-                    || {
-                        let temp_dir = TempDir::new().unwrap();
-                        let db_path = temp_dir.path().join("bench.db");
-                        let storage = Storage::open(&db_path).unwrap();
-                        (storage, temp_dir)
-                    },
-                    |(mut storage, _temp)| {
-                        storage.store_tweets(black_box(tweets)).unwrap();
-                    },
-                )
-            },
-        );
+        let count_u64 = u64::try_from(*count).unwrap_or(u64::MAX);
+        group.throughput(Throughput::Elements(count_u64));
+        group.bench_with_input(BenchmarkId::from_parameter(count), &tweets, |b, tweets| {
+            b.iter_with_setup(
+                || {
+                    let temp_dir = TempDir::new().unwrap();
+                    let db_path = temp_dir.path().join("bench.db");
+                    let storage = Storage::open(&db_path).unwrap();
+                    (storage, temp_dir)
+                },
+                |(mut storage, _temp)| {
+                    storage.store_tweets(black_box(tweets)).unwrap();
+                },
+            );
+        });
     }
 
     group.finish();
@@ -329,16 +305,12 @@ fn bench_storage_read_tweet(c: &mut Criterion) {
 
     // Read existing tweet
     group.bench_function("existing_tweet", |b| {
-        b.iter(|| {
-            storage.get_tweet(black_box("1000005000"))
-        })
+        b.iter(|| storage.get_tweet(black_box("1000005000")));
     });
 
     // Read non-existing tweet
     group.bench_function("missing_tweet", |b| {
-        b.iter(|| {
-            storage.get_tweet(black_box("9999999999"))
-        })
+        b.iter(|| storage.get_tweet(black_box("9999999999")));
     });
 
     group.finish();
@@ -353,9 +325,7 @@ fn bench_storage_fts_search(c: &mut Criterion) {
 
     // FTS search
     group.bench_function("fts_simple", |b| {
-        b.iter(|| {
-            storage.search_tweets(black_box("rust"), 100)
-        })
+        b.iter(|| storage.search_tweets(black_box("rust"), 100));
     });
 
     group.finish();
@@ -371,7 +341,7 @@ fn bench_search_scalability(c: &mut Criterion) {
     group.sample_size(30);
 
     // Test search performance at different index sizes
-    for size in [1_000, 5_000, 10_000, 50_000].iter() {
+    for size in &[1_000, 5_000, 10_000, 50_000] {
         let (engine, _temp) = create_benchmark_search_engine(*size);
 
         group.throughput(Throughput::Elements(1));
@@ -379,9 +349,7 @@ fn bench_search_scalability(c: &mut Criterion) {
             BenchmarkId::new("index_size", size),
             &engine,
             |b, engine| {
-                b.iter(|| {
-                    engine.search(black_box("rust"), None, 100)
-                })
+                b.iter(|| engine.search(black_box("rust"), None, 100));
             },
         );
     }
@@ -433,4 +401,9 @@ criterion_group!(
         bench_search_scalability
 );
 
-criterion_main!(search_benches, indexing_benches, storage_benches, scalability_benches);
+criterion_main!(
+    search_benches,
+    indexing_benches,
+    storage_benches,
+    scalability_benches
+);

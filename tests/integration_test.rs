@@ -8,12 +8,7 @@
 use chrono::Utc;
 use std::path::PathBuf;
 use tempfile::TempDir;
-use xf::{
-    model::*,
-    parser::ArchiveParser,
-    search::SearchEngine,
-    storage::Storage,
-};
+use xf::{model::*, parser::ArchiveParser, search::SearchEngine, storage::Storage};
 
 /// Create a test archive directory structure
 fn create_test_archive(dir: &TempDir) -> PathBuf {
@@ -176,7 +171,9 @@ fn test_tantivy_indexing_and_search() {
     assert_eq!(results[0].result_type, SearchResultType::Tweet);
 
     // Test search with type filter
-    let results = engine.search("database", Some(&[xf::search::DocType::Like]), 10).unwrap();
+    let results = engine
+        .search("database", Some(&[xf::search::DocType::Like]), 10)
+        .unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].result_type, SearchResultType::Like);
 }

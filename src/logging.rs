@@ -16,10 +16,10 @@
 
 use tracing::Level;
 use tracing_subscriber::{
+    EnvFilter,
     fmt::{self, format::FmtSpan},
     layer::SubscriberExt,
     util::SubscriberInitExt,
-    EnvFilter,
 };
 
 /// Logging configuration.
@@ -358,7 +358,12 @@ macro_rules! log_metric {
         tracing::info!(metric = $name, value = $value, "Performance metric");
     };
     ($name:expr, $value:expr, $unit:expr) => {
-        tracing::info!(metric = $name, value = $value, unit = $unit, "Performance metric");
+        tracing::info!(
+            metric = $name,
+            value = $value,
+            unit = $unit,
+            "Performance metric"
+        );
     };
 }
 

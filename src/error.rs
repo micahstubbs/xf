@@ -39,15 +39,21 @@ pub enum XfError {
     // Database Errors
     // =========================================================================
     /// Database file not found (not yet indexed).
-    #[error("No indexed archive found. Run 'xf index <archive_path>' first.\nExpected database at: {path}")]
+    #[error(
+        "No indexed archive found. Run 'xf index <archive_path>' first.\nExpected database at: {path}"
+    )]
     DatabaseNotFound { path: PathBuf },
 
     /// Database schema version mismatch.
-    #[error("Database schema version mismatch: expected {expected}, found {found}. Consider re-indexing with --force.")]
+    #[error(
+        "Database schema version mismatch: expected {expected}, found {found}. Consider re-indexing with --force."
+    )]
     SchemaMismatch { expected: i32, found: i32 },
 
     /// Database is locked by another process.
-    #[error("Database is locked. Ensure no other xf processes are running.\nIf the problem persists, remove the lock files:\n  rm {path}-wal {path}-shm")]
+    #[error(
+        "Database is locked. Ensure no other xf processes are running.\nIf the problem persists, remove the lock files:\n  rm {path}-wal {path}-shm"
+    )]
     DatabaseLocked { path: PathBuf },
 
     /// Database operation failed.
@@ -238,9 +244,7 @@ impl XfError {
     pub const fn suggests_reindex(&self) -> bool {
         matches!(
             self,
-            Self::SchemaMismatch { .. }
-                | Self::IndexCorrupted { .. }
-                | Self::IndexNotFound { .. }
+            Self::SchemaMismatch { .. } | Self::IndexCorrupted { .. } | Self::IndexNotFound { .. }
         )
     }
 

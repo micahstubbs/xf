@@ -36,12 +36,7 @@ pub struct Budget {
 impl Budget {
     /// Create a new budget with the given thresholds.
     #[must_use]
-    pub const fn new(
-        name: &'static str,
-        target_ms: u64,
-        warning_ms: u64,
-        panic_ms: u64,
-    ) -> Self {
+    pub const fn new(name: &'static str, target_ms: u64, warning_ms: u64, panic_ms: u64) -> Self {
         Self {
             name,
             target: Duration::from_millis(target_ms),
@@ -299,10 +294,22 @@ mod tests {
     fn test_budget_status() {
         let budget = Budget::new("test", 10, 50, 100);
 
-        assert_eq!(budget.status(Duration::from_millis(5)), BudgetStatus::OnTarget);
-        assert_eq!(budget.status(Duration::from_millis(30)), BudgetStatus::Acceptable);
-        assert_eq!(budget.status(Duration::from_millis(75)), BudgetStatus::Warning);
-        assert_eq!(budget.status(Duration::from_millis(150)), BudgetStatus::Exceeded);
+        assert_eq!(
+            budget.status(Duration::from_millis(5)),
+            BudgetStatus::OnTarget
+        );
+        assert_eq!(
+            budget.status(Duration::from_millis(30)),
+            BudgetStatus::Acceptable
+        );
+        assert_eq!(
+            budget.status(Duration::from_millis(75)),
+            BudgetStatus::Warning
+        );
+        assert_eq!(
+            budget.status(Duration::from_millis(150)),
+            BudgetStatus::Exceeded
+        );
     }
 
     #[test]

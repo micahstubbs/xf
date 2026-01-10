@@ -100,9 +100,7 @@ impl ArchiveParser {
                 .as_str()
                 .and_then(Self::parse_iso_date)
                 .unwrap_or_else(Utc::now),
-            is_partial: archive_info["isPartialArchive"]
-                .as_bool()
-                .unwrap_or(false),
+            is_partial: archive_info["isPartialArchive"].as_bool().unwrap_or(false),
         })
     }
 
@@ -123,9 +121,7 @@ impl ArchiveParser {
                 let tweet = &item["tweet"];
                 Some(Tweet {
                     id: tweet["id_str"].as_str()?.to_string(),
-                    created_at: tweet["created_at"]
-                        .as_str()
-                        .and_then(Self::parse_x_date)?,
+                    created_at: tweet["created_at"].as_str().and_then(Self::parse_x_date)?,
                     full_text: tweet["full_text"].as_str()?.to_string(),
                     source: tweet["source"].as_str().map(|s| {
                         // Extract text from HTML anchor tag
@@ -278,9 +274,7 @@ impl ArchiveParser {
                             sender_id: mc["senderId"].as_str()?.to_string(),
                             recipient_id: mc["recipientId"].as_str()?.to_string(),
                             text: mc["text"].as_str()?.to_string(),
-                            created_at: mc["createdAt"]
-                                .as_str()
-                                .and_then(Self::parse_iso_date)?,
+                            created_at: mc["createdAt"].as_str().and_then(Self::parse_iso_date)?,
                             urls: Self::parse_dm_urls(&mc["urls"]),
                             media_urls: mc["mediaUrls"]
                                 .as_array()
@@ -696,7 +690,10 @@ mod tests {
         let urls = ArchiveParser::parse_urls(&json);
         assert_eq!(urls.len(), 2);
         assert_eq!(urls[0].url, "https://t.co/abc");
-        assert_eq!(urls[0].expanded_url, Some("https://example.com/page".to_string()));
+        assert_eq!(
+            urls[0].expanded_url,
+            Some("https://example.com/page".to_string())
+        );
         assert_eq!(urls[0].display_url, Some("example.com/page".to_string()));
         assert_eq!(urls[1].url, "https://t.co/xyz");
         assert_eq!(urls[1].expanded_url, None);
@@ -751,7 +748,10 @@ mod tests {
         let urls = ArchiveParser::parse_dm_urls(&json);
         assert_eq!(urls.len(), 1);
         assert_eq!(urls[0].url, "https://t.co/test");
-        assert_eq!(urls[0].expanded_url, Some("https://example.com".to_string()));
+        assert_eq!(
+            urls[0].expanded_url,
+            Some("https://example.com".to_string())
+        );
         assert_eq!(urls[0].display_url, Some("example.com".to_string()));
     }
 
@@ -943,7 +943,10 @@ mod tests {
         assert_eq!(likes.len(), 2);
         assert_eq!(likes[0].tweet_id, "9876543210");
         assert_eq!(likes[0].full_text, Some("Great content!".to_string()));
-        assert_eq!(likes[0].expanded_url, Some("https://x.com/user/status/9876543210".to_string()));
+        assert_eq!(
+            likes[0].expanded_url,
+            Some("https://x.com/user/status/9876543210".to_string())
+        );
         assert_eq!(likes[1].tweet_id, "9876543211");
         assert_eq!(likes[1].full_text, None);
     }
@@ -1055,7 +1058,10 @@ mod tests {
 
         assert_eq!(followers.len(), 2);
         assert_eq!(followers[0].account_id, "111");
-        assert_eq!(followers[0].user_link, Some("https://x.com/user111".to_string()));
+        assert_eq!(
+            followers[0].user_link,
+            Some("https://x.com/user111".to_string())
+        );
         assert_eq!(followers[1].account_id, "222");
         assert_eq!(followers[1].user_link, None);
     }
@@ -1196,7 +1202,10 @@ mod tests {
         assert_eq!(tweets.len(), 1);
         assert_eq!(tweets[0].urls.len(), 1);
         assert_eq!(tweets[0].urls[0].url, "https://t.co/abc");
-        assert_eq!(tweets[0].urls[0].expanded_url, Some("https://example.com/article".to_string()));
+        assert_eq!(
+            tweets[0].urls[0].expanded_url,
+            Some("https://example.com/article".to_string())
+        );
     }
 
     #[test]
