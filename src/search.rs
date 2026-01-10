@@ -9,6 +9,7 @@ use std::path::Path;
 use tantivy::collector::TopDocs;
 use tantivy::query::{BooleanQuery, Occur, Query, QueryParser, TermQuery};
 use tantivy::schema::*;
+use tantivy::snippet::SnippetGenerator;
 use tantivy::{doc, Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument};
 use tracing::info;
 
@@ -304,14 +305,13 @@ impl SearchEngine {
         let searcher = self.reader.searcher();
         let (id_field, text_field, _, type_field, created_at_field, metadata_field) = self.get_fields();
 
+        let limit = limit.max(1);
+
         // Build query
         let query_parser = QueryParser::for_index(&self.index, vec![text_field]);
-        let base_query = query_parser
-            .parse_query(query_str)
-            .unwrap_or_else(|_| {
-                // Fallback to term query if parsing fails
-                Box::new(tantivy::query::AllQuery)
-            });
+        let base_query = query_parser.parse_query(query_str).map_err(|e| {
+            anyhow::anyhow!("Invalid search query: {e}")
+        })?;
 
         // Apply type filter if specified
         let query: Box<dyn Query> = if let Some(types) = doc_types {
@@ -340,6 +340,9 @@ impl SearchEngine {
 
         // Execute search
         let top_docs = searcher.search(&query, &TopDocs::with_limit(limit))?;
+
+        // Create snippet generator for highlighting
+        let snippet_generator = SnippetGenerator::create(&searcher, &query, text_field)?;
 
         // Collect results
         let mut results = Vec::with_capacity(top_docs.len());
@@ -381,14 +384,24 @@ impl SearchEngine {
                 _ => SearchResultType::Tweet,
             };
 
+            // Generate highlighted snippet
+            let snippet = snippet_generator.snippet_from_doc(&doc);
+            let highlights = if snippet.is_empty() {
+                vec![]
+            } else {
+                // Get the highlighted HTML snippet and extract fragments
+                let html = snippet.to_html();
+                vec![html]
+            };
+
             results.push(SearchResult {
                 result_type,
                 id,
                 text,
                 created_at: DateTime::from_timestamp(created_at_ts, 0)
-                    .unwrap_or_else(|| Utc::now()),
+                    .unwrap_or_else(Utc::now),
                 score,
-                highlights: vec![], // TODO: implement highlighting
+                highlights,
                 metadata: serde_json::from_str(metadata_str).unwrap_or_default(),
             });
         }
@@ -437,6 +450,44 @@ fn generate_prefixes(text: &str) -> String {
 mod tests {
     use super::*;
 
+    fn create_test_tweet(id: &str, text: &str) -> Tweet {
+        Tweet {
+            id: id.to_string(),
+            created_at: Utc::now(),
+            full_text: text.to_string(),
+            source: Some("test".to_string()),
+            favorite_count: 0,
+            retweet_count: 0,
+            lang: Some("en".to_string()),
+            in_reply_to_status_id: None,
+            in_reply_to_user_id: None,
+            in_reply_to_screen_name: None,
+            is_retweet: false,
+            hashtags: vec![],
+            user_mentions: vec![],
+            urls: vec![],
+            media: vec![],
+        }
+    }
+
+    fn create_test_like(tweet_id: &str, text: Option<&str>) -> Like {
+        Like {
+            tweet_id: tweet_id.to_string(),
+            full_text: text.map(str::to_string),
+            expanded_url: None,
+        }
+    }
+
+    fn create_test_grok_message(chat_id: &str, message: &str) -> GrokMessage {
+        GrokMessage {
+            chat_id: chat_id.to_string(),
+            message: message.to_string(),
+            sender: "user".to_string(),
+            created_at: Utc::now(),
+            grok_mode: None,
+        }
+    }
+
     #[test]
     fn test_generate_prefixes() {
         let text = "hello world";
@@ -452,24 +503,295 @@ mod tests {
     }
 
     #[test]
-    fn test_search_engine() {
+    fn test_generate_prefixes_short_words() {
+        // Words shorter than 2 chars should be skipped
+        let text = "a b c hello";
+        let prefixes = generate_prefixes(text);
+        assert!(!prefixes.contains("a"));
+        assert!(!prefixes.contains("b"));
+        assert!(!prefixes.contains("c"));
+        assert!(prefixes.contains("he"));
+    }
+
+    #[test]
+    fn test_generate_prefixes_empty() {
+        let text = "";
+        let prefixes = generate_prefixes(text);
+        assert!(prefixes.is_empty());
+    }
+
+    #[test]
+    fn test_generate_prefixes_long_word() {
+        // Prefixes should be capped at 15 chars
+        let text = "supercalifragilisticexpialidocious";
+        let prefixes = generate_prefixes(text);
+        assert!(prefixes.contains("su"));
+        assert!(prefixes.contains("supercalifragil")); // 15 chars
+        // Should not contain full word (>15 chars)
+    }
+
+    #[test]
+    fn test_doc_type_as_str() {
+        assert_eq!(DocType::Tweet.as_str(), "tweet");
+        assert_eq!(DocType::Like.as_str(), "like");
+        assert_eq!(DocType::DirectMessage.as_str(), "dm");
+        assert_eq!(DocType::GrokMessage.as_str(), "grok");
+    }
+
+    #[test]
+    fn test_doc_type_from_str() {
+        assert_eq!(DocType::from_str("tweet"), Some(DocType::Tweet));
+        assert_eq!(DocType::from_str("like"), Some(DocType::Like));
+        assert_eq!(DocType::from_str("dm"), Some(DocType::DirectMessage));
+        assert_eq!(DocType::from_str("grok"), Some(DocType::GrokMessage));
+        assert_eq!(DocType::from_str("invalid"), None);
+    }
+
+    #[test]
+    fn test_search_engine_memory() {
+        let engine = SearchEngine::open_memory().unwrap();
+        assert_eq!(engine.doc_count(), 0);
+    }
+
+    #[test]
+    fn test_search_engine_index_and_search() {
         let engine = SearchEngine::open_memory().unwrap();
         let mut writer = engine.writer(15_000_000).unwrap();
 
-        // Index a tweet
+        let tweets = vec![create_test_tweet("123", "Hello world this is a test tweet")];
+
+        engine.index_tweets(&mut writer, &tweets).unwrap();
+        writer.commit().unwrap();
+        engine.reload().unwrap();
+
+        let results = engine.search("hello", None, 10).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "123");
+    }
+
+    #[test]
+    fn test_search_engine_multiple_tweets() {
+        let engine = SearchEngine::open_memory().unwrap();
+        let mut writer = engine.writer(15_000_000).unwrap();
+
+        let tweets = vec![
+            create_test_tweet("1", "Rust programming language is great"),
+            create_test_tweet("2", "Python is also a programming language"),
+            create_test_tweet("3", "Hello world example"),
+        ];
+
+        engine.index_tweets(&mut writer, &tweets).unwrap();
+        writer.commit().unwrap();
+        engine.reload().unwrap();
+
+        // Search for "programming" should find 2 tweets
+        let results = engine.search("programming", None, 10).unwrap();
+        assert_eq!(results.len(), 2);
+
+        // Search for "rust" should find 1 tweet
+        let results = engine.search("rust", None, 10).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "1");
+    }
+
+    #[test]
+    fn test_search_engine_type_filter() {
+        let engine = SearchEngine::open_memory().unwrap();
+        let mut writer = engine.writer(15_000_000).unwrap();
+
+        // Index tweets and likes
+        let tweets = vec![create_test_tweet("tweet1", "Hello world tweet")];
+        let likes = vec![create_test_like("like1", Some("Hello world like"))];
+
+        engine.index_tweets(&mut writer, &tweets).unwrap();
+        engine.index_likes(&mut writer, &likes).unwrap();
+        writer.commit().unwrap();
+        engine.reload().unwrap();
+
+        // Search without filter should find both
+        let results = engine.search("hello", None, 10).unwrap();
+        assert_eq!(results.len(), 2);
+
+        // Search with tweet filter should find only tweets
+        let results = engine.search("hello", Some(&[DocType::Tweet]), 10).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].result_type, SearchResultType::Tweet);
+
+        // Search with like filter should find only likes
+        let results = engine.search("hello", Some(&[DocType::Like]), 10).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].result_type, SearchResultType::Like);
+    }
+
+    #[test]
+    fn test_search_engine_limit() {
+        let engine = SearchEngine::open_memory().unwrap();
+        let mut writer = engine.writer(15_000_000).unwrap();
+
+        let tweets: Vec<Tweet> = (0..10)
+            .map(|i| create_test_tweet(&format!("{}", i), "common search term"))
+            .collect();
+
+        engine.index_tweets(&mut writer, &tweets).unwrap();
+        writer.commit().unwrap();
+        engine.reload().unwrap();
+
+        // Limit to 5 results
+        let results = engine.search("common", None, 5).unwrap();
+        assert_eq!(results.len(), 5);
+    }
+
+    #[test]
+    fn test_search_engine_no_results() {
+        let engine = SearchEngine::open_memory().unwrap();
+        let mut writer = engine.writer(15_000_000).unwrap();
+
+        let tweets = vec![create_test_tweet("1", "Hello world")];
+        engine.index_tweets(&mut writer, &tweets).unwrap();
+        writer.commit().unwrap();
+        engine.reload().unwrap();
+
+        // Search for something not in the index
+        let results = engine.search("nonexistent", None, 10).unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_search_engine_index_likes() {
+        let engine = SearchEngine::open_memory().unwrap();
+        let mut writer = engine.writer(15_000_000).unwrap();
+
+        let likes = vec![
+            create_test_like("like1", Some("Great Rust content")),
+            create_test_like("like2", None), // Likes without text should be skipped
+        ];
+
+        let count = engine.index_likes(&mut writer, &likes).unwrap();
+        writer.commit().unwrap();
+        engine.reload().unwrap();
+
+        assert_eq!(count, 1); // Only one like has text
+
+        let results = engine.search("rust", None, 10).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].result_type, SearchResultType::Like);
+    }
+
+    #[test]
+    fn test_search_engine_index_dms() {
+        let engine = SearchEngine::open_memory().unwrap();
+        let mut writer = engine.writer(15_000_000).unwrap();
+
+        let conversations = vec![DmConversation {
+            conversation_id: "conv1".to_string(),
+            messages: vec![
+                DirectMessage {
+                    id: "dm1".to_string(),
+                    sender_id: "user1".to_string(),
+                    recipient_id: "user2".to_string(),
+                    text: "Hello from direct message".to_string(),
+                    created_at: Utc::now(),
+                    urls: vec![],
+                    media_urls: vec![],
+                },
+                DirectMessage {
+                    id: "dm2".to_string(),
+                    sender_id: "user2".to_string(),
+                    recipient_id: "user1".to_string(),
+                    text: "Reply to direct message".to_string(),
+                    created_at: Utc::now(),
+                    urls: vec![],
+                    media_urls: vec![],
+                },
+            ],
+        }];
+
+        let count = engine.index_dms(&mut writer, &conversations).unwrap();
+        writer.commit().unwrap();
+        engine.reload().unwrap();
+
+        assert_eq!(count, 2);
+
+        let results = engine.search("direct", None, 10).unwrap();
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn test_search_engine_index_grok() {
+        let engine = SearchEngine::open_memory().unwrap();
+        let mut writer = engine.writer(15_000_000).unwrap();
+
+        let messages = vec![
+            create_test_grok_message("chat1", "What is artificial intelligence?"),
+            create_test_grok_message("chat1", "AI is a field of computer science"),
+        ];
+
+        let count = engine.index_grok_messages(&mut writer, &messages).unwrap();
+        writer.commit().unwrap();
+        engine.reload().unwrap();
+
+        assert_eq!(count, 2);
+
+        let results = engine.search("artificial", None, 10).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].result_type, SearchResultType::GrokMessage);
+    }
+
+    #[test]
+    fn test_search_engine_clear() {
+        let engine = SearchEngine::open_memory().unwrap();
+
+        // Use a scope to ensure writer is dropped before clear
+        {
+            let mut writer = engine.writer(15_000_000).unwrap();
+            let tweets = vec![create_test_tweet("1", "Hello world")];
+            engine.index_tweets(&mut writer, &tweets).unwrap();
+            writer.commit().unwrap();
+        }
+        engine.reload().unwrap();
+
+        assert_eq!(engine.doc_count(), 1);
+
+        engine.clear().unwrap();
+        assert_eq!(engine.doc_count(), 0);
+    }
+
+    #[test]
+    fn test_search_engine_doc_count() {
+        let engine = SearchEngine::open_memory().unwrap();
+        let mut writer = engine.writer(15_000_000).unwrap();
+
+        assert_eq!(engine.doc_count(), 0);
+
+        let tweets = vec![
+            create_test_tweet("1", "Tweet one"),
+            create_test_tweet("2", "Tweet two"),
+        ];
+        engine.index_tweets(&mut writer, &tweets).unwrap();
+        writer.commit().unwrap();
+        engine.reload().unwrap();
+
+        assert_eq!(engine.doc_count(), 2);
+    }
+
+    #[test]
+    fn test_search_result_metadata() {
+        let engine = SearchEngine::open_memory().unwrap();
+        let mut writer = engine.writer(15_000_000).unwrap();
+
         let tweets = vec![Tweet {
             id: "123".to_string(),
             created_at: Utc::now(),
-            full_text: "Hello world this is a test tweet".to_string(),
-            source: Some("test".to_string()),
-            favorite_count: 0,
-            retweet_count: 0,
+            full_text: "Hello world".to_string(),
+            source: Some("Web".to_string()),
+            favorite_count: 10,
+            retweet_count: 5,
             lang: Some("en".to_string()),
             in_reply_to_status_id: None,
             in_reply_to_user_id: None,
-            in_reply_to_screen_name: None,
+            in_reply_to_screen_name: Some("someone".to_string()),
             is_retweet: false,
-            hashtags: vec![],
+            hashtags: vec!["test".to_string()],
             user_mentions: vec![],
             urls: vec![],
             media: vec![],
@@ -479,9 +801,69 @@ mod tests {
         writer.commit().unwrap();
         engine.reload().unwrap();
 
-        // Search
         let results = engine.search("hello", None, 10).unwrap();
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].id, "123");
+
+        let metadata = &results[0].metadata;
+        assert_eq!(metadata["favorite_count"], 10);
+        assert_eq!(metadata["retweet_count"], 5);
+        assert_eq!(metadata["in_reply_to"], "someone");
+        assert_eq!(metadata["source"], "Web");
+    }
+
+    #[test]
+    fn test_search_with_multiple_type_filters() {
+        let engine = SearchEngine::open_memory().unwrap();
+        let mut writer = engine.writer(15_000_000).unwrap();
+
+        let tweets = vec![create_test_tweet("tweet1", "common search term")];
+        let likes = vec![create_test_like("like1", Some("common search term"))];
+        let grok = vec![create_test_grok_message("chat1", "common search term")];
+
+        engine.index_tweets(&mut writer, &tweets).unwrap();
+        engine.index_likes(&mut writer, &likes).unwrap();
+        engine.index_grok_messages(&mut writer, &grok).unwrap();
+        writer.commit().unwrap();
+        engine.reload().unwrap();
+
+        // Filter by tweet and like (exclude grok)
+        let results = engine
+            .search("common", Some(&[DocType::Tweet, DocType::Like]), 10)
+            .unwrap();
+        assert_eq!(results.len(), 2);
+
+        let has_tweet = results.iter().any(|r| r.result_type == SearchResultType::Tweet);
+        let has_like = results.iter().any(|r| r.result_type == SearchResultType::Like);
+        let has_grok = results.iter().any(|r| r.result_type == SearchResultType::GrokMessage);
+
+        assert!(has_tweet);
+        assert!(has_like);
+        assert!(!has_grok);
+    }
+
+    #[test]
+    fn test_search_engine_highlights() {
+        let engine = SearchEngine::open_memory().unwrap();
+        let mut writer = engine.writer(15_000_000).unwrap();
+
+        let tweets = vec![create_test_tweet(
+            "123",
+            "The Rust programming language is fast and memory-safe",
+        )];
+
+        engine.index_tweets(&mut writer, &tweets).unwrap();
+        writer.commit().unwrap();
+        engine.reload().unwrap();
+
+        let results = engine.search("rust", None, 10).unwrap();
+        assert_eq!(results.len(), 1);
+
+        // Highlights should contain the search term wrapped in <b> tags
+        assert!(!results[0].highlights.is_empty());
+        let highlight = &results[0].highlights[0];
+        assert!(highlight.contains("<b>"));
+        assert!(highlight.contains("</b>"));
+        // The highlight should contain "Rust" (case-insensitive match)
+        assert!(highlight.to_lowercase().contains("rust"));
     }
 }

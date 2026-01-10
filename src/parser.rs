@@ -27,12 +27,20 @@ impl ArchiveParser {
     /// Parse the JavaScript file format and extract JSON
     fn parse_js_file(&self, content: &str) -> Result<Value> {
         // Format: window.YTD.<type>.part<n> = [...]
-        // We need to extract everything after the " = "
-        let equals_pos = content
-            .find(" = ")
-            .context("Invalid JS file format: no ' = ' found")?;
+        // Extract everything after the first '=' and trim whitespace/semicolon.
+        let mut parts = content.splitn(2, '=');
+        let _prefix = parts
+            .next()
+            .context("Invalid JS file format: missing prefix")?;
+        let json_part = parts
+            .next()
+            .context("Invalid JS file format: no '=' found")?;
 
-        let json_str = &content[equals_pos + 3..];
+        let mut json_str = json_part.trim();
+        if let Some(stripped) = json_str.strip_suffix(';') {
+            json_str = stripped.trim_end();
+        }
+
         serde_json::from_str(json_str).context("Failed to parse JSON from JS file")
     }
 
@@ -79,10 +87,7 @@ impl ArchiveParser {
                 .unwrap_or_default()
                 .to_string(),
             display_name: user_info["displayName"].as_str().map(String::from),
-            archive_size_bytes: archive_info["sizeBytes"]
-                .as_str()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(0),
+            archive_size_bytes: Self::parse_i64(&archive_info["sizeBytes"]).unwrap_or(0),
             generation_date: archive_info["generationDate"]
                 .as_str()
                 .and_then(Self::parse_iso_date)
@@ -118,14 +123,8 @@ impl ArchiveParser {
                             .unwrap_or(s)
                             .to_string()
                     }),
-                    favorite_count: tweet["favorite_count"]
-                        .as_str()
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(0),
-                    retweet_count: tweet["retweet_count"]
-                        .as_str()
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(0),
+                    favorite_count: Self::parse_i64(&tweet["favorite_count"]).unwrap_or(0),
+                    retweet_count: Self::parse_i64(&tweet["retweet_count"]).unwrap_or(0),
                     lang: tweet["lang"].as_str().map(String::from),
                     in_reply_to_status_id: tweet["in_reply_to_status_id_str"]
                         .as_str()
@@ -205,6 +204,13 @@ impl ArchiveParser {
                 })
             })
             .collect()
+    }
+
+    fn parse_i64(value: &Value) -> Option<i64> {
+        if let Some(n) = value.as_i64() {
+            return Some(n);
+        }
+        value.as_str().and_then(|s| s.parse().ok())
     }
 
     /// Parse all likes from like.js
@@ -474,7 +480,8 @@ impl ArchiveParser {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Datelike;
+    use chrono::{Datelike, Timelike};
+    use tempfile::TempDir;
 
     #[test]
     fn test_parse_x_date() {
@@ -484,11 +491,686 @@ mod tests {
         assert_eq!(dt.year(), 2026);
         assert_eq!(dt.month(), 1);
         assert_eq!(dt.day(), 9);
+        assert_eq!(dt.hour(), 15);
+        assert_eq!(dt.minute(), 12);
+        assert_eq!(dt.second(), 21);
+    }
+
+    #[test]
+    fn test_parse_x_date_invalid() {
+        let date = ArchiveParser::parse_x_date("invalid date string");
+        assert!(date.is_none());
+    }
+
+    #[test]
+    fn test_parse_x_date_empty() {
+        let date = ArchiveParser::parse_x_date("");
+        assert!(date.is_none());
     }
 
     #[test]
     fn test_parse_iso_date() {
         let date = ArchiveParser::parse_iso_date("2025-11-06T23:32:43.358Z");
         assert!(date.is_some());
+        let dt = date.unwrap();
+        assert_eq!(dt.year(), 2025);
+        assert_eq!(dt.month(), 11);
+        assert_eq!(dt.day(), 6);
+    }
+
+    #[test]
+    fn test_parse_iso_date_invalid() {
+        let date = ArchiveParser::parse_iso_date("not a date");
+        assert!(date.is_none());
+    }
+
+    #[test]
+    fn test_parse_js_file_valid() {
+        let temp_dir = TempDir::new().unwrap();
+        let parser = ArchiveParser::new(temp_dir.path());
+
+        let content = r#"window.YTD.tweets.part0 = [{"tweet": {"id": "123"}}]"#;
+        let result = parser.parse_js_file(content);
+        assert!(result.is_ok());
+
+        let value = result.unwrap();
+        assert!(value.is_array());
+        assert_eq!(value.as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_parse_js_file_empty_array() {
+        let temp_dir = TempDir::new().unwrap();
+        let parser = ArchiveParser::new(temp_dir.path());
+
+        let content = r"window.YTD.likes.part0 = []";
+        let result = parser.parse_js_file(content);
+        assert!(result.is_ok());
+
+        let value = result.unwrap();
+        assert!(value.is_array());
+        assert_eq!(value.as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn test_parse_js_file_invalid_no_equals() {
+        let temp_dir = TempDir::new().unwrap();
+        let parser = ArchiveParser::new(temp_dir.path());
+
+        let content = r"window.YTD.tweets.part0";
+        let result = parser.parse_js_file(content);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_js_file_invalid_json() {
+        let temp_dir = TempDir::new().unwrap();
+        let parser = ArchiveParser::new(temp_dir.path());
+
+        let content = r"window.YTD.tweets.part0 = {invalid json";
+        let result = parser.parse_js_file(content);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_hashtags() {
+        let json = serde_json::json!([
+            {"text": "rust"},
+            {"text": "programming"},
+            {"text": "code"}
+        ]);
+        let hashtags = ArchiveParser::parse_hashtags(&json);
+        assert_eq!(hashtags.len(), 3);
+        assert!(hashtags.contains(&"rust".to_string()));
+        assert!(hashtags.contains(&"programming".to_string()));
+        assert!(hashtags.contains(&"code".to_string()));
+    }
+
+    #[test]
+    fn test_parse_hashtags_empty() {
+        let json = serde_json::json!([]);
+        let hashtags = ArchiveParser::parse_hashtags(&json);
+        assert!(hashtags.is_empty());
+    }
+
+    #[test]
+    fn test_parse_hashtags_null() {
+        let json = serde_json::json!(null);
+        let hashtags = ArchiveParser::parse_hashtags(&json);
+        assert!(hashtags.is_empty());
+    }
+
+    #[test]
+    fn test_parse_user_mentions() {
+        let json = serde_json::json!([
+            {"id_str": "123", "screen_name": "alice", "name": "Alice Smith"},
+            {"id_str": "456", "screen_name": "bob"}
+        ]);
+        let mentions = ArchiveParser::parse_user_mentions(&json);
+        assert_eq!(mentions.len(), 2);
+        assert_eq!(mentions[0].id, "123");
+        assert_eq!(mentions[0].screen_name, "alice");
+        assert_eq!(mentions[0].name, Some("Alice Smith".to_string()));
+        assert_eq!(mentions[1].id, "456");
+        assert_eq!(mentions[1].screen_name, "bob");
+        assert_eq!(mentions[1].name, None);
+    }
+
+    #[test]
+    fn test_parse_user_mentions_missing_required_fields() {
+        let json = serde_json::json!([
+            {"id_str": "123"},  // missing screen_name
+            {"screen_name": "bob"}  // missing id_str
+        ]);
+        let mentions = ArchiveParser::parse_user_mentions(&json);
+        assert!(mentions.is_empty());
+    }
+
+    #[test]
+    fn test_parse_urls() {
+        let json = serde_json::json!([
+            {
+                "url": "https://t.co/abc",
+                "expanded_url": "https://example.com/page",
+                "display_url": "example.com/page"
+            },
+            {
+                "url": "https://t.co/xyz"
+            }
+        ]);
+        let urls = ArchiveParser::parse_urls(&json);
+        assert_eq!(urls.len(), 2);
+        assert_eq!(urls[0].url, "https://t.co/abc");
+        assert_eq!(urls[0].expanded_url, Some("https://example.com/page".to_string()));
+        assert_eq!(urls[0].display_url, Some("example.com/page".to_string()));
+        assert_eq!(urls[1].url, "https://t.co/xyz");
+        assert_eq!(urls[1].expanded_url, None);
+    }
+
+    #[test]
+    fn test_parse_media() {
+        let json = serde_json::json!([
+            {
+                "id_str": "media123",
+                "type": "photo",
+                "media_url_https": "https://pbs.twimg.com/media/123.jpg"
+            },
+            {
+                "id_str": "media456",
+                "type": "video",
+                "media_url": "https://pbs.twimg.com/media/456.mp4"
+            }
+        ]);
+        let media = ArchiveParser::parse_media(&json);
+        assert_eq!(media.len(), 2);
+        assert_eq!(media[0].id, "media123");
+        assert_eq!(media[0].media_type, "photo");
+        assert_eq!(media[0].url, "https://pbs.twimg.com/media/123.jpg");
+        assert_eq!(media[1].id, "media456");
+        assert_eq!(media[1].media_type, "video");
+        assert_eq!(media[1].url, "https://pbs.twimg.com/media/456.mp4");
+    }
+
+    #[test]
+    fn test_parse_media_default_type() {
+        let json = serde_json::json!([
+            {
+                "id_str": "media123",
+                "media_url_https": "https://pbs.twimg.com/media/123.jpg"
+            }
+        ]);
+        let media = ArchiveParser::parse_media(&json);
+        assert_eq!(media.len(), 1);
+        assert_eq!(media[0].media_type, "photo"); // default
+    }
+
+    #[test]
+    fn test_parse_dm_urls() {
+        let json = serde_json::json!([
+            {
+                "url": "https://t.co/test",
+                "expanded": "https://example.com",
+                "display": "example.com"
+            }
+        ]);
+        let urls = ArchiveParser::parse_dm_urls(&json);
+        assert_eq!(urls.len(), 1);
+        assert_eq!(urls[0].url, "https://t.co/test");
+        assert_eq!(urls[0].expanded_url, Some("https://example.com".to_string()));
+        assert_eq!(urls[0].display_url, Some("example.com".to_string()));
+    }
+
+    #[test]
+    fn test_archive_parser_new() {
+        let parser = ArchiveParser::new("/some/path");
+        assert_eq!(parser.archive_path, std::path::PathBuf::from("/some/path"));
+    }
+
+    #[test]
+    fn test_read_data_file_nonexistent() {
+        let temp_dir = TempDir::new().unwrap();
+        let parser = ArchiveParser::new(temp_dir.path());
+
+        // Reading a nonexistent file should return an empty array
+        let result = parser.read_data_file("nonexistent.js");
+        assert!(result.is_ok());
+        let value = result.unwrap();
+        assert!(value.is_array());
+        assert!(value.as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_read_data_file_with_data() {
+        let temp_dir = TempDir::new().unwrap();
+        let data_dir = temp_dir.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+
+        let content = r#"window.YTD.test.part0 = [{"key": "value"}]"#;
+        std::fs::write(data_dir.join("test.js"), content).unwrap();
+
+        let parser = ArchiveParser::new(temp_dir.path());
+        let result = parser.read_data_file("test.js");
+        assert!(result.is_ok());
+        let value = result.unwrap();
+        assert!(value.is_array());
+        assert_eq!(value.as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_list_data_files() {
+        let temp_dir = TempDir::new().unwrap();
+        let data_dir = temp_dir.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+
+        // Create some test files
+        std::fs::write(data_dir.join("tweets.js"), "").unwrap();
+        std::fs::write(data_dir.join("likes.js"), "").unwrap();
+        std::fs::write(data_dir.join("other.txt"), "").unwrap(); // should be ignored
+
+        let parser = ArchiveParser::new(temp_dir.path());
+        let files = parser.list_data_files().unwrap();
+
+        assert!(files.contains(&"tweets.js".to_string()));
+        assert!(files.contains(&"likes.js".to_string()));
+        assert!(!files.contains(&"other.txt".to_string()));
+    }
+
+    // =========================================================================
+    // Full Parsing Tests (end-to-end)
+    // =========================================================================
+
+    #[test]
+    fn test_parse_tweets_full() {
+        let temp_dir = TempDir::new().unwrap();
+        let data_dir = temp_dir.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+
+        let content = r#"window.YTD.tweets.part0 = [
+            {
+                "tweet": {
+                    "id_str": "1234567890",
+                    "created_at": "Fri Jan 10 12:00:00 +0000 2025",
+                    "full_text": "Hello world! #test @mention",
+                    "source": "<a href=\"https://x.com\">X Web App</a>",
+                    "favorite_count": "42",
+                    "retweet_count": "7",
+                    "lang": "en",
+                    "entities": {
+                        "hashtags": [{"text": "test"}],
+                        "user_mentions": [{"id_str": "999", "screen_name": "mention", "name": "User"}],
+                        "urls": []
+                    }
+                }
+            }
+        ]"#;
+        std::fs::write(data_dir.join("tweets.js"), content).unwrap();
+
+        let parser = ArchiveParser::new(temp_dir.path());
+        let tweets = parser.parse_tweets().unwrap();
+
+        assert_eq!(tweets.len(), 1);
+        assert_eq!(tweets[0].id, "1234567890");
+        assert_eq!(tweets[0].full_text, "Hello world! #test @mention");
+        assert_eq!(tweets[0].favorite_count, 42);
+        assert_eq!(tweets[0].retweet_count, 7);
+        assert_eq!(tweets[0].hashtags, vec!["test".to_string()]);
+        assert_eq!(tweets[0].user_mentions.len(), 1);
+        assert_eq!(tweets[0].user_mentions[0].screen_name, "mention");
+    }
+
+    #[test]
+    fn test_parse_tweets_with_retweet() {
+        let temp_dir = TempDir::new().unwrap();
+        let data_dir = temp_dir.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+
+        let content = r#"window.YTD.tweets.part0 = [
+            {
+                "tweet": {
+                    "id_str": "111",
+                    "created_at": "Fri Jan 10 12:00:00 +0000 2025",
+                    "full_text": "RT @someone: Original tweet content",
+                    "source": "web",
+                    "favorite_count": "0",
+                    "retweet_count": "0",
+                    "retweeted": true,
+                    "entities": {"hashtags": [], "user_mentions": [], "urls": []}
+                }
+            }
+        ]"#;
+        std::fs::write(data_dir.join("tweets.js"), content).unwrap();
+
+        let parser = ArchiveParser::new(temp_dir.path());
+        let tweets = parser.parse_tweets().unwrap();
+
+        assert_eq!(tweets.len(), 1);
+        assert!(tweets[0].is_retweet);
+    }
+
+    #[test]
+    fn test_parse_tweets_reply() {
+        let temp_dir = TempDir::new().unwrap();
+        let data_dir = temp_dir.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+
+        let content = r#"window.YTD.tweets.part0 = [
+            {
+                "tweet": {
+                    "id_str": "222",
+                    "created_at": "Fri Jan 10 12:00:00 +0000 2025",
+                    "full_text": "@user This is a reply",
+                    "source": "web",
+                    "favorite_count": "5",
+                    "retweet_count": "1",
+                    "in_reply_to_status_id_str": "111",
+                    "in_reply_to_user_id_str": "999",
+                    "in_reply_to_screen_name": "user",
+                    "entities": {"hashtags": [], "user_mentions": [], "urls": []}
+                }
+            }
+        ]"#;
+        std::fs::write(data_dir.join("tweets.js"), content).unwrap();
+
+        let parser = ArchiveParser::new(temp_dir.path());
+        let tweets = parser.parse_tweets().unwrap();
+
+        assert_eq!(tweets.len(), 1);
+        assert_eq!(tweets[0].in_reply_to_status_id, Some("111".to_string()));
+        assert_eq!(tweets[0].in_reply_to_user_id, Some("999".to_string()));
+        assert_eq!(tweets[0].in_reply_to_screen_name, Some("user".to_string()));
+    }
+
+    #[test]
+    fn test_parse_likes_full() {
+        let temp_dir = TempDir::new().unwrap();
+        let data_dir = temp_dir.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+
+        let content = r#"window.YTD.like.part0 = [
+            {
+                "like": {
+                    "tweetId": "9876543210",
+                    "fullText": "Great content!",
+                    "expandedUrl": "https://x.com/user/status/9876543210"
+                }
+            },
+            {
+                "like": {
+                    "tweetId": "9876543211"
+                }
+            }
+        ]"#;
+        std::fs::write(data_dir.join("like.js"), content).unwrap();
+
+        let parser = ArchiveParser::new(temp_dir.path());
+        let likes = parser.parse_likes().unwrap();
+
+        assert_eq!(likes.len(), 2);
+        assert_eq!(likes[0].tweet_id, "9876543210");
+        assert_eq!(likes[0].full_text, Some("Great content!".to_string()));
+        assert_eq!(likes[0].expanded_url, Some("https://x.com/user/status/9876543210".to_string()));
+        assert_eq!(likes[1].tweet_id, "9876543211");
+        assert_eq!(likes[1].full_text, None);
+    }
+
+    #[test]
+    fn test_parse_direct_messages_full() {
+        let temp_dir = TempDir::new().unwrap();
+        let data_dir = temp_dir.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+
+        let content = r#"window.YTD.direct_messages.part0 = [
+            {
+                "dmConversation": {
+                    "conversationId": "conv123",
+                    "messages": [
+                        {
+                            "messageCreate": {
+                                "id": "msg1",
+                                "senderId": "user1",
+                                "recipientId": "user2",
+                                "text": "Hello!",
+                                "createdAt": "2025-01-10T12:00:00.000Z",
+                                "urls": [],
+                                "mediaUrls": []
+                            }
+                        },
+                        {
+                            "messageCreate": {
+                                "id": "msg2",
+                                "senderId": "user2",
+                                "recipientId": "user1",
+                                "text": "Hi there!",
+                                "createdAt": "2025-01-10T12:01:00.000Z",
+                                "urls": [],
+                                "mediaUrls": []
+                            }
+                        }
+                    ]
+                }
+            }
+        ]"#;
+        std::fs::write(data_dir.join("direct-messages.js"), content).unwrap();
+
+        let parser = ArchiveParser::new(temp_dir.path());
+        let conversations = parser.parse_direct_messages().unwrap();
+
+        assert_eq!(conversations.len(), 1);
+        assert_eq!(conversations[0].conversation_id, "conv123");
+        assert_eq!(conversations[0].messages.len(), 2);
+        assert_eq!(conversations[0].messages[0].id, "msg1");
+        assert_eq!(conversations[0].messages[0].text, "Hello!");
+        assert_eq!(conversations[0].messages[1].id, "msg2");
+        assert_eq!(conversations[0].messages[1].text, "Hi there!");
+    }
+
+    #[test]
+    fn test_parse_grok_messages_full() {
+        let temp_dir = TempDir::new().unwrap();
+        let data_dir = temp_dir.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+
+        // Note: The actual file is grok-chat-item.js with grokChatItem key
+        let content = r#"window.YTD.grok_chat_item.part0 = [
+            {
+                "grokChatItem": {
+                    "chatId": "chat123",
+                    "message": "What is Rust?",
+                    "sender": "user",
+                    "createdAt": "2025-01-10T12:00:00.000Z",
+                    "grokMode": "regular"
+                }
+            },
+            {
+                "grokChatItem": {
+                    "chatId": "chat123",
+                    "message": "Rust is a programming language...",
+                    "sender": "grok",
+                    "createdAt": "2025-01-10T12:00:01.000Z",
+                    "grokMode": "regular"
+                }
+            }
+        ]"#;
+        std::fs::write(data_dir.join("grok-chat-item.js"), content).unwrap();
+
+        let parser = ArchiveParser::new(temp_dir.path());
+        let messages = parser.parse_grok_messages().unwrap();
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].chat_id, "chat123");
+        assert_eq!(messages[0].message, "What is Rust?");
+        assert_eq!(messages[0].sender, "user");
+        assert_eq!(messages[1].sender, "grok");
+    }
+
+    #[test]
+    fn test_parse_followers_full() {
+        let temp_dir = TempDir::new().unwrap();
+        let data_dir = temp_dir.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+
+        let content = r#"window.YTD.follower.part0 = [
+            {"follower": {"accountId": "111", "userLink": "https://x.com/user111"}},
+            {"follower": {"accountId": "222"}}
+        ]"#;
+        std::fs::write(data_dir.join("follower.js"), content).unwrap();
+
+        let parser = ArchiveParser::new(temp_dir.path());
+        let followers = parser.parse_followers().unwrap();
+
+        assert_eq!(followers.len(), 2);
+        assert_eq!(followers[0].account_id, "111");
+        assert_eq!(followers[0].user_link, Some("https://x.com/user111".to_string()));
+        assert_eq!(followers[1].account_id, "222");
+        assert_eq!(followers[1].user_link, None);
+    }
+
+    #[test]
+    fn test_parse_following_full() {
+        let temp_dir = TempDir::new().unwrap();
+        let data_dir = temp_dir.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+
+        let content = r#"window.YTD.following.part0 = [
+            {"following": {"accountId": "333", "userLink": "https://x.com/user333"}}
+        ]"#;
+        std::fs::write(data_dir.join("following.js"), content).unwrap();
+
+        let parser = ArchiveParser::new(temp_dir.path());
+        let following = parser.parse_following().unwrap();
+
+        assert_eq!(following.len(), 1);
+        assert_eq!(following[0].account_id, "333");
+    }
+
+    #[test]
+    fn test_parse_blocks_full() {
+        let temp_dir = TempDir::new().unwrap();
+        let data_dir = temp_dir.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+
+        let content = r#"window.YTD.block.part0 = [
+            {"blocking": {"accountId": "444", "userLink": "https://x.com/blocked"}}
+        ]"#;
+        std::fs::write(data_dir.join("block.js"), content).unwrap();
+
+        let parser = ArchiveParser::new(temp_dir.path());
+        let blocks = parser.parse_blocks().unwrap();
+
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].account_id, "444");
+    }
+
+    #[test]
+    fn test_parse_mutes_full() {
+        let temp_dir = TempDir::new().unwrap();
+        let data_dir = temp_dir.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+
+        let content = r#"window.YTD.mute.part0 = [
+            {"muting": {"accountId": "555", "userLink": "https://x.com/muted"}}
+        ]"#;
+        std::fs::write(data_dir.join("mute.js"), content).unwrap();
+
+        let parser = ArchiveParser::new(temp_dir.path());
+        let mutes = parser.parse_mutes().unwrap();
+
+        assert_eq!(mutes.len(), 1);
+        assert_eq!(mutes[0].account_id, "555");
+    }
+
+    // =========================================================================
+    // Edge Case Tests
+    // =========================================================================
+
+    #[test]
+    fn test_parse_tweet_with_media() {
+        let temp_dir = TempDir::new().unwrap();
+        let data_dir = temp_dir.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+
+        let content = r#"window.YTD.tweets.part0 = [
+            {
+                "tweet": {
+                    "id_str": "333",
+                    "created_at": "Fri Jan 10 12:00:00 +0000 2025",
+                    "full_text": "Check out this image!",
+                    "source": "web",
+                    "favorite_count": "10",
+                    "retweet_count": "2",
+                    "entities": {
+                        "hashtags": [],
+                        "user_mentions": [],
+                        "urls": [],
+                        "media": [
+                            {
+                                "id_str": "media111",
+                                "type": "photo",
+                                "media_url_https": "https://pbs.twimg.com/media/test.jpg"
+                            }
+                        ]
+                    }
+                }
+            }
+        ]"#;
+        std::fs::write(data_dir.join("tweets.js"), content).unwrap();
+
+        let parser = ArchiveParser::new(temp_dir.path());
+        let tweets = parser.parse_tweets().unwrap();
+
+        assert_eq!(tweets.len(), 1);
+        assert_eq!(tweets[0].media.len(), 1);
+        assert_eq!(tweets[0].media[0].id, "media111");
+        assert_eq!(tweets[0].media[0].media_type, "photo");
+    }
+
+    #[test]
+    fn test_parse_tweet_with_urls() {
+        let temp_dir = TempDir::new().unwrap();
+        let data_dir = temp_dir.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+
+        let content = r#"window.YTD.tweets.part0 = [
+            {
+                "tweet": {
+                    "id_str": "444",
+                    "created_at": "Fri Jan 10 12:00:00 +0000 2025",
+                    "full_text": "Check this out: https://t.co/abc",
+                    "source": "web",
+                    "favorite_count": "5",
+                    "retweet_count": "1",
+                    "entities": {
+                        "hashtags": [],
+                        "user_mentions": [],
+                        "urls": [
+                            {
+                                "url": "https://t.co/abc",
+                                "expanded_url": "https://example.com/article",
+                                "display_url": "example.com/article"
+                            }
+                        ]
+                    }
+                }
+            }
+        ]"#;
+        std::fs::write(data_dir.join("tweets.js"), content).unwrap();
+
+        let parser = ArchiveParser::new(temp_dir.path());
+        let tweets = parser.parse_tweets().unwrap();
+
+        assert_eq!(tweets.len(), 1);
+        assert_eq!(tweets[0].urls.len(), 1);
+        assert_eq!(tweets[0].urls[0].url, "https://t.co/abc");
+        assert_eq!(tweets[0].urls[0].expanded_url, Some("https://example.com/article".to_string()));
+    }
+
+    #[test]
+    fn test_parse_empty_tweet_entities() {
+        let temp_dir = TempDir::new().unwrap();
+        let data_dir = temp_dir.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+
+        let content = r#"window.YTD.tweets.part0 = [
+            {
+                "tweet": {
+                    "id_str": "555",
+                    "created_at": "Fri Jan 10 12:00:00 +0000 2025",
+                    "full_text": "Simple tweet without entities",
+                    "source": "web",
+                    "favorite_count": "0",
+                    "retweet_count": "0"
+                }
+            }
+        ]"#;
+        std::fs::write(data_dir.join("tweets.js"), content).unwrap();
+
+        let parser = ArchiveParser::new(temp_dir.path());
+        let tweets = parser.parse_tweets().unwrap();
+
+        assert_eq!(tweets.len(), 1);
+        assert!(tweets[0].hashtags.is_empty());
+        assert!(tweets[0].user_mentions.is_empty());
+        assert!(tweets[0].urls.is_empty());
+        assert!(tweets[0].media.is_empty());
     }
 }

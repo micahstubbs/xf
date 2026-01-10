@@ -258,7 +258,7 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
     let results = search_engine.search(
         &args.query,
         doc_types.as_deref(),
-        args.limit + args.offset,
+        args.limit.saturating_add(args.offset),
     )?;
 
     // Apply offset
@@ -327,8 +327,17 @@ fn print_result(num: usize, result: &SearchResult) {
         format!("({:.2})", result.score).dimmed()
     );
 
+    // Use highlighted text if available, otherwise use plain text
+    let display_text = if !result.highlights.is_empty() {
+        // Convert HTML highlights to ANSI colors
+        // Tantivy uses <b> tags for highlighting
+        html_highlights_to_ansi(&result.highlights[0])
+    } else {
+        result.text.clone()
+    };
+
     // Word wrap the text
-    let wrapped = textwrap::wrap(&result.text, 78);
+    let wrapped = textwrap::wrap(&display_text, 78);
     for line in wrapped {
         println!("   {}", line);
     }
@@ -341,6 +350,20 @@ fn print_result(num: usize, result: &SearchResult) {
     }
 
     println!();
+}
+
+/// Convert HTML-style highlights (from Tantivy) to ANSI colored text
+fn html_highlights_to_ansi(html: &str) -> String {
+    // Tantivy uses <b>...</b> for highlighting
+    // We'll convert these to ANSI bold + yellow
+    let mut result = html.to_string();
+
+    // Replace opening tags with ANSI escape for bold yellow
+    result = result.replace("<b>", "\x1b[1;33m");
+    // Replace closing tags with ANSI reset
+    result = result.replace("</b>", "\x1b[0m");
+
+    result
 }
 
 fn truncate(s: &str, max_len: usize) -> String {

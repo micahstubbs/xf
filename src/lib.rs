@@ -2,14 +2,28 @@
 //!
 //! This library provides the core functionality for indexing and searching
 //! X data archives exported from x.com.
+//!
+//! # Modules
+//!
+//! - [`cli`] - Command-line interface definitions
+//! - [`error`] - Custom error types with rich context
+//! - [`model`] - Data models for X archive data
+//! - [`parser`] - Archive parsing and data extraction
+//! - [`search`] - Tantivy-based full-text search engine
+//! - [`storage`] - SQLite storage layer
 
 pub mod cli;
+pub mod config;
+pub mod error;
+pub mod logging;
 pub mod model;
 pub mod parser;
+pub mod perf;
 pub mod search;
 pub mod storage;
 
 pub use cli::*;
+pub use error::{Result, ResultExt, XfError};
 pub use model::*;
 pub use parser::ArchiveParser;
 pub use search::SearchEngine;
