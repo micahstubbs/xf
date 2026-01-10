@@ -3,7 +3,10 @@
 //! Handles parsing the JavaScript-wrapped JSON format used in X data exports.
 //! Files are formatted as: `window.YTD.<datatype>.part0 = [...]`
 
-use crate::model::*;
+use crate::model::{
+    Account, ArchiveInfo, Block, DirectMessage, DmConversation, Follower, Following, GrokMessage,
+    Like, Mute, Profile, Tweet, TweetMedia, TweetUrl, UserMention,
+};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rayon::prelude::*;
@@ -25,6 +28,7 @@ impl ArchiveParser {
     }
 
     /// Parse the JavaScript file format and extract JSON
+    #[allow(clippy::unused_self)]
     fn parse_js_file(&self, content: &str) -> Result<Value> {
         // Format: window.YTD.<type>.part<n> = [...]
         // Extract everything after the first '=' and trim whitespace/semicolon.
@@ -70,7 +74,11 @@ impl ArchiveParser {
             .map(|dt| dt.with_timezone(&Utc))
     }
 
-    /// Parse archive metadata from manifest.js
+    /// Parse archive metadata from manifest.js.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the manifest file cannot be read or parsed.
     pub fn parse_manifest(&self) -> Result<ArchiveInfo> {
         let data = self.read_data_file("manifest.js")?;
 
@@ -98,7 +106,11 @@ impl ArchiveParser {
         })
     }
 
-    /// Parse all tweets from tweets.js
+    /// Parse all tweets from tweets.js.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the tweets file cannot be read or parsed.
     pub fn parse_tweets(&self) -> Result<Vec<Tweet>> {
         info!("Parsing tweets.js...");
         let data = self.read_data_file("tweets.js")?;
@@ -213,7 +225,11 @@ impl ArchiveParser {
         value.as_str().and_then(|s| s.parse().ok())
     }
 
-    /// Parse all likes from like.js
+    /// Parse all likes from like.js.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the likes file cannot be read or parsed.
     pub fn parse_likes(&self) -> Result<Vec<Like>> {
         info!("Parsing like.js...");
         let data = self.read_data_file("like.js")?;
@@ -236,7 +252,11 @@ impl ArchiveParser {
         Ok(likes)
     }
 
-    /// Parse direct messages from direct-messages.js
+    /// Parse direct messages from direct-messages.js.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the direct messages file cannot be read or parsed.
     pub fn parse_direct_messages(&self) -> Result<Vec<DmConversation>> {
         info!("Parsing direct-messages.js...");
         let data = self.read_data_file("direct-messages.js")?;
@@ -303,7 +323,11 @@ impl ArchiveParser {
             .collect()
     }
 
-    /// Parse followers from follower.js
+    /// Parse followers from follower.js.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the followers file cannot be read or parsed.
     pub fn parse_followers(&self) -> Result<Vec<Follower>> {
         info!("Parsing follower.js...");
         let data = self.read_data_file("follower.js")?;
@@ -325,7 +349,11 @@ impl ArchiveParser {
         Ok(followers)
     }
 
-    /// Parse following from following.js
+    /// Parse following from following.js.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the following file cannot be read or parsed.
     pub fn parse_following(&self) -> Result<Vec<Following>> {
         info!("Parsing following.js...");
         let data = self.read_data_file("following.js")?;
@@ -347,7 +375,11 @@ impl ArchiveParser {
         Ok(following)
     }
 
-    /// Parse blocks from block.js
+    /// Parse blocks from block.js.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the blocks file cannot be read or parsed.
     pub fn parse_blocks(&self) -> Result<Vec<Block>> {
         info!("Parsing block.js...");
         let data = self.read_data_file("block.js")?;
@@ -369,7 +401,11 @@ impl ArchiveParser {
         Ok(blocks)
     }
 
-    /// Parse mutes from mute.js
+    /// Parse mutes from mute.js.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the mutes file cannot be read or parsed.
     pub fn parse_mutes(&self) -> Result<Vec<Mute>> {
         info!("Parsing mute.js...");
         let data = self.read_data_file("mute.js")?;
@@ -391,7 +427,11 @@ impl ArchiveParser {
         Ok(mutes)
     }
 
-    /// Parse account info from account.js
+    /// Parse account info from account.js.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the account file cannot be read or parsed.
     pub fn parse_account(&self) -> Result<Option<Account>> {
         info!("Parsing account.js...");
         let data = self.read_data_file("account.js")?;
@@ -411,7 +451,11 @@ impl ArchiveParser {
         Ok(account)
     }
 
-    /// Parse profile info from profile.js
+    /// Parse profile info from profile.js.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the profile file cannot be read or parsed.
     pub fn parse_profile(&self) -> Result<Option<Profile>> {
         info!("Parsing profile.js...");
         let data = self.read_data_file("profile.js")?;
@@ -431,7 +475,11 @@ impl ArchiveParser {
         Ok(profile)
     }
 
-    /// Parse Grok chat messages from grok-chat-item.js
+    /// Parse Grok chat messages from grok-chat-item.js.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the Grok messages file cannot be read or parsed.
     pub fn parse_grok_messages(&self) -> Result<Vec<GrokMessage>> {
         info!("Parsing grok-chat-item.js...");
         let data = self.read_data_file("grok-chat-item.js")?;
@@ -456,7 +504,11 @@ impl ArchiveParser {
         Ok(messages)
     }
 
-    /// List all available data files in the archive
+    /// List all available data files in the archive.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the archive directory cannot be read.
     pub fn list_data_files(&self) -> Result<Vec<String>> {
         let data_path = self.archive_path.join("data");
         let mut files = Vec::new();
@@ -465,7 +517,10 @@ impl ArchiveParser {
             let entry = entry?;
             if entry.file_type().is_file() {
                 if let Some(name) = entry.file_name().to_str() {
-                    if name.ends_with(".js") {
+                    if std::path::Path::new(name)
+                        .extension()
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("js"))
+                    {
                         files.push(name.to_string());
                     }
                 }

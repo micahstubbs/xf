@@ -2,15 +2,20 @@
 //!
 //! Provides ultra-fast search with BM25 ranking, prefix matching, and phrase queries.
 
-use crate::model::*;
+use crate::model::{
+    DirectMessage, DmConversation, GrokMessage, Like, SearchResult, SearchResultType, Tweet,
+};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use std::path::Path;
 use tantivy::collector::TopDocs;
 use tantivy::query::{BooleanQuery, Occur, Query, QueryParser, TermQuery};
-use tantivy::schema::*;
+use tantivy::schema::{
+    Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, Value, FAST, INDEXED,
+    STORED, STRING,
+};
 use tantivy::snippet::SnippetGenerator;
-use tantivy::{doc, Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument};
+use tantivy::{doc, Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument, Term};
 use tracing::info;
 
 /// Schema field names
@@ -31,7 +36,7 @@ pub enum DocType {
 }
 
 impl DocType {
-    fn as_str(&self) -> &'static str {
+    const fn as_str(self) -> &'static str {
         match self {
             Self::Tweet => "tweet",
             Self::Like => "like",
@@ -98,7 +103,11 @@ pub struct SearchEngine {
 }
 
 impl SearchEngine {
-    /// Create or open an index at the given path
+    /// Create or open an index at the given path.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the index directory cannot be created or opened.
     pub fn open(index_path: impl AsRef<Path>) -> Result<Self> {
         let index_path = index_path.as_ref();
         std::fs::create_dir_all(index_path)?;

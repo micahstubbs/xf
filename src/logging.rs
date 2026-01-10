@@ -24,6 +24,7 @@ use tracing_subscriber::{
 
 /// Logging configuration.
 #[derive(Debug, Clone)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct LogConfig {
     /// Minimum log level to display.
     pub level: LogLevel,
@@ -85,7 +86,8 @@ impl Default for LogConfig {
 
 impl LogConfig {
     /// Create a config for quiet mode (errors only).
-    pub fn quiet() -> Self {
+    #[must_use]
+    pub const fn quiet() -> Self {
         Self {
             level: LogLevel::Error,
             format: LogFormat::Compact,
@@ -98,7 +100,8 @@ impl LogConfig {
     }
 
     /// Create a config for verbose mode (debug level).
-    pub fn verbose() -> Self {
+    #[must_use]
+    pub const fn verbose() -> Self {
         Self {
             level: LogLevel::Debug,
             format: LogFormat::Pretty,
@@ -111,7 +114,8 @@ impl LogConfig {
     }
 
     /// Create a config for trace mode (maximum verbosity).
-    pub fn trace() -> Self {
+    #[must_use]
+    pub const fn trace() -> Self {
         Self {
             level: LogLevel::Trace,
             format: LogFormat::Full,
@@ -122,13 +126,12 @@ impl LogConfig {
             file: None,
         }
     }
-
 }
 
 impl LogLevel {
     /// Convert to tracing Level.
     #[allow(dead_code)]
-    fn to_tracing_level(self) -> Option<Level> {
+    const fn to_tracing_level(self) -> Option<Level> {
         match self {
             Self::Error => Some(Level::ERROR),
             Self::Warn => Some(Level::WARN),
@@ -140,7 +143,7 @@ impl LogLevel {
     }
 
     /// Convert to env filter directive string.
-    fn to_filter_string(self) -> &'static str {
+    const fn to_filter_string(self) -> &'static str {
         match self {
             Self::Error => "error",
             Self::Warn => "warn",

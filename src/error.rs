@@ -220,7 +220,8 @@ impl XfError {
     }
 
     /// Check if this error is recoverable (user can fix it).
-    pub fn is_recoverable(&self) -> bool {
+    #[must_use]
+    pub const fn is_recoverable(&self) -> bool {
         matches!(
             self,
             Self::ArchiveNotFound { .. }
@@ -233,7 +234,8 @@ impl XfError {
     }
 
     /// Check if this error suggests re-indexing.
-    pub fn suggests_reindex(&self) -> bool {
+    #[must_use]
+    pub const fn suggests_reindex(&self) -> bool {
         matches!(
             self,
             Self::SchemaMismatch { .. }
@@ -243,7 +245,8 @@ impl XfError {
     }
 
     /// Get a suggestion for how to fix this error, if applicable.
-    pub fn suggestion(&self) -> Option<&'static str> {
+    #[must_use]
+    pub const fn suggestion(&self) -> Option<&'static str> {
         match self {
             Self::ArchiveNotFound { .. } => {
                 Some("Verify the archive path and ensure the X data export is extracted.")
@@ -271,9 +274,17 @@ impl XfError {
 /// Extension trait for adding context to Results.
 pub trait ResultExt<T> {
     /// Add context to an error.
+    ///
+    /// # Errors
+    ///
+    /// Returns the original error wrapped with additional context.
     fn context(self, context: impl Into<String>) -> Result<T>;
 
     /// Add context lazily (only evaluated on error).
+    ///
+    /// # Errors
+    ///
+    /// Returns the original error wrapped with additional context.
     fn with_context<F>(self, f: F) -> Result<T>
     where
         F: FnOnce() -> String;

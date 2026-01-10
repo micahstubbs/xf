@@ -35,6 +35,7 @@ pub struct Budget {
 
 impl Budget {
     /// Create a new budget with the given thresholds.
+    #[must_use]
     pub const fn new(
         name: &'static str,
         target_ms: u64,
@@ -50,41 +51,49 @@ impl Budget {
     }
 
     /// Create a budget for instant operations (<1ms target).
+    #[must_use]
     pub const fn instant(name: &'static str) -> Self {
         Self::new(name, 1, 5, 50)
     }
 
     /// Create a budget for fast operations (<10ms target).
+    #[must_use]
     pub const fn fast(name: &'static str) -> Self {
         Self::new(name, 10, 50, 500)
     }
 
     /// Create a budget for normal operations (<100ms target).
+    #[must_use]
     pub const fn normal(name: &'static str) -> Self {
         Self::new(name, 100, 500, 5000)
     }
 
     /// Create a budget for slow operations (<1s target).
+    #[must_use]
     pub const fn slow(name: &'static str) -> Self {
         Self::new(name, 1000, 5000, 30000)
     }
 
     /// Check if a duration is within the target.
+    #[must_use]
     pub fn is_within_target(&self, duration: Duration) -> bool {
         duration <= self.target
     }
 
     /// Check if a duration exceeds the warning threshold.
+    #[must_use]
     pub fn exceeds_warning(&self, duration: Duration) -> bool {
         duration > self.warning
     }
 
     /// Check if a duration exceeds the panic threshold.
+    #[must_use]
     pub fn exceeds_panic(&self, duration: Duration) -> bool {
         duration > self.panic
     }
 
     /// Get the status of a duration relative to this budget.
+    #[must_use]
     pub fn status(&self, duration: Duration) -> BudgetStatus {
         if duration <= self.target {
             BudgetStatus::OnTarget
@@ -113,7 +122,8 @@ pub enum BudgetStatus {
 
 impl BudgetStatus {
     /// Check if this status is acceptable for production.
-    pub fn is_ok(&self) -> bool {
+    #[must_use]
+    pub const fn is_ok(&self) -> bool {
         matches!(self, Self::OnTarget | Self::Acceptable)
     }
 }
@@ -185,6 +195,7 @@ pub struct Timer {
 
 impl Timer {
     /// Start a new timer for the given budget.
+    #[must_use]
     pub fn start(budget: Budget) -> Self {
         Self {
             budget,
@@ -193,6 +204,7 @@ impl Timer {
     }
 
     /// Get the elapsed duration.
+    #[must_use]
     pub fn elapsed(&self) -> Duration {
         self.start.elapsed()
     }
@@ -241,6 +253,7 @@ impl Timer {
     }
 
     /// Stop the timer and check if it exceeded the panic threshold.
+    #[must_use]
     pub fn stop_and_check(self) -> (Duration, bool) {
         let budget = self.budget;
         let duration = self.start.elapsed();

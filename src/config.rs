@@ -32,7 +32,7 @@ use std::path::PathBuf;
 use tracing::{debug, info, warn};
 
 /// Main configuration structure for xf.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     /// Path-related configuration.
@@ -46,10 +46,10 @@ pub struct Config {
 }
 
 /// Path configuration for database and index locations.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PathsConfig {
-    /// Path to the SQLite database file.
+    /// Path to the `SQLite` database file.
     /// Environment variable: `XF_DB`
     pub db: Option<PathBuf>,
 
@@ -114,27 +114,6 @@ pub struct OutputConfig {
 
     /// Show timing information for operations.
     pub timings: bool,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            paths: PathsConfig::default(),
-            search: SearchConfig::default(),
-            indexing: IndexingConfig::default(),
-            output: OutputConfig::default(),
-        }
-    }
-}
-
-impl Default for PathsConfig {
-    fn default() -> Self {
-        Self {
-            db: None,
-            index: None,
-            archive: None,
-        }
-    }
 }
 
 impl Default for SearchConfig {
@@ -225,6 +204,7 @@ impl Config {
     }
 
     /// Get the path to the user configuration file.
+    #[must_use]
     pub fn user_config_path() -> Option<PathBuf> {
         dirs::config_dir().map(|p| p.join("xf").join("config.toml"))
     }
@@ -325,6 +305,11 @@ impl Config {
     }
 
     /// Save the current configuration to the user config file.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the config directory cannot be determined,
+    /// the parent directory cannot be created, or the file cannot be written.
     pub fn save(&self) -> std::io::Result<()> {
         let config_path = Self::user_config_path()
             .ok_or_else(|| std::io::Error::new(
@@ -346,6 +331,7 @@ impl Config {
     }
 
     /// Generate a default configuration file content.
+    #[must_use]
     pub fn default_config_content() -> String {
         let config = Self::default();
         toml::to_string_pretty(&config).unwrap_or_default()

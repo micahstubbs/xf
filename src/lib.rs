@@ -10,7 +10,7 @@
 //! - [`model`] - Data models for X archive data
 //! - [`parser`] - Archive parsing and data extraction
 //! - [`search`] - Tantivy-based full-text search engine
-//! - [`storage`] - SQLite storage layer
+//! - [`storage`] - `SQLite` storage layer
 
 pub mod cli;
 pub mod config;
@@ -36,6 +36,7 @@ pub const DEFAULT_DB_NAME: &str = "xf.db";
 pub const DEFAULT_INDEX_DIR: &str = "xf_index";
 
 /// Get the default data directory for xf
+#[must_use]
 pub fn default_data_dir() -> std::path::PathBuf {
     dirs::data_local_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
@@ -43,11 +44,13 @@ pub fn default_data_dir() -> std::path::PathBuf {
 }
 
 /// Get the default database path
+#[must_use]
 pub fn default_db_path() -> std::path::PathBuf {
     default_data_dir().join(DEFAULT_DB_NAME)
 }
 
 /// Get the default index path
+#[must_use]
 pub fn default_index_path() -> std::path::PathBuf {
     default_data_dir().join(DEFAULT_INDEX_DIR)
 }

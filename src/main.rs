@@ -238,6 +238,14 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
         );
     }
 
+    if !index_path.join("meta.json").exists() {
+        anyhow::bail!(
+            "No search index found. Run 'xf index <archive_path>' first.\n\
+             Expected index at: {}",
+            index_path.display()
+        );
+    }
+
     let search_engine = SearchEngine::open(&index_path)?;
     let _storage = Storage::open(&db_path)?;
 
@@ -507,23 +515,266 @@ fn cmd_list(cli: &Cli, args: &cli::ListArgs) -> Result<()> {
 
     match args.what {
         ListTarget::Files => {
-            // List data files in archive - need archive path
-            println!("{}", "Use 'xf index <path>' to index an archive first.".yellow());
+            println!("{}", "Use 'xf index <path>' to index an archive first, then use list commands to browse data.".yellow());
+            return Ok(());
         }
-        _ => {
-            if !db_path.exists() {
-                anyhow::bail!("No indexed archive found.");
+        _ => {}
+    }
+
+    if !db_path.exists() {
+        anyhow::bail!(
+            "No indexed archive found. Run 'xf index <archive_path>' first."
+        );
+    }
+
+    let storage = Storage::open(&db_path)?;
+    let limit = Some(args.limit);
+
+    match args.what {
+        ListTarget::Files => unreachable!(),
+        ListTarget::Tweets => {
+            let tweets = storage.get_all_tweets(limit)?;
+            println!("{} {} tweets:\n", "Showing".dimmed(), tweets.len().to_string().cyan());
+            for tweet in &tweets {
+                let date = tweet.created_at.format("%Y-%m-%d %H:%M").to_string();
+                let text = truncate_text(&tweet.full_text, 80);
+                println!(
+                    "{} {} {}",
+                    date.dimmed(),
+                    tweet.id.cyan(),
+                    text
+                );
             }
-            println!("{}", "List command not fully implemented yet.".yellow());
+        }
+        ListTarget::Likes => {
+            let likes = storage.get_all_likes(limit)?;
+            println!("{} {} likes:\n", "Showing".dimmed(), likes.len().to_string().cyan());
+            for like in &likes {
+                let text = like
+                    .full_text
+                    .as_ref()
+                    .map(|t| truncate_text(t, 80))
+                    .unwrap_or_else(|| "[No text]".to_string());
+                println!("{} {}", like.tweet_id.cyan(), text);
+            }
+        }
+        ListTarget::Dms | ListTarget::Conversations => {
+            let dms = storage.get_all_dms(limit)?;
+            println!("{} {} DM messages:\n", "Showing".dimmed(), dms.len().to_string().cyan());
+            for dm in &dms {
+                let date = dm.created_at.format("%Y-%m-%d %H:%M").to_string();
+                let text = truncate_text(&dm.text, 60);
+                println!(
+                    "{} {} {} {} {}",
+                    date.dimmed(),
+                    dm.sender_id.green(),
+                    "→".dimmed(),
+                    dm.recipient_id.blue(),
+                    text
+                );
+            }
+        }
+        ListTarget::Followers => {
+            let followers = storage.get_all_followers(limit)?;
+            println!("{} {} followers:\n", "Showing".dimmed(), followers.len().to_string().cyan());
+            for follower in &followers {
+                let link = follower
+                    .user_link
+                    .as_ref()
+                    .map(String::as_str)
+                    .unwrap_or("[no link]");
+                println!("{} {}", follower.account_id.cyan(), link.dimmed());
+            }
+        }
+        ListTarget::Following => {
+            let following = storage.get_all_following(limit)?;
+            println!("{} {} following:\n", "Showing".dimmed(), following.len().to_string().cyan());
+            for f in &following {
+                let link = f.user_link.as_ref().map(String::as_str).unwrap_or("[no link]");
+                println!("{} {}", f.account_id.cyan(), link.dimmed());
+            }
+        }
+        ListTarget::Blocks => {
+            println!("{}", "Blocks listing not yet implemented.".yellow());
+        }
+        ListTarget::Mutes => {
+            println!("{}", "Mutes listing not yet implemented.".yellow());
         }
     }
 
     Ok(())
 }
 
-fn cmd_export(_cli: &Cli, _args: &cli::ExportArgs) -> Result<()> {
-    println!("{}", "Export command not fully implemented yet.".yellow());
+/// Truncate text to a maximum length, adding ellipsis if needed
+fn truncate_text(text: &str, max_len: usize) -> String {
+    let text = text.replace('\n', " ").replace('\r', "");
+    if text.len() <= max_len {
+        text
+    } else {
+        format!("{}...", &text[..max_len - 3])
+    }
+}
+
+fn cmd_export(cli: &Cli, args: &cli::ExportArgs) -> Result<()> {
+    let db_path = get_db_path(cli);
+
+    if !db_path.exists() {
+        anyhow::bail!(
+            "No indexed archive found. Run 'xf index <archive_path>' first."
+        );
+    }
+
+    let storage = Storage::open(&db_path)?;
+
+    // Build output based on target
+    let output = match args.what {
+        ExportTarget::Tweets => {
+            let tweets = storage.get_all_tweets(args.limit)?;
+            format_export(&tweets, &args.format)?
+        }
+        ExportTarget::Likes => {
+            let likes = storage.get_all_likes(args.limit)?;
+            format_export(&likes, &args.format)?
+        }
+        ExportTarget::Dms => {
+            let dms = storage.get_all_dms(args.limit)?;
+            format_export(&dms, &args.format)?
+        }
+        ExportTarget::Followers => {
+            let followers = storage.get_all_followers(args.limit)?;
+            format_export(&followers, &args.format)?
+        }
+        ExportTarget::Following => {
+            let following = storage.get_all_following(args.limit)?;
+            format_export(&following, &args.format)?
+        }
+        ExportTarget::All => {
+            // For "all", we create a combined structure
+            let tweets = storage.get_all_tweets(args.limit)?;
+            let likes = storage.get_all_likes(args.limit)?;
+            let dms = storage.get_all_dms(args.limit)?;
+            let followers = storage.get_all_followers(args.limit)?;
+            let following = storage.get_all_following(args.limit)?;
+
+            match args.format {
+                ExportFormat::Json => {
+                    let combined = serde_json::json!({
+                        "tweets": tweets,
+                        "likes": likes,
+                        "dms": dms,
+                        "followers": followers,
+                        "following": following
+                    });
+                    serde_json::to_string_pretty(&combined)?
+                }
+                ExportFormat::Jsonl => {
+                    let mut lines = Vec::new();
+                    for t in &tweets {
+                        lines.push(format!(r#"{{"type":"tweet","data":{}}}"#, serde_json::to_string(t)?));
+                    }
+                    for l in &likes {
+                        lines.push(format!(r#"{{"type":"like","data":{}}}"#, serde_json::to_string(l)?));
+                    }
+                    for d in &dms {
+                        lines.push(format!(r#"{{"type":"dm","data":{}}}"#, serde_json::to_string(d)?));
+                    }
+                    for f in &followers {
+                        lines.push(format!(r#"{{"type":"follower","data":{}}}"#, serde_json::to_string(f)?));
+                    }
+                    for f in &following {
+                        lines.push(format!(r#"{{"type":"following","data":{}}}"#, serde_json::to_string(f)?));
+                    }
+                    lines.join("\n")
+                }
+                ExportFormat::Csv => {
+                    anyhow::bail!("CSV export not supported for 'all' target. Export individual types instead.");
+                }
+            }
+        }
+    };
+
+    // Write to file or stdout
+    if let Some(path) = &args.output {
+        std::fs::write(path, &output)?;
+        println!(
+            "{} Exported to {}",
+            "✓".green(),
+            path.display().to_string().cyan()
+        );
+    } else {
+        println!("{output}");
+    }
+
     Ok(())
+}
+
+/// Format data for export based on the specified format
+fn format_export<T: serde::Serialize>(data: &[T], format: &ExportFormat) -> Result<String> {
+    match format {
+        ExportFormat::Json => Ok(serde_json::to_string_pretty(data)?),
+        ExportFormat::Jsonl => {
+            let lines: Vec<String> = data
+                .iter()
+                .map(|item| serde_json::to_string(item))
+                .collect::<std::result::Result<_, _>>()?;
+            Ok(lines.join("\n"))
+        }
+        ExportFormat::Csv => {
+            if data.is_empty() {
+                return Ok(String::new());
+            }
+            // Use serde_json to get a consistent field representation
+            let first = serde_json::to_value(&data[0])?;
+            if let serde_json::Value::Object(map) = first {
+                let headers: Vec<&str> = map.keys().map(String::as_str).collect();
+                let mut output = headers.join(",");
+                output.push('\n');
+
+                for item in data {
+                    let val = serde_json::to_value(item)?;
+                    if let serde_json::Value::Object(obj) = val {
+                        let row: Vec<String> = headers
+                            .iter()
+                            .map(|&h| {
+                                obj.get(h)
+                                    .map(|v| csv_escape(v))
+                                    .unwrap_or_default()
+                            })
+                            .collect();
+                        output.push_str(&row.join(","));
+                        output.push('\n');
+                    }
+                }
+                Ok(output)
+            } else {
+                anyhow::bail!("Data structure not suitable for CSV export");
+            }
+        }
+    }
+}
+
+/// Escape a JSON value for CSV output
+fn csv_escape(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => String::new(),
+        serde_json::Value::Bool(b) => b.to_string(),
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::String(s) => {
+            if s.contains(',') || s.contains('"') || s.contains('\n') {
+                format!("\"{}\"", s.replace('"', "\"\""))
+            } else {
+                s.clone()
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            let inner = serde_json::to_string(arr).unwrap_or_default();
+            format!("\"{}\"", inner.replace('"', "\"\""))
+        }
+        serde_json::Value::Object(obj) => {
+            let inner = serde_json::to_string(obj).unwrap_or_default();
+            format!("\"{}\"", inner.replace('"', "\"\""))
+        }
+    }
 }
 
 fn cmd_config(cli: &Cli, args: &cli::ConfigArgs) -> Result<()> {

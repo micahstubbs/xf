@@ -33,7 +33,7 @@ impl Storage {
             ",
         )?;
 
-        let mut storage = Self { conn };
+        let storage = Self { conn };
         storage.migrate()?;
         Ok(storage)
     }
@@ -47,13 +47,13 @@ impl Storage {
             PRAGMA temp_store = MEMORY;
             ",
         )?;
-        let mut storage = Self { conn };
+        let storage = Self { conn };
         storage.migrate()?;
         Ok(storage)
     }
 
     /// Run database migrations
-    fn migrate(&mut self) -> Result<()> {
+    fn migrate(&self) -> Result<()> {
         let current_version = self.get_schema_version()?;
 
         if current_version < SCHEMA_VERSION {
@@ -778,6 +778,185 @@ impl Storage {
             Err(e) => Err(e.into()),
         }
     }
+
+    /// Get all tweets, optionally limited.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database query fails.
+    pub fn get_all_tweets(&self, limit: Option<usize>) -> Result<Vec<Tweet>> {
+        let query = limit.map_or_else(
+            || {
+                r"SELECT id, created_at, full_text, source, favorite_count, retweet_count,
+                   lang, in_reply_to_status_id, in_reply_to_user_id, in_reply_to_screen_name,
+                   is_retweet, hashtags_json, mentions_json, urls_json, media_json
+                FROM tweets ORDER BY created_at DESC"
+                    .to_string()
+            },
+            |lim| {
+                format!(
+                    r"SELECT id, created_at, full_text, source, favorite_count, retweet_count,
+                   lang, in_reply_to_status_id, in_reply_to_user_id, in_reply_to_screen_name,
+                   is_retweet, hashtags_json, mentions_json, urls_json, media_json
+                FROM tweets ORDER BY created_at DESC LIMIT {lim}"
+                )
+            },
+        );
+
+        let mut stmt = self.conn.prepare(&query)?;
+        let tweets = stmt
+            .query_map([], |row| {
+                Ok(Tweet {
+                    id: row.get(0)?,
+                    created_at: row
+                        .get::<_, String>(1)
+                        .ok()
+                        .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
+                        .map(|dt| dt.with_timezone(&Utc))
+                        .unwrap_or_else(Utc::now),
+                    full_text: row.get(2)?,
+                    source: row.get(3)?,
+                    favorite_count: row.get(4)?,
+                    retweet_count: row.get(5)?,
+                    lang: row.get(6)?,
+                    in_reply_to_status_id: row.get(7)?,
+                    in_reply_to_user_id: row.get(8)?,
+                    in_reply_to_screen_name: row.get(9)?,
+                    is_retweet: row.get::<_, i32>(10)? != 0,
+                    hashtags: serde_json::from_str(&row.get::<_, String>(11)?).unwrap_or_default(),
+                    user_mentions: serde_json::from_str(&row.get::<_, String>(12)?)
+                        .unwrap_or_default(),
+                    urls: serde_json::from_str(&row.get::<_, String>(13)?).unwrap_or_default(),
+                    media: serde_json::from_str(&row.get::<_, String>(14)?).unwrap_or_default(),
+                })
+            })?
+            .filter_map(std::result::Result::ok)
+            .collect();
+
+        Ok(tweets)
+    }
+
+    /// Get all likes, optionally limited.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database query fails.
+    pub fn get_all_likes(&self, limit: Option<usize>) -> Result<Vec<Like>> {
+        let query = limit.map_or_else(
+            || "SELECT tweet_id, full_text, expanded_url FROM likes".to_string(),
+            |lim| format!("SELECT tweet_id, full_text, expanded_url FROM likes LIMIT {lim}"),
+        );
+
+        let mut stmt = self.conn.prepare(&query)?;
+        let likes = stmt
+            .query_map([], |row| {
+                Ok(Like {
+                    tweet_id: row.get(0)?,
+                    full_text: row.get(1)?,
+                    expanded_url: row.get(2)?,
+                })
+            })?
+            .filter_map(std::result::Result::ok)
+            .collect();
+
+        Ok(likes)
+    }
+
+    /// Get all DM conversations with messages, optionally limited.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database query fails.
+    pub fn get_all_dms(&self, limit: Option<usize>) -> Result<Vec<DirectMessage>> {
+        let query = limit.map_or_else(
+            || {
+                r"SELECT id, conversation_id, sender_id, recipient_id, text,
+                   created_at, urls_json, media_urls_json
+                FROM direct_messages ORDER BY created_at DESC"
+                    .to_string()
+            },
+            |lim| {
+                format!(
+                    r"SELECT id, conversation_id, sender_id, recipient_id, text,
+                   created_at, urls_json, media_urls_json
+                FROM direct_messages ORDER BY created_at DESC LIMIT {lim}"
+                )
+            },
+        );
+
+        let mut stmt = self.conn.prepare(&query)?;
+        let dms = stmt
+            .query_map([], |row| {
+                Ok(DirectMessage {
+                    id: row.get(0)?,
+                    sender_id: row.get(2)?,
+                    recipient_id: row.get(3)?,
+                    text: row.get(4)?,
+                    created_at: row
+                        .get::<_, String>(5)
+                        .ok()
+                        .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
+                        .map(|dt| dt.with_timezone(&Utc))
+                        .unwrap_or_else(Utc::now),
+                    urls: serde_json::from_str(&row.get::<_, String>(6)?).unwrap_or_default(),
+                    media_urls: serde_json::from_str(&row.get::<_, String>(7)?).unwrap_or_default(),
+                })
+            })?
+            .filter_map(std::result::Result::ok)
+            .collect();
+
+        Ok(dms)
+    }
+
+    /// Get all followers, optionally limited.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database query fails.
+    pub fn get_all_followers(&self, limit: Option<usize>) -> Result<Vec<Follower>> {
+        let query = limit.map_or_else(
+            || "SELECT account_id, user_link FROM followers".to_string(),
+            |lim| format!("SELECT account_id, user_link FROM followers LIMIT {lim}"),
+        );
+
+        let mut stmt = self.conn.prepare(&query)?;
+        let followers = stmt
+            .query_map([], |row| {
+                Ok(Follower {
+                    account_id: row.get(0)?,
+                    user_link: row.get(1)?,
+                })
+            })?
+            .filter_map(std::result::Result::ok)
+            .collect();
+
+        Ok(followers)
+    }
+
+    /// Get all following, optionally limited.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database query fails.
+    pub fn get_all_following(&self, limit: Option<usize>) -> Result<Vec<Following>> {
+        let query = limit.map_or_else(
+            || "SELECT account_id, user_link FROM following".to_string(),
+            |lim| format!("SELECT account_id, user_link FROM following LIMIT {lim}"),
+        );
+
+        let mut stmt = self.conn.prepare(&query)?;
+        let following = stmt
+            .query_map([], |row| {
+                Ok(Following {
+                    account_id: row.get(0)?,
+                    user_link: row.get(1)?,
+                })
+            })?
+            .filter_map(std::result::Result::ok)
+            .collect();
+
+        Ok(following)
+    }
 }
 
 #[cfg(test)]
@@ -1093,7 +1272,7 @@ mod tests {
             account_id: "12345".to_string(),
             username: "testuser".to_string(),
             display_name: Some("Test User".to_string()),
-            archive_size_bytes: 1024000,
+            archive_size_bytes: 1_024_000,
             generation_date: Utc::now(),
             is_partial: false,
         };

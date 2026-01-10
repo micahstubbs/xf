@@ -252,6 +252,7 @@ pub enum DataType {
 }
 
 impl DataType {
+    #[must_use]
     pub fn all() -> Vec<Self> {
         vec![
             Self::Tweet,

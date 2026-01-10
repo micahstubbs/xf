@@ -666,6 +666,34 @@ fn test_missing_required_args() {
     );
 }
 
+#[test]
+fn test_search_missing_index() {
+    test_log!("Starting test_search_missing_index");
+    let start = Instant::now();
+
+    let output_dir = TempDir::new().expect("Failed to create output dir");
+    let db_path = output_dir.path().join("test.db");
+    let index_path = output_dir.path().join("missing_index");
+
+    fs::write(&db_path, "").expect("Failed to create test db file");
+
+    let mut cmd = xf_cmd();
+    cmd.arg("search")
+        .arg("rust")
+        .arg("--db")
+        .arg(&db_path)
+        .arg("--index")
+        .arg(&index_path)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("No search index found"));
+
+    test_log!(
+        "test_search_missing_index completed in {:?}",
+        start.elapsed()
+    );
+}
+
 // =============================================================================
 // Quiet/Verbose Mode Tests
 // =============================================================================
