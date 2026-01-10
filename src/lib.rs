@@ -1,7 +1,7 @@
-//! x_find - Ultra-fast Twitter/X archive search
+//! xf - Ultra-fast X data archive search
 //!
 //! This library provides the core functionality for indexing and searching
-//! Twitter data archives exported from twitter.com.
+//! X data archives exported from x.com.
 
 pub mod cli;
 pub mod model;

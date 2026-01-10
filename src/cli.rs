@@ -5,7 +5,7 @@
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
-/// xf - Ultra-fast Twitter/X archive search
+/// xf - Ultra-fast X data archive search
 #[derive(Parser, Debug)]
 #[command(name = "xf")]
 #[command(author = "Jeffrey Emanuel <jeff@jeffreyemanuel.dev>")]
@@ -15,10 +15,10 @@ use std::path::PathBuf;
     "\n  Rustc: ", env!("VERGEN_RUSTC_SEMVER"),
     "\n  Target: ", env!("VERGEN_CARGO_TARGET_TRIPLE"),
 ))]
-#[command(about = "Ultra-fast CLI for searching Twitter/X data archives")]
+#[command(about = "Ultra-fast CLI for searching X data archives")]
 #[command(long_about = r#"
 xf (x_find) - A blazingly fast command-line tool for indexing and searching
-your Twitter/X data archive.
+your X data archive.
 
 Features:
   - Full-text search with BM25 ranking
@@ -28,8 +28,8 @@ Features:
   - JSON and human-readable output formats
 
 Quick start:
-  1. Download your Twitter data from twitter.com/settings
-  2. Run: xf index /path/to/twitter-archive
+  1. Download your data from x.com/settings/download_your_data
+  2. Run: xf index /path/to/your-archive
   3. Search: xf search "your query"
 "#)]
 pub struct Cli {
@@ -59,7 +59,7 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
-    /// Index a Twitter data archive
+    /// Index an X data archive
     Index(IndexArgs),
 
     /// Search the indexed archive
@@ -89,7 +89,7 @@ pub enum Commands {
 
 #[derive(Args, Debug)]
 pub struct IndexArgs {
-    /// Path to the Twitter archive directory
+    /// Path to the X data archive directory
     pub archive_path: PathBuf,
 
     /// Force full re-index (delete existing data)

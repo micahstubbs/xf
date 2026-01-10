@@ -1,4 +1,4 @@
-//! xf - Ultra-fast Twitter/X archive search CLI
+//! xf - Ultra-fast X data archive search CLI
 //!
 //! Main entry point for the xf command-line tool.
 
@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use tracing::{debug, error, info, warn, Level};
 use tracing_subscriber::EnvFilter;
 
-use x_find::*;
+use xf::*;
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -96,7 +96,7 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
         info!("Cleared existing data");
     }
 
-    println!("{}", "Indexing Twitter archive...".bold().cyan());
+    println!("{}", "Indexing X data archive...".bold().cyan());
     println!("  Archive: {}", archive_path.display());
     println!("  Database: {}", db_path.display());
     println!("  Index: {}", index_path.display());
@@ -512,7 +512,7 @@ fn cmd_update() -> Result<()> {
     println!("{}", "Checking for updates...".cyan());
     println!(
         "To update, run:\n  {}",
-        "curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/x_find/master/install.sh | bash"
+        "curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/xf/main/install.sh | bash"
             .bold()
     );
     Ok(())

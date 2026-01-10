@@ -1,6 +1,6 @@
-//! Data models for Twitter/X archive data.
+//! Data models for X archive data.
 //!
-//! These structures represent the normalized form of Twitter data after parsing
+//! These structures represent the normalized form of X data after parsing
 //! from the JavaScript export format.
 
 use chrono::{DateTime, Utc};

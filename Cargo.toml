@@ -1,12 +1,12 @@
 [package]
-name = "x_find"
+name = "xf"
 version = "0.1.0"
 edition = "2024"
 resolver = "2"
 authors = ["Jeffrey Emanuel <jeff@jeffreyemanuel.dev>"]
-description = "Ultra-fast CLI for searching and querying Twitter/X data archives"
-repository = "https://github.com/Dicklesworthstone/x_find"
-homepage = "https://github.com/Dicklesworthstone/x_find"
+description = "Ultra-fast CLI for searching and querying X data archives"
+repository = "https://github.com/Dicklesworthstone/xf"
+homepage = "https://github.com/Dicklesworthstone/xf"
 license = "MIT"
 keywords = ["twitter", "x", "search", "cli", "archive", "tantivy"]
 categories = ["command-line-utilities", "text-processing"]

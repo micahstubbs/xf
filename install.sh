@@ -3,10 +3,10 @@
 # xf installer
 #
 # One-liner install (with cache buster):
-#   curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/x_find/master/install.sh?$(date +%s)" | bash
+#   curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/xf/main/install.sh?$(date +%s)" | bash
 #
 # Or without cache buster:
-#   curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/x_find/master/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/xf/main/install.sh | bash
 #
 # Options:
 #   --version vX.Y.Z   Install specific version (default: latest)
@@ -24,7 +24,7 @@ shopt -s lastpipe 2>/dev/null || true
 
 VERSION="${VERSION:-}"
 OWNER="${OWNER:-Dicklesworthstone}"
-REPO="${REPO:-x_find}"
+REPO="${REPO:-xf}"
 DEST_DEFAULT="$HOME/.local/bin"
 DEST="${DEST:-$DEST_DEFAULT}"
 EASY=0
@@ -212,7 +212,7 @@ if [ "$QUIET" -eq 0 ]; then
       --padding "0 1" \
       --margin "1 0" \
       "$(gum style --foreground 42 --bold 'xf installer')" \
-      "$(gum style --foreground 245 'Ultra-fast Twitter/X archive search')"
+      "$(gum style --foreground 245 'Ultra-fast X data archive search')"
   else
     echo ""
     echo -e "\033[1;32mxf installer\033[0m"
@@ -356,6 +356,6 @@ fi
 ok "Done. Binary at: $DEST/xf"
 echo ""
 info "Quick start:"
-echo "  1. Download your Twitter data from twitter.com/settings"
-echo "  2. Run: xf index /path/to/twitter-archive"
+echo "  1. Download your data from x.com/settings/download_your_data"
+echo "  2. Run: xf index /path/to/your-archive"
 echo "  3. Search: xf search \"your query\""

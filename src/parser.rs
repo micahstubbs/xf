@@ -1,6 +1,6 @@
-//! Twitter/X archive data parser.
+//! X archive data parser.
 //!
-//! Handles parsing the JavaScript-wrapped JSON format used in Twitter data exports.
+//! Handles parsing the JavaScript-wrapped JSON format used in X data exports.
 //! Files are formatted as: `window.YTD.<datatype>.part0 = [...]`
 
 use crate::model::*;
@@ -13,7 +13,7 @@ use std::path::Path;
 use tracing::{debug, info, warn};
 use walkdir::WalkDir;
 
-/// Parser for Twitter archive data
+/// Parser for X archive data
 pub struct ArchiveParser {
     archive_path: std::path::PathBuf,
 }
@@ -48,9 +48,9 @@ impl ArchiveParser {
         self.parse_js_file(&content)
     }
 
-    /// Parse Twitter's date format: "Fri Jan 09 15:12:21 +0000 2026"
-    fn parse_twitter_date(date_str: &str) -> Option<DateTime<Utc>> {
-        // Twitter format: "Fri Jan 09 15:12:21 +0000 2026"
+    /// Parse X's date format: "Fri Jan 09 15:12:21 +0000 2026"
+    fn parse_x_date(date_str: &str) -> Option<DateTime<Utc>> {
+        // X format: "Fri Jan 09 15:12:21 +0000 2026"
         DateTime::parse_from_str(date_str, "%a %b %d %H:%M:%S %z %Y")
             .ok()
             .map(|dt| dt.with_timezone(&Utc))
@@ -109,7 +109,7 @@ impl ArchiveParser {
                     id: tweet["id_str"].as_str()?.to_string(),
                     created_at: tweet["created_at"]
                         .as_str()
-                        .and_then(Self::parse_twitter_date)?,
+                        .and_then(Self::parse_x_date)?,
                     full_text: tweet["full_text"].as_str()?.to_string(),
                     source: tweet["source"].as_str().map(|s| {
                         // Extract text from HTML anchor tag
@@ -477,8 +477,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_twitter_date() {
-        let date = ArchiveParser::parse_twitter_date("Fri Jan 09 15:12:21 +0000 2026");
+    fn test_parse_x_date() {
+        let date = ArchiveParser::parse_x_date("Fri Jan 09 15:12:21 +0000 2026");
         assert!(date.is_some());
         let dt = date.unwrap();
         assert_eq!(dt.year(), 2026);
