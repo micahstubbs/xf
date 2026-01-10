@@ -273,6 +273,15 @@ impl Storage {
         let mut count = 0;
 
         {
+            // FTS5 doesn't support INSERT OR REPLACE, so we must delete first to avoid duplicates.
+            // Batch delete for performance: one DELETE with IN clause instead of N individual DELETEs.
+            if !tweets.is_empty() {
+                let placeholders: String = tweets.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+                let delete_sql = format!("DELETE FROM fts_tweets WHERE tweet_id IN ({placeholders})");
+                let mut delete_stmt = tx.prepare(&delete_sql)?;
+                delete_stmt.execute(rusqlite::params_from_iter(tweets.iter().map(|t| &t.id)))?;
+            }
+
             let mut stmt = tx.prepare(
                 r"
                 INSERT OR REPLACE INTO tweets
@@ -282,9 +291,6 @@ impl Storage {
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ",
             )?;
-
-            // FTS5 doesn't support INSERT OR REPLACE, so we must delete first to avoid duplicates
-            let mut fts_delete_stmt = tx.prepare("DELETE FROM fts_tweets WHERE tweet_id = ?")?;
             let mut fts_stmt =
                 tx.prepare("INSERT INTO fts_tweets (tweet_id, full_text) VALUES (?, ?)")?;
 
@@ -306,7 +312,6 @@ impl Storage {
                     serde_json::to_string(&tweet.urls)?,
                     serde_json::to_string(&tweet.media)?,
                 ])?;
-                fts_delete_stmt.execute(params![&tweet.id])?;
                 fts_stmt.execute(params![&tweet.id, &tweet.full_text])?;
                 count += 1;
             }
@@ -327,18 +332,24 @@ impl Storage {
         let mut count = 0;
 
         {
+            // FTS5 batch delete for likes with text
+            let likes_with_text: Vec<_> = likes.iter().filter(|l| l.full_text.is_some()).collect();
+            if !likes_with_text.is_empty() {
+                let placeholders: String = likes_with_text.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+                let delete_sql = format!("DELETE FROM fts_likes WHERE tweet_id IN ({placeholders})");
+                let mut delete_stmt = tx.prepare(&delete_sql)?;
+                delete_stmt.execute(rusqlite::params_from_iter(likes_with_text.iter().map(|l| &l.tweet_id)))?;
+            }
+
             let mut stmt = tx.prepare(
                 "INSERT OR REPLACE INTO likes (tweet_id, full_text, expanded_url) VALUES (?, ?, ?)",
             )?;
-            // FTS5 doesn't support INSERT OR REPLACE, so we must delete first to avoid duplicates
-            let mut fts_delete_stmt = tx.prepare("DELETE FROM fts_likes WHERE tweet_id = ?")?;
             let mut fts_stmt =
                 tx.prepare("INSERT INTO fts_likes (tweet_id, full_text) VALUES (?, ?)")?;
 
             for like in likes {
                 stmt.execute(params![like.tweet_id, like.full_text, like.expanded_url])?;
                 if let Some(text) = &like.full_text {
-                    fts_delete_stmt.execute(params![&like.tweet_id])?;
                     fts_stmt.execute(params![&like.tweet_id, text])?;
                 }
                 count += 1;
@@ -360,6 +371,18 @@ impl Storage {
         let mut message_count = 0;
 
         {
+            // Collect all message IDs for batch FTS delete
+            let all_msg_ids: Vec<&str> = conversations
+                .iter()
+                .flat_map(|c| c.messages.iter().map(|m| m.id.as_str()))
+                .collect();
+            if !all_msg_ids.is_empty() {
+                let placeholders: String = all_msg_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+                let delete_sql = format!("DELETE FROM fts_dms WHERE dm_id IN ({placeholders})");
+                let mut delete_stmt = tx.prepare(&delete_sql)?;
+                delete_stmt.execute(rusqlite::params_from_iter(all_msg_ids.iter()))?;
+            }
+
             let mut conv_stmt = tx.prepare(
                 r"
                 INSERT OR REPLACE INTO dm_conversations
@@ -376,8 +399,6 @@ impl Storage {
                 ",
             )?;
 
-            // FTS5 doesn't support INSERT OR REPLACE, so we must delete first to avoid duplicates
-            let mut fts_delete_stmt = tx.prepare("DELETE FROM fts_dms WHERE dm_id = ?")?;
             let mut fts_stmt = tx.prepare("INSERT INTO fts_dms (dm_id, text) VALUES (?, ?)")?;
 
             for conv in conversations {
@@ -412,7 +433,6 @@ impl Storage {
                         serde_json::to_string(&msg.urls)?,
                         serde_json::to_string(&msg.media_urls)?,
                     ])?;
-                    fts_delete_stmt.execute(params![&msg.id])?;
                     fts_stmt.execute(params![&msg.id, &msg.text])?;
                     message_count += 1;
                 }
@@ -535,19 +555,37 @@ impl Storage {
         let mut count = 0;
 
         {
+            // Compute grok_ids for batch FTS delete
+            let grok_ids: Vec<String> = messages
+                .iter()
+                .map(|msg| {
+                    format!(
+                        "{}_{}_{}_{}",
+                        msg.chat_id,
+                        msg.created_at.timestamp(),
+                        msg.created_at.timestamp_subsec_nanos(),
+                        msg.sender
+                    )
+                })
+                .collect();
+
+            if !grok_ids.is_empty() {
+                let placeholders: String = grok_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+                let delete_sql = format!("DELETE FROM fts_grok WHERE grok_id IN ({placeholders})");
+                let mut delete_stmt = tx.prepare(&delete_sql)?;
+                delete_stmt.execute(rusqlite::params_from_iter(grok_ids.iter()))?;
+            }
+
             let mut stmt = tx.prepare(
                 r"
                 INSERT INTO grok_messages (chat_id, message, sender, created_at, grok_mode)
                 VALUES (?, ?, ?, ?, ?)
                 ",
             )?;
-
-            // FTS5 doesn't support INSERT OR REPLACE, so we must delete first to avoid duplicates
-            let mut fts_delete_stmt = tx.prepare("DELETE FROM fts_grok WHERE grok_id = ?")?;
             let mut fts_stmt =
                 tx.prepare("INSERT INTO fts_grok (grok_id, message) VALUES (?, ?)")?;
 
-            for msg in messages {
+            for (msg, grok_id) in messages.iter().zip(grok_ids.iter()) {
                 stmt.execute(params![
                     msg.chat_id,
                     msg.message,
@@ -555,16 +593,7 @@ impl Storage {
                     msg.created_at.to_rfc3339(),
                     msg.grok_mode,
                 ])?;
-                // Use chat_id + timestamp_nanos + sender for better uniqueness
-                let grok_id = format!(
-                    "{}_{}_{}_{}",
-                    msg.chat_id,
-                    msg.created_at.timestamp(),
-                    msg.created_at.timestamp_subsec_nanos(),
-                    msg.sender
-                );
-                fts_delete_stmt.execute(params![&grok_id])?;
-                fts_stmt.execute(params![&grok_id, &msg.message])?;
+                fts_stmt.execute(params![grok_id, &msg.message])?;
                 count += 1;
             }
         }
