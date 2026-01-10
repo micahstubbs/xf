@@ -49,7 +49,8 @@ proptest-regressions/
 junit.xml
 
 # Beads
-.beads/
+.beads/*
+!.beads/issues.jsonl
 .bv/
 
 # AI tool history
