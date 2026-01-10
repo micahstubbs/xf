@@ -2,20 +2,18 @@
 //!
 //! Provides ultra-fast search with BM25 ranking, prefix matching, and phrase queries.
 
-use crate::model::{
-    DirectMessage, DmConversation, GrokMessage, Like, SearchResult, SearchResultType, Tweet,
-};
+use crate::model::{DmConversation, GrokMessage, Like, SearchResult, SearchResultType, Tweet};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use std::path::Path;
 use tantivy::collector::TopDocs;
 use tantivy::query::{BooleanQuery, Occur, Query, QueryParser, TermQuery};
 use tantivy::schema::{
-    Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, Value, FAST, INDEXED,
-    STORED, STRING,
+    FAST, Field, INDEXED, IndexRecordOption, STORED, STRING, Schema, TextFieldIndexing,
+    TextOptions, Value,
 };
 use tantivy::snippet::SnippetGenerator;
-use tantivy::{doc, Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument, Term};
+use tantivy::{Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument, Term, doc};
 use tracing::info;
 
 /// Schema field names
@@ -75,12 +73,11 @@ fn build_schema() -> Schema {
     schema_builder.add_text_field(FIELD_TEXT, text_options);
 
     // Prefix text field - for edge n-gram style prefix matching
-    let prefix_options = TextOptions::default()
-        .set_indexing_options(
-            TextFieldIndexing::default()
-                .set_tokenizer("raw")
-                .set_index_option(IndexRecordOption::Basic),
-        );
+    let prefix_options = TextOptions::default().set_indexing_options(
+        TextFieldIndexing::default()
+            .set_tokenizer("raw")
+            .set_index_option(IndexRecordOption::Basic),
+    );
     schema_builder.add_text_field(FIELD_TEXT_PREFIX, prefix_options);
 
     // Document type - exact match only
@@ -134,7 +131,11 @@ impl SearchEngine {
         })
     }
 
-    /// Create an in-memory index (for testing)
+    /// Create an in-memory index (for testing).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the in-memory index cannot be created.
     pub fn open_memory() -> Result<Self> {
         let schema = build_schema();
         let index = Index::create_in_ram(schema.clone());
@@ -151,14 +152,22 @@ impl SearchEngine {
         })
     }
 
-    /// Get a writer for indexing
+    /// Get a writer for indexing.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the writer cannot be created.
     pub fn writer(&self, heap_size: usize) -> Result<IndexWriter> {
         self.index
             .writer(heap_size)
             .context("Failed to create index writer")
     }
 
-    /// Reload the reader to see committed changes
+    /// Reload the reader to see committed changes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the reader cannot be reloaded.
     pub fn reload(&self) -> Result<()> {
         self.reader.reload()?;
         Ok(())
@@ -176,7 +185,11 @@ impl SearchEngine {
         )
     }
 
-    /// Index tweets
+    /// Index tweets.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any document cannot be added to the index.
     pub fn index_tweets(&self, writer: &mut IndexWriter, tweets: &[Tweet]) -> Result<usize> {
         let (id_field, text_field, prefix_field, type_field, created_at_field, metadata_field) =
             self.get_fields();
@@ -209,7 +222,11 @@ impl SearchEngine {
         Ok(count)
     }
 
-    /// Index likes
+    /// Index likes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any document cannot be added to the index.
     pub fn index_likes(&self, writer: &mut IndexWriter, likes: &[Like]) -> Result<usize> {
         let (id_field, text_field, prefix_field, type_field, created_at_field, metadata_field) =
             self.get_fields();
@@ -239,8 +256,16 @@ impl SearchEngine {
         Ok(count)
     }
 
-    /// Index direct messages
-    pub fn index_dms(&self, writer: &mut IndexWriter, conversations: &[DmConversation]) -> Result<usize> {
+    /// Index direct messages.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any document cannot be added to the index.
+    pub fn index_dms(
+        &self,
+        writer: &mut IndexWriter,
+        conversations: &[DmConversation],
+    ) -> Result<usize> {
         let (id_field, text_field, prefix_field, type_field, created_at_field, metadata_field) =
             self.get_fields();
 
@@ -271,8 +296,16 @@ impl SearchEngine {
         Ok(count)
     }
 
-    /// Index Grok messages
-    pub fn index_grok_messages(&self, writer: &mut IndexWriter, messages: &[GrokMessage]) -> Result<usize> {
+    /// Index Grok messages.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any document cannot be added to the index.
+    pub fn index_grok_messages(
+        &self,
+        writer: &mut IndexWriter,
+        messages: &[GrokMessage],
+    ) -> Result<usize> {
         let (id_field, text_field, prefix_field, type_field, created_at_field, metadata_field) =
             self.get_fields();
 
@@ -304,23 +337,29 @@ impl SearchEngine {
         Ok(count)
     }
 
-    /// Search the index
+    /// Search the index.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the query cannot be parsed or the search fails.
     pub fn search(
         &self,
         query_str: &str,
         doc_types: Option<&[DocType]>,
         limit: usize,
     ) -> Result<Vec<SearchResult>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
         let searcher = self.reader.searcher();
-        let (id_field, text_field, _, type_field, created_at_field, metadata_field) = self.get_fields();
-
-        let limit = limit.max(1);
+        let (id_field, text_field, _, type_field, created_at_field, metadata_field) =
+            self.get_fields();
 
         // Build query
         let query_parser = QueryParser::for_index(&self.index, vec![text_field]);
-        let base_query = query_parser.parse_query(query_str).map_err(|e| {
-            anyhow::anyhow!("Invalid search query: {e}")
-        })?;
+        let base_query = query_parser
+            .parse_query(query_str)
+            .map_err(|e| anyhow::anyhow!("Invalid search query: {e}"))?;
 
         // Apply type filter if specified
         let query: Box<dyn Query> = if let Some(types) = doc_types {
@@ -386,7 +425,6 @@ impl SearchEngine {
                 .unwrap_or("{}");
 
             let result_type = match doc_type_str {
-                "tweet" => SearchResultType::Tweet,
                 "like" => SearchResultType::Like,
                 "dm" => SearchResultType::DirectMessage,
                 "grok" => SearchResultType::GrokMessage,
@@ -407,8 +445,7 @@ impl SearchEngine {
                 result_type,
                 id,
                 text,
-                created_at: DateTime::from_timestamp(created_at_ts, 0)
-                    .unwrap_or_else(Utc::now),
+                created_at: DateTime::from_timestamp(created_at_ts, 0).unwrap_or_else(Utc::now),
                 score,
                 highlights,
                 metadata: serde_json::from_str(metadata_str).unwrap_or_default(),
@@ -418,12 +455,17 @@ impl SearchEngine {
         Ok(results)
     }
 
-    /// Get document count
+    /// Get document count.
+    #[must_use]
     pub fn doc_count(&self) -> u64 {
         self.reader.searcher().num_docs()
     }
 
-    /// Delete all documents and reset the index
+    /// Delete all documents and reset the index.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the index cannot be cleared or committed.
     pub fn clear(&self) -> Result<()> {
         let mut writer = self.writer(50_000_000)?;
         writer.delete_all_documents()?;
@@ -458,6 +500,7 @@ fn generate_prefixes(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::DirectMessage;
 
     fn create_test_tweet(id: &str, text: &str) -> Tweet {
         Tweet {
@@ -516,9 +559,9 @@ mod tests {
         // Words shorter than 2 chars should be skipped
         let text = "a b c hello";
         let prefixes = generate_prefixes(text);
-        assert!(!prefixes.contains("a"));
-        assert!(!prefixes.contains("b"));
-        assert!(!prefixes.contains("c"));
+        assert!(!prefixes.contains('a'));
+        assert!(!prefixes.contains('b'));
+        assert!(!prefixes.contains('c'));
         assert!(prefixes.contains("he"));
     }
 
@@ -638,7 +681,7 @@ mod tests {
         let mut writer = engine.writer(15_000_000).unwrap();
 
         let tweets: Vec<Tweet> = (0..10)
-            .map(|i| create_test_tweet(&format!("{}", i), "common search term"))
+            .map(|i| create_test_tweet(&format!("{i}"), "common search term"))
             .collect();
 
         engine.index_tweets(&mut writer, &tweets).unwrap();
@@ -841,9 +884,15 @@ mod tests {
             .unwrap();
         assert_eq!(results.len(), 2);
 
-        let has_tweet = results.iter().any(|r| r.result_type == SearchResultType::Tweet);
-        let has_like = results.iter().any(|r| r.result_type == SearchResultType::Like);
-        let has_grok = results.iter().any(|r| r.result_type == SearchResultType::GrokMessage);
+        let has_tweet = results
+            .iter()
+            .any(|r| r.result_type == SearchResultType::Tweet);
+        let has_like = results
+            .iter()
+            .any(|r| r.result_type == SearchResultType::Like);
+        let has_grok = results
+            .iter()
+            .any(|r| r.result_type == SearchResultType::GrokMessage);
 
         assert!(has_tweet);
         assert!(has_like);

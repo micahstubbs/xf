@@ -1,26 +1,34 @@
-//! SQLite storage for X archive data.
+//! `SQLite` storage for X archive data.
 //!
 //! Provides persistent storage with optimized schema for fast queries.
 
-use crate::model::*;
+use crate::model::{
+    ArchiveInfo, ArchiveStats, Block, DirectMessage, DmConversation, Follower, Following,
+    GrokMessage, Like, Mute, Tweet,
+};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use std::path::Path;
 use tracing::info;
 
 const SCHEMA_VERSION: i32 = 1;
 
-/// SQLite storage manager
+/// `SQLite` storage manager
 pub struct Storage {
     conn: Connection,
 }
 
 impl Storage {
-    /// Open or create the database at the given path
+    /// Open or create the database at the given path.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database cannot be opened or initialized.
     pub fn open(db_path: impl AsRef<Path>) -> Result<Self> {
-        let conn = Connection::open(db_path.as_ref())
-            .with_context(|| format!("Failed to open database at {}", db_path.as_ref().display()))?;
+        let conn = Connection::open(db_path.as_ref()).with_context(|| {
+            format!("Failed to open database at {}", db_path.as_ref().display())
+        })?;
 
         // Set pragmas for performance
         conn.execute_batch(
@@ -38,7 +46,11 @@ impl Storage {
         Ok(storage)
     }
 
-    /// Open an in-memory database (for testing)
+    /// Open an in-memory database (for testing).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the in-memory database cannot be initialized.
     pub fn open_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch(
@@ -54,7 +66,7 @@ impl Storage {
 
     /// Run database migrations
     fn migrate(&self) -> Result<()> {
-        let current_version = self.get_schema_version()?;
+        let current_version = self.get_schema_version();
 
         if current_version < SCHEMA_VERSION {
             info!(
@@ -68,18 +80,18 @@ impl Storage {
         Ok(())
     }
 
-    fn get_schema_version(&self) -> Result<i32> {
-        let result: Result<i32, _> =
-            self.conn
-                .query_row("SELECT value FROM meta WHERE key = 'schema_version'", [], |row| {
-                    let value: String = row.get(0)?;
-                    Ok(value.parse().unwrap_or(0))
-                });
+    fn get_schema_version(&self) -> i32 {
+        let result: Result<i32, _> = self.conn.query_row(
+            "SELECT value FROM meta WHERE key = 'schema_version'",
+            [],
+            |row| {
+                let value: String = row.get(0)?;
+                Ok(value.parse().unwrap_or(0))
+            },
+        );
 
-        match result {
-            Ok(v) => Ok(v),
-            Err(_) => Ok(0), // Table doesn't exist yet
-        }
+        // Treat missing schema table as version 0.
+        result.unwrap_or_default()
     }
 
     fn set_schema_version(&self, version: i32) -> Result<()> {
@@ -90,6 +102,7 @@ impl Storage {
         Ok(())
     }
 
+    #[allow(clippy::too_many_lines)]
     fn create_schema(&self) -> Result<()> {
         self.conn.execute_batch(
             r"
@@ -225,7 +238,11 @@ impl Storage {
         Ok(())
     }
 
-    /// Store archive info
+    /// Store archive info.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database insert fails.
     pub fn store_archive_info(&self, info: &ArchiveInfo) -> Result<()> {
         self.conn.execute(
             r"
@@ -239,14 +256,18 @@ impl Storage {
                 info.display_name,
                 info.archive_size_bytes,
                 info.generation_date.to_rfc3339(),
-                info.is_partial as i32,
+                i32::from(info.is_partial),
                 Utc::now().to_rfc3339(),
             ],
         )?;
         Ok(())
     }
 
-    /// Store tweets in a transaction
+    /// Store tweets in a transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any tweet insert fails.
     pub fn store_tweets(&mut self, tweets: &[Tweet]) -> Result<usize> {
         let tx = self.conn.transaction()?;
         let mut count = 0;
@@ -262,9 +283,8 @@ impl Storage {
                 ",
             )?;
 
-            let mut fts_stmt = tx.prepare(
-                "INSERT OR REPLACE INTO fts_tweets (tweet_id, full_text) VALUES (?, ?)",
-            )?;
+            let mut fts_stmt = tx
+                .prepare("INSERT OR REPLACE INTO fts_tweets (tweet_id, full_text) VALUES (?, ?)")?;
 
             for tweet in tweets {
                 stmt.execute(params![
@@ -278,7 +298,7 @@ impl Storage {
                     tweet.in_reply_to_status_id,
                     tweet.in_reply_to_user_id,
                     tweet.in_reply_to_screen_name,
-                    tweet.is_retweet as i32,
+                    i32::from(tweet.is_retweet),
                     serde_json::to_string(&tweet.hashtags)?,
                     serde_json::to_string(&tweet.user_mentions)?,
                     serde_json::to_string(&tweet.urls)?,
@@ -294,7 +314,11 @@ impl Storage {
         Ok(count)
     }
 
-    /// Store likes in a transaction
+    /// Store likes in a transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any like insert fails.
     pub fn store_likes(&mut self, likes: &[Like]) -> Result<usize> {
         let tx = self.conn.transaction()?;
         let mut count = 0;
@@ -303,9 +327,8 @@ impl Storage {
             let mut stmt = tx.prepare(
                 "INSERT OR REPLACE INTO likes (tweet_id, full_text, expanded_url) VALUES (?, ?, ?)",
             )?;
-            let mut fts_stmt = tx.prepare(
-                "INSERT OR REPLACE INTO fts_likes (tweet_id, full_text) VALUES (?, ?)",
-            )?;
+            let mut fts_stmt =
+                tx.prepare("INSERT OR REPLACE INTO fts_likes (tweet_id, full_text) VALUES (?, ?)")?;
 
             for like in likes {
                 stmt.execute(params![like.tweet_id, like.full_text, like.expanded_url])?;
@@ -321,7 +344,11 @@ impl Storage {
         Ok(count)
     }
 
-    /// Store DM conversations and messages
+    /// Store DM conversations and messages.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any conversation or message insert fails.
     pub fn store_dm_conversations(&mut self, conversations: &[DmConversation]) -> Result<usize> {
         let tx = self.conn.transaction()?;
         let mut message_count = 0;
@@ -343,9 +370,8 @@ impl Storage {
                 ",
             )?;
 
-            let mut fts_stmt = tx.prepare(
-                "INSERT OR REPLACE INTO fts_dms (dm_id, text) VALUES (?, ?)",
-            )?;
+            let mut fts_stmt =
+                tx.prepare("INSERT OR REPLACE INTO fts_dms (dm_id, text) VALUES (?, ?)")?;
 
             for conv in conversations {
                 // Get participant IDs and date range
@@ -354,7 +380,7 @@ impl Storage {
                     .iter()
                     .flat_map(|m| vec![m.sender_id.as_str(), m.recipient_id.as_str()])
                     .collect();
-                participant_ids.sort();
+                participant_ids.sort_unstable();
                 participant_ids.dedup();
 
                 let first_msg = conv.messages.iter().min_by_key(|m| m.created_at);
@@ -363,7 +389,7 @@ impl Storage {
                 conv_stmt.execute(params![
                     conv.conversation_id,
                     participant_ids.join(","),
-                    conv.messages.len() as i64,
+                    i64::try_from(conv.messages.len()).unwrap_or(i64::MAX),
                     first_msg.map(|m| m.created_at.to_rfc3339()),
                     last_msg.map(|m| m.created_at.to_rfc3339()),
                 ])?;
@@ -393,7 +419,11 @@ impl Storage {
         Ok(message_count)
     }
 
-    /// Store followers
+    /// Store followers.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any follower insert fails.
     pub fn store_followers(&mut self, followers: &[Follower]) -> Result<usize> {
         let tx = self.conn.transaction()?;
         let mut count = 0;
@@ -414,7 +444,11 @@ impl Storage {
         Ok(count)
     }
 
-    /// Store following
+    /// Store following.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any following insert fails.
     pub fn store_following(&mut self, following: &[Following]) -> Result<usize> {
         let tx = self.conn.transaction()?;
         let mut count = 0;
@@ -435,7 +469,11 @@ impl Storage {
         Ok(count)
     }
 
-    /// Store blocks
+    /// Store blocks.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any block insert fails.
     pub fn store_blocks(&mut self, blocks: &[Block]) -> Result<usize> {
         let tx = self.conn.transaction()?;
         let mut count = 0;
@@ -455,7 +493,11 @@ impl Storage {
         Ok(count)
     }
 
-    /// Store mutes
+    /// Store mutes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any mute insert fails.
     pub fn store_mutes(&mut self, mutes: &[Mute]) -> Result<usize> {
         let tx = self.conn.transaction()?;
         let mut count = 0;
@@ -475,7 +517,11 @@ impl Storage {
         Ok(count)
     }
 
-    /// Store Grok messages
+    /// Store Grok messages.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any Grok message insert fails.
     pub fn store_grok_messages(&mut self, messages: &[GrokMessage]) -> Result<usize> {
         let tx = self.conn.transaction()?;
         let mut count = 0;
@@ -488,9 +534,8 @@ impl Storage {
                 ",
             )?;
 
-            let mut fts_stmt = tx.prepare(
-                "INSERT INTO fts_grok (grok_id, message) VALUES (?, ?)",
-            )?;
+            let mut fts_stmt =
+                tx.prepare("INSERT INTO fts_grok (grok_id, message) VALUES (?, ?)")?;
 
             for msg in messages {
                 stmt.execute(params![
@@ -512,7 +557,11 @@ impl Storage {
         Ok(count)
     }
 
-    /// Get archive statistics
+    /// Get archive statistics.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if statistics queries fail.
     pub fn get_stats(&self) -> Result<ArchiveStats> {
         let tweets_count: i64 = self
             .conn
@@ -522,23 +571,23 @@ impl Storage {
             .conn
             .query_row("SELECT COUNT(*) FROM likes", [], |row| row.get(0))?;
 
-        let dms_count: i64 = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM direct_messages", [], |row| row.get(0))?;
+        let dms_count: i64 =
+            self.conn
+                .query_row("SELECT COUNT(*) FROM direct_messages", [], |row| row.get(0))?;
 
-        let dm_conversations_count: i64 = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM dm_conversations", [], |row| {
-                row.get(0)
-            })?;
+        let dm_conversations_count: i64 =
+            self.conn
+                .query_row("SELECT COUNT(*) FROM dm_conversations", [], |row| {
+                    row.get(0)
+                })?;
 
-        let followers_count: i64 = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM followers", [], |row| row.get(0))?;
+        let followers_count: i64 =
+            self.conn
+                .query_row("SELECT COUNT(*) FROM followers", [], |row| row.get(0))?;
 
-        let following_count: i64 = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM following", [], |row| row.get(0))?;
+        let following_count: i64 =
+            self.conn
+                .query_row("SELECT COUNT(*) FROM following", [], |row| row.get(0))?;
 
         let blocks_count: i64 = self
             .conn
@@ -548,26 +597,18 @@ impl Storage {
             .conn
             .query_row("SELECT COUNT(*) FROM mutes", [], |row| row.get(0))?;
 
-        let grok_messages_count: i64 = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM grok_messages", [], |row| row.get(0))?;
+        let grok_messages_count: i64 =
+            self.conn
+                .query_row("SELECT COUNT(*) FROM grok_messages", [], |row| row.get(0))?;
 
         let first_tweet_date: Option<String> = self
             .conn
-            .query_row(
-                "SELECT MIN(created_at) FROM tweets",
-                [],
-                |row| row.get(0),
-            )
+            .query_row("SELECT MIN(created_at) FROM tweets", [], |row| row.get(0))
             .ok();
 
         let last_tweet_date: Option<String> = self
             .conn
-            .query_row(
-                "SELECT MAX(created_at) FROM tweets",
-                [],
-                |row| row.get(0),
-            )
+            .query_row("SELECT MAX(created_at) FROM tweets", [], |row| row.get(0))
             .ok();
 
         Ok(ArchiveStats {
@@ -590,8 +631,13 @@ impl Storage {
         })
     }
 
-    /// Search tweets using FTS5
+    /// Search tweets using FTS5.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database query fails.
     pub fn search_tweets(&self, query: &str, limit: usize) -> Result<Vec<Tweet>> {
+        let limit = limit_to_i64(limit);
         let mut stmt = self.conn.prepare(
             r"
             SELECT t.id, t.created_at, t.full_text, t.source, t.favorite_count, t.retweet_count,
@@ -606,15 +652,14 @@ impl Storage {
         )?;
 
         let tweets = stmt
-            .query_map(params![query, limit as i64], |row| {
+            .query_map(params![query, limit], |row| {
                 Ok(Tweet {
                     id: row.get(0)?,
                     created_at: row
                         .get::<_, String>(1)
                         .ok()
                         .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
-                        .map(|dt| dt.with_timezone(&Utc))
-                        .unwrap_or_else(Utc::now),
+                        .map_or_else(Utc::now, |dt| dt.with_timezone(&Utc)),
                     full_text: row.get(2)?,
                     source: row.get(3)?,
                     favorite_count: row.get(4)?,
@@ -637,8 +682,13 @@ impl Storage {
         Ok(tweets)
     }
 
-    /// Search likes using FTS5
+    /// Search likes using FTS5.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database query fails.
     pub fn search_likes(&self, query: &str, limit: usize) -> Result<Vec<Like>> {
+        let limit = limit_to_i64(limit);
         let mut stmt = self.conn.prepare(
             r"
             SELECT l.tweet_id, l.full_text, l.expanded_url
@@ -651,7 +701,7 @@ impl Storage {
         )?;
 
         let likes = stmt
-            .query_map(params![query, limit as i64], |row| {
+            .query_map(params![query, limit], |row| {
                 Ok(Like {
                     tweet_id: row.get(0)?,
                     full_text: row.get(1)?,
@@ -664,8 +714,13 @@ impl Storage {
         Ok(likes)
     }
 
-    /// Search DMs using FTS5
+    /// Search DMs using FTS5.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database query fails.
     pub fn search_dms(&self, query: &str, limit: usize) -> Result<Vec<DirectMessage>> {
+        let limit = limit_to_i64(limit);
         let mut stmt = self.conn.prepare(
             r"
             SELECT dm.id, dm.conversation_id, dm.sender_id, dm.recipient_id, dm.text,
@@ -679,7 +734,7 @@ impl Storage {
         )?;
 
         let dms = stmt
-            .query_map(params![query, limit as i64], |row| {
+            .query_map(params![query, limit], |row| {
                 Ok(DirectMessage {
                     id: row.get(0)?,
                     sender_id: row.get(2)?,
@@ -689,8 +744,7 @@ impl Storage {
                         .get::<_, String>(5)
                         .ok()
                         .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
-                        .map(|dt| dt.with_timezone(&Utc))
-                        .unwrap_or_else(Utc::now),
+                        .map_or_else(Utc::now, |dt| dt.with_timezone(&Utc)),
                     urls: serde_json::from_str(&row.get::<_, String>(6)?).unwrap_or_default(),
                     media_urls: serde_json::from_str(&row.get::<_, String>(7)?).unwrap_or_default(),
                 })
@@ -701,8 +755,13 @@ impl Storage {
         Ok(dms)
     }
 
-    /// Search Grok messages using FTS5
+    /// Search Grok messages using FTS5.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database query fails.
     pub fn search_grok(&self, query: &str, limit: usize) -> Result<Vec<GrokMessage>> {
+        let limit = limit_to_i64(limit);
         let mut stmt = self.conn.prepare(
             r"
             SELECT g.chat_id, g.message, g.sender, g.created_at, g.grok_mode
@@ -715,7 +774,7 @@ impl Storage {
         )?;
 
         let messages = stmt
-            .query_map(params![query, limit as i64], |row| {
+            .query_map(params![query, limit], |row| {
                 Ok(GrokMessage {
                     chat_id: row.get(0)?,
                     message: row.get(1)?,
@@ -724,8 +783,7 @@ impl Storage {
                         .get::<_, String>(3)
                         .ok()
                         .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
-                        .map(|dt| dt.with_timezone(&Utc))
-                        .unwrap_or_else(Utc::now),
+                        .map_or_else(Utc::now, |dt| dt.with_timezone(&Utc)),
                     grok_mode: row.get(4)?,
                 })
             })?
@@ -735,7 +793,11 @@ impl Storage {
         Ok(messages)
     }
 
-    /// Get a tweet by ID
+    /// Get a tweet by ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database query fails.
     pub fn get_tweet(&self, id: &str) -> Result<Option<Tweet>> {
         let result = self.conn.query_row(
             r"
@@ -752,8 +814,7 @@ impl Storage {
                         .get::<_, String>(1)
                         .ok()
                         .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
-                        .map(|dt| dt.with_timezone(&Utc))
-                        .unwrap_or_else(Utc::now),
+                        .map_or_else(Utc::now, |dt| dt.with_timezone(&Utc)),
                     full_text: row.get(2)?,
                     source: row.get(3)?,
                     favorite_count: row.get(4)?,
@@ -812,8 +873,7 @@ impl Storage {
                         .get::<_, String>(1)
                         .ok()
                         .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
-                        .map(|dt| dt.with_timezone(&Utc))
-                        .unwrap_or_else(Utc::now),
+                        .map_or_else(Utc::now, |dt| dt.with_timezone(&Utc)),
                     full_text: row.get(2)?,
                     source: row.get(3)?,
                     favorite_count: row.get(4)?,
@@ -896,8 +956,7 @@ impl Storage {
                         .get::<_, String>(5)
                         .ok()
                         .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
-                        .map(|dt| dt.with_timezone(&Utc))
-                        .unwrap_or_else(Utc::now),
+                        .map_or_else(Utc::now, |dt| dt.with_timezone(&Utc)),
                     urls: serde_json::from_str(&row.get::<_, String>(6)?).unwrap_or_default(),
                     media_urls: serde_json::from_str(&row.get::<_, String>(7)?).unwrap_or_default(),
                 })
@@ -957,6 +1016,10 @@ impl Storage {
 
         Ok(following)
     }
+}
+
+fn limit_to_i64(limit: usize) -> i64 {
+    i64::try_from(limit).unwrap_or(i64::MAX)
 }
 
 #[cfg(test)]
@@ -1177,12 +1240,10 @@ mod tests {
     fn test_store_following() {
         let mut storage = Storage::open_memory().unwrap();
 
-        let following = vec![
-            Following {
-                account_id: "789".to_string(),
-                user_link: Some("https://x.com/user789".to_string()),
-            },
-        ];
+        let following = vec![Following {
+            account_id: "789".to_string(),
+            user_link: Some("https://x.com/user789".to_string()),
+        }];
 
         let count = storage.store_following(&following).unwrap();
         assert_eq!(count, 1);
@@ -1195,12 +1256,10 @@ mod tests {
     fn test_store_blocks() {
         let mut storage = Storage::open_memory().unwrap();
 
-        let blocks = vec![
-            Block {
-                account_id: "blocked1".to_string(),
-                user_link: None,
-            },
-        ];
+        let blocks = vec![Block {
+            account_id: "blocked1".to_string(),
+            user_link: None,
+        }];
 
         let count = storage.store_blocks(&blocks).unwrap();
         assert_eq!(count, 1);
@@ -1446,7 +1505,7 @@ mod tests {
     #[test]
     fn test_schema_version() {
         let storage = Storage::open_memory().unwrap();
-        let version = storage.get_schema_version().unwrap();
+        let version = storage.get_schema_version();
         assert_eq!(version, SCHEMA_VERSION);
     }
 }
