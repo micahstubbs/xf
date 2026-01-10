@@ -860,13 +860,16 @@ fn cmd_list(cli: &Cli, args: &cli::ListArgs) -> Result<()> {
     Ok(())
 }
 
-/// Truncate text to a maximum length, adding ellipsis if needed
+/// Truncate text to a maximum length, adding ellipsis if needed.
+/// Uses character count, not byte count, to properly handle UTF-8.
 fn truncate_text(text: &str, max_len: usize) -> String {
     let text = text.replace('\n', " ").replace('\r', "");
-    if text.len() <= max_len {
+    let char_count = text.chars().count();
+    if char_count <= max_len {
         text
     } else {
-        format!("{}...", &text[..max_len - 3])
+        let truncated: String = text.chars().take(max_len.saturating_sub(3)).collect();
+        format!("{truncated}...")
     }
 }
 
