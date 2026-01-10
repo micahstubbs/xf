@@ -5,12 +5,11 @@
 
 use crate::model::*;
 use anyhow::{Context, Result};
-use chrono::{DateTime, TimeZone, Utc};
+use chrono::{DateTime, Utc};
 use rayon::prelude::*;
 use serde_json::Value;
-use std::collections::HashMap;
 use std::path::Path;
-use tracing::{debug, info, warn};
+use tracing::info;
 use walkdir::WalkDir;
 
 /// Parser for X archive data

@@ -2,15 +2,14 @@
 //!
 //! Main entry point for the xf command-line tool.
 
-use anyhow::{Context, Result};
-use chrono::Utc;
+use anyhow::Result;
 use clap::{CommandFactory, Parser};
 use clap_complete::generate;
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
-use std::io::{self, Write};
+use std::io;
 use std::path::PathBuf;
-use tracing::{debug, error, info, warn, Level};
+use tracing::{info, Level};
 use tracing_subscriber::EnvFilter;
 
 use xf::*;

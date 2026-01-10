@@ -1,17 +1,16 @@
-//! Tantivy-based full-text search engine for Twitter/X data.
+//! Tantivy-based full-text search engine for X data.
 //!
 //! Provides ultra-fast search with BM25 ranking, prefix matching, and phrase queries.
 
 use crate::model::*;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use once_cell::sync::Lazy;
 use std::path::Path;
 use tantivy::collector::TopDocs;
-use tantivy::query::{BooleanQuery, FuzzyTermQuery, Occur, PhraseQuery, Query, QueryParser, TermQuery};
+use tantivy::query::{BooleanQuery, Occur, Query, QueryParser, TermQuery};
 use tantivy::schema::*;
 use tantivy::{doc, Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument};
-use tracing::{debug, info, warn};
+use tracing::info;
 
 /// Schema field names
 const FIELD_ID: &str = "id";

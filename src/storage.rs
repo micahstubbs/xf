@@ -1,13 +1,13 @@
-//! SQLite storage for Twitter/X archive data.
+//! SQLite storage for X archive data.
 //!
 //! Provides persistent storage with optimized schema for fast queries.
 
 use crate::model::*;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection, Transaction};
+use rusqlite::{params, Connection};
 use std::path::Path;
-use tracing::{debug, info};
+use tracing::info;
 
 const SCHEMA_VERSION: i32 = 1;
 
