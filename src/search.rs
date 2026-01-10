@@ -39,6 +39,7 @@ impl DocType {
         }
     }
 
+    #[allow(dead_code)]
     fn from_str(s: &str) -> Option<Self> {
         match s {
             "tweet" => Some(Self::Tweet),

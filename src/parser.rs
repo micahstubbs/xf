@@ -474,6 +474,7 @@ impl ArchiveParser {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Datelike;
 
     #[test]
     fn test_parse_x_date() {

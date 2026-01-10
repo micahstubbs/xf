@@ -239,7 +239,7 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
     }
 
     let search_engine = SearchEngine::open(&index_path)?;
-    let storage = Storage::open(&db_path)?;
+    let _storage = Storage::open(&db_path)?;
 
     // Convert data types to search doc types
     let doc_types: Option<Vec<search::DocType>> = args.types.as_ref().map(|types| {
@@ -356,7 +356,7 @@ fn truncate(s: &str, max_len: usize) -> String {
     }
 }
 
-fn cmd_stats(cli: &Cli, args: &cli::StatsArgs) -> Result<()> {
+fn cmd_stats(cli: &Cli, _args: &cli::StatsArgs) -> Result<()> {
     let db_path = get_db_path(cli);
 
     if !db_path.exists() {
@@ -498,7 +498,7 @@ fn cmd_list(cli: &Cli, args: &cli::ListArgs) -> Result<()> {
     Ok(())
 }
 
-fn cmd_export(cli: &Cli, args: &cli::ExportArgs) -> Result<()> {
+fn cmd_export(_cli: &Cli, _args: &cli::ExportArgs) -> Result<()> {
     println!("{}", "Export command not fully implemented yet.".yellow());
     Ok(())
 }
