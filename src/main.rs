@@ -2,17 +2,25 @@
 //!
 //! Main entry point for the xf command-line tool.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use chrono::{DateTime, NaiveDate, Utc};
 use clap::{CommandFactory, Parser};
 use clap_complete::generate;
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
+use rayon::ThreadPoolBuilder;
 use std::io;
 use std::path::PathBuf;
-use tracing::{info, Level};
+use tracing::{Level, info};
 use tracing_subscriber::EnvFilter;
 
-use xf::*;
+use xf::cli;
+use xf::search;
+use xf::{
+    ArchiveParser, Cli, Commands, DataType, ExportFormat, ExportTarget, ListTarget, OutputFormat,
+    SearchEngine, SearchResult, SearchResultType, SortOrder, Storage, default_db_path,
+    default_index_path,
+};
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -27,10 +35,7 @@ fn main() -> Result<()> {
     };
 
     tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::from_default_env()
-                .add_directive(log_level.into())
-        )
+        .with_env_filter(EnvFilter::from_default_env().add_directive(log_level.into()))
         .with_target(false)
         .without_time()
         .init();
@@ -43,9 +48,18 @@ fn main() -> Result<()> {
         Commands::Tweet(args) => cmd_tweet(&cli, args),
         Commands::List(args) => cmd_list(&cli, args),
         Commands::Export(args) => cmd_export(&cli, args),
-        Commands::Config(args) => cmd_config(&cli, args),
-        Commands::Update => cmd_update(),
-        Commands::Completions(args) => cmd_completions(args.clone()),
+        Commands::Config(args) => {
+            cmd_config(&cli, args);
+            Ok(())
+        }
+        Commands::Update => {
+            cmd_update();
+            Ok(())
+        }
+        Commands::Completions(args) => {
+            cmd_completions(args);
+            Ok(())
+        }
     }
 }
 
@@ -57,6 +71,7 @@ fn get_index_path(cli: &Cli) -> PathBuf {
     cli.index.clone().unwrap_or_else(default_index_path)
 }
 
+#[allow(clippy::too_many_lines)]
 fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
     let archive_path = &args.archive_path;
 
@@ -71,6 +86,13 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
             "Invalid archive: no 'data' directory found at {}",
             archive_path.display()
         );
+    }
+
+    if args.jobs > 0 {
+        ThreadPoolBuilder::new()
+            .num_threads(args.jobs)
+            .build_global()
+            .context("Failed to configure rayon thread pool")?;
     }
 
     // Setup database and index paths
@@ -120,16 +142,17 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
     );
 
     // Determine what to index
-    let data_types = if let Some(only) = &args.only {
-        only.clone()
-    } else if let Some(skip) = &args.skip {
-        DataType::all()
-            .into_iter()
-            .filter(|t| !skip.contains(t))
-            .collect()
-    } else {
-        DataType::all()
-    };
+    let data_types = args.only.as_ref().map_or_else(
+        || {
+            args.skip.as_ref().map_or_else(DataType::all, |skip| {
+                DataType::all()
+                    .into_iter()
+                    .filter(|t| !skip.contains(t))
+                    .collect()
+            })
+        },
+        Clone::clone,
+    );
 
     // Progress bar
     let pb = ProgressBar::new(data_types.len() as u64);
@@ -175,7 +198,11 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
                 let messages = parser.parse_grok_messages()?;
                 storage.store_grok_messages(&messages)?;
                 search_engine.index_grok_messages(&mut writer, &messages)?;
-                pb.println(format!("  {} {} Grok messages", "✓".green(), messages.len()));
+                pb.println(format!(
+                    "  {} {} Grok messages",
+                    "✓".green(),
+                    messages.len()
+                ));
             }
             DataType::Follower => {
                 pb.set_message("Indexing followers...");
@@ -226,6 +253,7 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
     let db_path = get_db_path(cli);
     let index_path = get_index_path(cli);
@@ -246,6 +274,21 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
         );
     }
 
+    if args.replies_only && args.no_replies {
+        anyhow::bail!("Cannot use --replies-only and --no-replies together.");
+    }
+
+    if args.context {
+        anyhow::bail!("DM context output is not implemented yet.");
+    }
+
+    if let Some(fields) = &args.fields {
+        if !matches!(cli.format, OutputFormat::Json | OutputFormat::JsonPretty) {
+            anyhow::bail!("--fields is only supported with --format json or json-pretty.");
+        }
+        validate_output_fields(fields)?;
+    }
+
     let search_engine = SearchEngine::open(&index_path)?;
     let _storage = Storage::open(&db_path)?;
 
@@ -263,14 +306,22 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
             .collect()
     });
 
-    let results = search_engine.search(
+    let mut results = search_engine.search(
         &args.query,
         doc_types.as_deref(),
         args.limit.saturating_add(args.offset),
     )?;
 
+    apply_search_filters(&mut results, args)?;
+    apply_search_sort(&mut results, &args.sort);
+
     // Apply offset
-    let results: Vec<_> = results.into_iter().skip(args.offset).collect();
+    let mut results: Vec<_> = results.into_iter().skip(args.offset).collect();
+    if args.limit == 0 {
+        results.clear();
+    } else if results.len() > args.limit {
+        results.truncate(args.limit);
+    }
 
     if results.is_empty() {
         println!("{}", "No results found.".yellow());
@@ -280,10 +331,20 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
     // Output results
     match cli.format {
         OutputFormat::Json => {
-            println!("{}", serde_json::to_string(&results)?);
+            if let Some(fields) = &args.fields {
+                let filtered = filter_results_fields(&results, fields)?;
+                println!("{}", serde_json::to_string(&filtered)?);
+            } else {
+                println!("{}", serde_json::to_string(&results)?);
+            }
         }
         OutputFormat::JsonPretty => {
-            println!("{}", serde_json::to_string_pretty(&results)?);
+            if let Some(fields) = &args.fields {
+                let filtered = filter_results_fields(&results, fields)?;
+                println!("{}", serde_json::to_string_pretty(&filtered)?);
+            } else {
+                println!("{}", serde_json::to_string_pretty(&results)?);
+            }
         }
         OutputFormat::Csv => {
             println!("type,id,created_at,score,text");
@@ -336,24 +397,28 @@ fn print_result(num: usize, result: &SearchResult) {
     );
 
     // Use highlighted text if available, otherwise use plain text
-    let display_text = if !result.highlights.is_empty() {
+    let display_text = if result.highlights.is_empty() {
+        result.text.clone()
+    } else {
         // Convert HTML highlights to ANSI colors
         // Tantivy uses <b> tags for highlighting
         html_highlights_to_ansi(&result.highlights[0])
-    } else {
-        result.text.clone()
     };
 
     // Word wrap the text
     let wrapped = textwrap::wrap(&display_text, 78);
     for line in wrapped {
-        println!("   {}", line);
+        println!("   {line}");
     }
 
     if result.created_at.timestamp() > 0 {
         println!(
             "   {}",
-            result.created_at.format("%Y-%m-%d %H:%M").to_string().dimmed()
+            result
+                .created_at
+                .format("%Y-%m-%d %H:%M")
+                .to_string()
+                .dimmed()
         );
     }
 
@@ -387,13 +452,176 @@ fn truncate(s: &str, max_len: usize) -> String {
     }
 }
 
-fn cmd_stats(cli: &Cli, _args: &cli::StatsArgs) -> Result<()> {
+fn parse_date_start(value: &str) -> Result<DateTime<Utc>> {
+    let date = NaiveDate::parse_from_str(value, "%Y-%m-%d")
+        .map_err(|_| anyhow::anyhow!("Invalid date format: {value}. Use YYYY-MM-DD."))?;
+    let naive = date
+        .and_hms_opt(0, 0, 0)
+        .ok_or_else(|| anyhow::anyhow!("Invalid start-of-day for date: {value}"))?;
+    Ok(DateTime::from_naive_utc_and_offset(naive, Utc))
+}
+
+fn parse_date_end(value: &str) -> Result<DateTime<Utc>> {
+    let date = NaiveDate::parse_from_str(value, "%Y-%m-%d")
+        .map_err(|_| anyhow::anyhow!("Invalid date format: {value}. Use YYYY-MM-DD."))?;
+    let naive = date
+        .and_hms_opt(23, 59, 59)
+        .ok_or_else(|| anyhow::anyhow!("Invalid end-of-day for date: {value}"))?;
+    Ok(DateTime::from_naive_utc_and_offset(naive, Utc))
+}
+
+fn is_reply(result: &SearchResult) -> bool {
+    if result.result_type != SearchResultType::Tweet {
+        return false;
+    }
+    result
+        .metadata
+        .get("in_reply_to")
+        .and_then(|v| v.as_str())
+        .is_some()
+}
+
+fn apply_search_filters(results: &mut Vec<SearchResult>, args: &cli::SearchArgs) -> Result<()> {
+    let since = match args.since.as_deref() {
+        Some(value) => Some(parse_date_start(value)?),
+        None => None,
+    };
+    let until = match args.until.as_deref() {
+        Some(value) => Some(parse_date_end(value)?),
+        None => None,
+    };
+
+    if since.is_some() || until.is_some() {
+        results.retain(|r| {
+            if r.result_type != SearchResultType::Tweet {
+                return true;
+            }
+            if let Some(since_dt) = since {
+                if r.created_at < since_dt {
+                    return false;
+                }
+            }
+            if let Some(until_dt) = until {
+                if r.created_at > until_dt {
+                    return false;
+                }
+            }
+            true
+        });
+    }
+
+    if args.replies_only {
+        results.retain(is_reply);
+    } else if args.no_replies {
+        results.retain(|r| !is_reply(r));
+    }
+
+    Ok(())
+}
+
+fn engagement_score(result: &SearchResult) -> i64 {
+    if result.result_type != SearchResultType::Tweet {
+        return 0;
+    }
+    let favs = result
+        .metadata
+        .get("favorite_count")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(0);
+    let rts = result
+        .metadata
+        .get("retweet_count")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(0);
+    favs.saturating_add(rts)
+}
+
+fn apply_search_sort(results: &mut [SearchResult], sort: &SortOrder) {
+    use std::cmp::Ordering;
+
+    match sort {
+        SortOrder::Relevance => {}
+        SortOrder::Date => {
+            results.sort_by(|a, b| {
+                let cmp = a.created_at.cmp(&b.created_at);
+                if cmp == Ordering::Equal {
+                    b.score.total_cmp(&a.score)
+                } else {
+                    cmp
+                }
+            });
+        }
+        SortOrder::DateDesc => {
+            results.sort_by(|a, b| {
+                let cmp = b.created_at.cmp(&a.created_at);
+                if cmp == Ordering::Equal {
+                    b.score.total_cmp(&a.score)
+                } else {
+                    cmp
+                }
+            });
+        }
+        SortOrder::Engagement => {
+            results.sort_by(|a, b| {
+                let cmp = engagement_score(b).cmp(&engagement_score(a));
+                if cmp == Ordering::Equal {
+                    b.created_at.cmp(&a.created_at)
+                } else {
+                    cmp
+                }
+            });
+        }
+    }
+}
+
+fn validate_output_fields(fields: &[String]) -> Result<()> {
+    const ALLOWED: [&str; 7] = [
+        "result_type",
+        "id",
+        "text",
+        "created_at",
+        "score",
+        "highlights",
+        "metadata",
+    ];
+    for field in fields {
+        if !ALLOWED.contains(&field.as_str()) {
+            anyhow::bail!("Unknown field for --fields: {field}");
+        }
+    }
+    Ok(())
+}
+
+fn filter_results_fields(
+    results: &[SearchResult],
+    fields: &[String],
+) -> Result<Vec<serde_json::Value>> {
+    let mut filtered = Vec::with_capacity(results.len());
+    for result in results {
+        let value = serde_json::to_value(result)?;
+        let obj = value.as_object().ok_or_else(|| {
+            anyhow::anyhow!("Failed to serialize search result for field filtering.")
+        })?;
+        let mut new_obj = serde_json::Map::new();
+        for field in fields {
+            if let Some(val) = obj.get(field) {
+                new_obj.insert(field.clone(), val.clone());
+            }
+        }
+        filtered.push(serde_json::Value::Object(new_obj));
+    }
+    Ok(filtered)
+}
+
+fn cmd_stats(cli: &Cli, args: &cli::StatsArgs) -> Result<()> {
     let db_path = get_db_path(cli);
 
     if !db_path.exists() {
-        anyhow::bail!(
-            "No indexed archive found. Run 'xf index <archive_path>' first."
-        );
+        anyhow::bail!("No indexed archive found. Run 'xf index <archive_path>' first.");
+    }
+
+    if args.detailed || args.hashtags || args.mentions || args.top != 10 {
+        anyhow::bail!("Detailed stats options are not implemented yet.");
     }
 
     let storage = Storage::open(&db_path)?;
@@ -406,12 +634,16 @@ fn cmd_stats(cli: &Cli, _args: &cli::StatsArgs) -> Result<()> {
             } else {
                 serde_json::to_string(&stats)?
             };
-            println!("{}", json);
+            println!("{json}");
         }
         _ => {
             println!("{}", "Archive Statistics".bold().cyan());
             println!("{}", "─".repeat(40));
-            println!("  {:<20} {:>10}", "Tweets:", format_count(stats.tweets_count));
+            println!(
+                "  {:<20} {:>10}",
+                "Tweets:",
+                format_count(stats.tweets_count)
+            );
             println!("  {:<20} {:>10}", "Likes:", format_count(stats.likes_count));
             println!(
                 "  {:<20} {:>10}",
@@ -428,9 +660,21 @@ fn cmd_stats(cli: &Cli, _args: &cli::StatsArgs) -> Result<()> {
                 "Grok Messages:",
                 format_count(stats.grok_messages_count)
             );
-            println!("  {:<20} {:>10}", "Followers:", format_count(stats.followers_count));
-            println!("  {:<20} {:>10}", "Following:", format_count(stats.following_count));
-            println!("  {:<20} {:>10}", "Blocks:", format_count(stats.blocks_count));
+            println!(
+                "  {:<20} {:>10}",
+                "Followers:",
+                format_count(stats.followers_count)
+            );
+            println!(
+                "  {:<20} {:>10}",
+                "Following:",
+                format_count(stats.following_count)
+            );
+            println!(
+                "  {:<20} {:>10}",
+                "Blocks:",
+                format_count(stats.blocks_count)
+            );
             println!("  {:<20} {:>10}", "Mutes:", format_count(stats.mutes_count));
             println!("{}", "─".repeat(40));
 
@@ -452,9 +696,13 @@ fn cmd_stats(cli: &Cli, _args: &cli::StatsArgs) -> Result<()> {
 
 fn format_count(n: i64) -> String {
     if n >= 1_000_000 {
-        format!("{:.1}M", n as f64 / 1_000_000.0)
+        let whole = n / 1_000_000;
+        let tenths = (n % 1_000_000) / 100_000;
+        format!("{whole}.{tenths}M")
     } else if n >= 1_000 {
-        format!("{:.1}K", n as f64 / 1_000.0)
+        let whole = n / 1_000;
+        let tenths = (n % 1_000) / 100;
+        format!("{whole}.{tenths}K")
     } else {
         n.to_string()
     }
@@ -467,41 +715,39 @@ fn cmd_tweet(cli: &Cli, args: &cli::TweetArgs) -> Result<()> {
     let tweet = storage.get_tweet(&args.id)?;
 
     match tweet {
-        Some(t) => {
-            match cli.format {
-                OutputFormat::Json | OutputFormat::JsonPretty => {
-                    let json = if matches!(cli.format, OutputFormat::JsonPretty) {
-                        serde_json::to_string_pretty(&t)?
-                    } else {
-                        serde_json::to_string(&t)?
-                    };
-                    println!("{}", json);
-                }
-                _ => {
-                    println!("{}", "─".repeat(60));
-                    println!("{}", t.full_text);
-                    println!("{}", "─".repeat(60));
+        Some(t) => match cli.format {
+            OutputFormat::Json | OutputFormat::JsonPretty => {
+                let json = if matches!(cli.format, OutputFormat::JsonPretty) {
+                    serde_json::to_string_pretty(&t)?
+                } else {
+                    serde_json::to_string(&t)?
+                };
+                println!("{json}");
+            }
+            _ => {
+                println!("{}", "─".repeat(60));
+                println!("{}", t.full_text);
+                println!("{}", "─".repeat(60));
+                println!(
+                    "  ID: {}  Date: {}",
+                    t.id.dimmed(),
+                    t.created_at.format("%Y-%m-%d %H:%M").to_string().dimmed()
+                );
+                if args.engagement {
                     println!(
-                        "  ID: {}  Date: {}",
-                        t.id.dimmed(),
-                        t.created_at.format("%Y-%m-%d %H:%M").to_string().dimmed()
+                        "  {} likes  {} retweets",
+                        t.favorite_count.to_string().cyan(),
+                        t.retweet_count.to_string().cyan()
                     );
-                    if args.engagement {
-                        println!(
-                            "  {} likes  {} retweets",
-                            t.favorite_count.to_string().cyan(),
-                            t.retweet_count.to_string().cyan()
-                        );
-                    }
-                    if !t.hashtags.is_empty() {
-                        println!("  Hashtags: {}", t.hashtags.join(", ").blue());
-                    }
-                    if let Some(reply_to) = &t.in_reply_to_screen_name {
-                        println!("  Reply to: @{}", reply_to.green());
-                    }
+                }
+                if !t.hashtags.is_empty() {
+                    println!("  Hashtags: {}", t.hashtags.join(", ").blue());
+                }
+                if let Some(reply_to) = &t.in_reply_to_screen_name {
+                    println!("  Reply to: @{}", reply_to.green());
                 }
             }
-        }
+        },
         None => {
             println!("{}", format!("Tweet {} not found.", args.id).red());
         }
@@ -513,18 +759,17 @@ fn cmd_tweet(cli: &Cli, args: &cli::TweetArgs) -> Result<()> {
 fn cmd_list(cli: &Cli, args: &cli::ListArgs) -> Result<()> {
     let db_path = get_db_path(cli);
 
-    match args.what {
-        ListTarget::Files => {
-            println!("{}", "Use 'xf index <path>' to index an archive first, then use list commands to browse data.".yellow());
-            return Ok(());
-        }
-        _ => {}
+    if matches!(args.what, ListTarget::Files) {
+        println!(
+            "{}",
+            "Use 'xf index <path>' to index an archive first, then use list commands to browse data."
+                .yellow()
+        );
+        return Ok(());
     }
 
     if !db_path.exists() {
-        anyhow::bail!(
-            "No indexed archive found. Run 'xf index <archive_path>' first."
-        );
+        anyhow::bail!("No indexed archive found. Run 'xf index <archive_path>' first.");
     }
 
     let storage = Storage::open(&db_path)?;
@@ -534,33 +779,39 @@ fn cmd_list(cli: &Cli, args: &cli::ListArgs) -> Result<()> {
         ListTarget::Files => unreachable!(),
         ListTarget::Tweets => {
             let tweets = storage.get_all_tweets(limit)?;
-            println!("{} {} tweets:\n", "Showing".dimmed(), tweets.len().to_string().cyan());
+            println!(
+                "{} {} tweets:\n",
+                "Showing".dimmed(),
+                tweets.len().to_string().cyan()
+            );
             for tweet in &tweets {
                 let date = tweet.created_at.format("%Y-%m-%d %H:%M").to_string();
                 let text = truncate_text(&tweet.full_text, 80);
-                println!(
-                    "{} {} {}",
-                    date.dimmed(),
-                    tweet.id.cyan(),
-                    text
-                );
+                println!("{} {} {}", date.dimmed(), tweet.id.cyan(), text);
             }
         }
         ListTarget::Likes => {
             let likes = storage.get_all_likes(limit)?;
-            println!("{} {} likes:\n", "Showing".dimmed(), likes.len().to_string().cyan());
+            println!(
+                "{} {} likes:\n",
+                "Showing".dimmed(),
+                likes.len().to_string().cyan()
+            );
             for like in &likes {
                 let text = like
                     .full_text
                     .as_ref()
-                    .map(|t| truncate_text(t, 80))
-                    .unwrap_or_else(|| "[No text]".to_string());
+                    .map_or_else(|| "[No text]".to_string(), |t| truncate_text(t, 80));
                 println!("{} {}", like.tweet_id.cyan(), text);
             }
         }
         ListTarget::Dms | ListTarget::Conversations => {
             let dms = storage.get_all_dms(limit)?;
-            println!("{} {} DM messages:\n", "Showing".dimmed(), dms.len().to_string().cyan());
+            println!(
+                "{} {} DM messages:\n",
+                "Showing".dimmed(),
+                dms.len().to_string().cyan()
+            );
             for dm in &dms {
                 let date = dm.created_at.format("%Y-%m-%d %H:%M").to_string();
                 let text = truncate_text(&dm.text, 60);
@@ -576,21 +827,25 @@ fn cmd_list(cli: &Cli, args: &cli::ListArgs) -> Result<()> {
         }
         ListTarget::Followers => {
             let followers = storage.get_all_followers(limit)?;
-            println!("{} {} followers:\n", "Showing".dimmed(), followers.len().to_string().cyan());
+            println!(
+                "{} {} followers:\n",
+                "Showing".dimmed(),
+                followers.len().to_string().cyan()
+            );
             for follower in &followers {
-                let link = follower
-                    .user_link
-                    .as_ref()
-                    .map(String::as_str)
-                    .unwrap_or("[no link]");
+                let link = follower.user_link.as_deref().unwrap_or("[no link]");
                 println!("{} {}", follower.account_id.cyan(), link.dimmed());
             }
         }
         ListTarget::Following => {
             let following = storage.get_all_following(limit)?;
-            println!("{} {} following:\n", "Showing".dimmed(), following.len().to_string().cyan());
+            println!(
+                "{} {} following:\n",
+                "Showing".dimmed(),
+                following.len().to_string().cyan()
+            );
             for f in &following {
-                let link = f.user_link.as_ref().map(String::as_str).unwrap_or("[no link]");
+                let link = f.user_link.as_deref().unwrap_or("[no link]");
                 println!("{} {}", f.account_id.cyan(), link.dimmed());
             }
         }
@@ -619,9 +874,7 @@ fn cmd_export(cli: &Cli, args: &cli::ExportArgs) -> Result<()> {
     let db_path = get_db_path(cli);
 
     if !db_path.exists() {
-        anyhow::bail!(
-            "No indexed archive found. Run 'xf index <archive_path>' first."
-        );
+        anyhow::bail!("No indexed archive found. Run 'xf index <archive_path>' first.");
     }
 
     let storage = Storage::open(&db_path)?;
@@ -668,26 +921,43 @@ fn cmd_export(cli: &Cli, args: &cli::ExportArgs) -> Result<()> {
                     serde_json::to_string_pretty(&combined)?
                 }
                 ExportFormat::Jsonl => {
-                    let mut lines = Vec::new();
+                    let mut jsonl_lines = Vec::new();
                     for t in &tweets {
-                        lines.push(format!(r#"{{"type":"tweet","data":{}}}"#, serde_json::to_string(t)?));
+                        jsonl_lines.push(format!(
+                            r#"{{"type":"tweet","data":{}}}"#,
+                            serde_json::to_string(t)?
+                        ));
                     }
                     for l in &likes {
-                        lines.push(format!(r#"{{"type":"like","data":{}}}"#, serde_json::to_string(l)?));
+                        jsonl_lines.push(format!(
+                            r#"{{"type":"like","data":{}}}"#,
+                            serde_json::to_string(l)?
+                        ));
                     }
                     for d in &dms {
-                        lines.push(format!(r#"{{"type":"dm","data":{}}}"#, serde_json::to_string(d)?));
+                        jsonl_lines.push(format!(
+                            r#"{{"type":"dm","data":{}}}"#,
+                            serde_json::to_string(d)?
+                        ));
                     }
                     for f in &followers {
-                        lines.push(format!(r#"{{"type":"follower","data":{}}}"#, serde_json::to_string(f)?));
+                        jsonl_lines.push(format!(
+                            r#"{{"type":"follower","data":{}}}"#,
+                            serde_json::to_string(f)?
+                        ));
                     }
                     for f in &following {
-                        lines.push(format!(r#"{{"type":"following","data":{}}}"#, serde_json::to_string(f)?));
+                        jsonl_lines.push(format!(
+                            r#"{{"type":"following","data":{}}}"#,
+                            serde_json::to_string(f)?
+                        ));
                     }
-                    lines.join("\n")
+                    jsonl_lines.join("\n")
                 }
                 ExportFormat::Csv => {
-                    anyhow::bail!("CSV export not supported for 'all' target. Export individual types instead.");
+                    anyhow::bail!(
+                        "CSV export not supported for 'all' target. Export individual types instead."
+                    );
                 }
             }
         }
@@ -735,11 +1005,7 @@ fn format_export<T: serde::Serialize>(data: &[T], format: &ExportFormat) -> Resu
                     if let serde_json::Value::Object(obj) = val {
                         let row: Vec<String> = headers
                             .iter()
-                            .map(|&h| {
-                                obj.get(h)
-                                    .map(|v| csv_escape(v))
-                                    .unwrap_or_default()
-                            })
+                            .map(|&h| obj.get(h).map(csv_escape).unwrap_or_default())
                             .collect();
                         output.push_str(&row.join(","));
                         output.push('\n');
@@ -777,27 +1043,24 @@ fn csv_escape(value: &serde_json::Value) -> String {
     }
 }
 
-fn cmd_config(cli: &Cli, args: &cli::ConfigArgs) -> Result<()> {
+fn cmd_config(cli: &Cli, args: &cli::ConfigArgs) {
     if args.show {
         println!("{}", "Current Configuration".bold().cyan());
         println!("  Database: {}", get_db_path(cli).display());
         println!("  Index: {}", get_index_path(cli).display());
     }
-    Ok(())
 }
 
-fn cmd_update() -> Result<()> {
+fn cmd_update() {
     println!("{}", "Checking for updates...".cyan());
     println!(
         "To update, run:\n  {}",
         "curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/xf/main/install.sh | bash"
             .bold()
     );
-    Ok(())
 }
 
-fn cmd_completions(args: cli::CompletionsArgs) -> Result<()> {
+fn cmd_completions(args: &cli::CompletionsArgs) {
     let mut cmd = Cli::command();
     generate(args.shell, &mut cmd, "xf", &mut io::stdout());
-    Ok(())
 }
