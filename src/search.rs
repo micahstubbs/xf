@@ -319,8 +319,14 @@ impl SearchEngine {
                 "grok_mode": msg.grok_mode,
             });
 
-            // Use chat_id + timestamp as unique ID
-            let doc_id = format!("{}_{}", msg.chat_id, msg.created_at.timestamp());
+            // Use chat_id + timestamp_nanos + sender for better uniqueness
+            let doc_id = format!(
+                "{}_{}_{}_{}",
+                msg.chat_id,
+                msg.created_at.timestamp(),
+                msg.created_at.timestamp_subsec_nanos(),
+                msg.sender
+            );
 
             writer.add_document(doc!(
                 id_field => doc_id,
@@ -475,22 +481,23 @@ impl SearchEngine {
     }
 }
 
-/// Generate prefix terms for edge n-gram style matching
+/// Generate prefix terms for edge n-gram style matching.
+/// Uses character count (not byte count) to properly handle UTF-8.
 fn generate_prefixes(text: &str) -> String {
     let words: Vec<&str> = text
         .split_whitespace()
-        .filter(|w| w.len() >= 2)
+        .filter(|w| w.chars().count() >= 2) // Filter by character count, not bytes
         .take(50) // Limit to prevent huge documents
         .collect();
 
     let mut prefixes = Vec::new();
     for word in words {
         let word_lower = word.to_lowercase();
-        // Generate 2-char to full-length prefixes
-        for len in 2..=word_lower.len().min(15) {
-            if let Some(prefix) = word_lower.get(..len) {
-                prefixes.push(prefix.to_string());
-            }
+        let char_count = word_lower.chars().count();
+        // Generate 2-char to 15-char prefixes (by character count)
+        for len in 2..=char_count.min(15) {
+            let prefix: String = word_lower.chars().take(len).collect();
+            prefixes.push(prefix);
         }
     }
 

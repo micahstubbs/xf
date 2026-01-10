@@ -283,8 +283,10 @@ impl Storage {
                 ",
             )?;
 
-            let mut fts_stmt = tx
-                .prepare("INSERT OR REPLACE INTO fts_tweets (tweet_id, full_text) VALUES (?, ?)")?;
+            // FTS5 doesn't support INSERT OR REPLACE, so we must delete first to avoid duplicates
+            let mut fts_delete_stmt = tx.prepare("DELETE FROM fts_tweets WHERE tweet_id = ?")?;
+            let mut fts_stmt =
+                tx.prepare("INSERT INTO fts_tweets (tweet_id, full_text) VALUES (?, ?)")?;
 
             for tweet in tweets {
                 stmt.execute(params![
@@ -304,7 +306,8 @@ impl Storage {
                     serde_json::to_string(&tweet.urls)?,
                     serde_json::to_string(&tweet.media)?,
                 ])?;
-                fts_stmt.execute(params![tweet.id, tweet.full_text])?;
+                fts_delete_stmt.execute(params![&tweet.id])?;
+                fts_stmt.execute(params![&tweet.id, &tweet.full_text])?;
                 count += 1;
             }
         }
@@ -327,13 +330,16 @@ impl Storage {
             let mut stmt = tx.prepare(
                 "INSERT OR REPLACE INTO likes (tweet_id, full_text, expanded_url) VALUES (?, ?, ?)",
             )?;
+            // FTS5 doesn't support INSERT OR REPLACE, so we must delete first to avoid duplicates
+            let mut fts_delete_stmt = tx.prepare("DELETE FROM fts_likes WHERE tweet_id = ?")?;
             let mut fts_stmt =
-                tx.prepare("INSERT OR REPLACE INTO fts_likes (tweet_id, full_text) VALUES (?, ?)")?;
+                tx.prepare("INSERT INTO fts_likes (tweet_id, full_text) VALUES (?, ?)")?;
 
             for like in likes {
                 stmt.execute(params![like.tweet_id, like.full_text, like.expanded_url])?;
                 if let Some(text) = &like.full_text {
-                    fts_stmt.execute(params![like.tweet_id, text])?;
+                    fts_delete_stmt.execute(params![&like.tweet_id])?;
+                    fts_stmt.execute(params![&like.tweet_id, text])?;
                 }
                 count += 1;
             }
@@ -370,8 +376,9 @@ impl Storage {
                 ",
             )?;
 
-            let mut fts_stmt =
-                tx.prepare("INSERT OR REPLACE INTO fts_dms (dm_id, text) VALUES (?, ?)")?;
+            // FTS5 doesn't support INSERT OR REPLACE, so we must delete first to avoid duplicates
+            let mut fts_delete_stmt = tx.prepare("DELETE FROM fts_dms WHERE dm_id = ?")?;
+            let mut fts_stmt = tx.prepare("INSERT INTO fts_dms (dm_id, text) VALUES (?, ?)")?;
 
             for conv in conversations {
                 // Get participant IDs and date range
@@ -405,7 +412,8 @@ impl Storage {
                         serde_json::to_string(&msg.urls)?,
                         serde_json::to_string(&msg.media_urls)?,
                     ])?;
-                    fts_stmt.execute(params![msg.id, msg.text])?;
+                    fts_delete_stmt.execute(params![&msg.id])?;
+                    fts_stmt.execute(params![&msg.id, &msg.text])?;
                     message_count += 1;
                 }
             }
@@ -534,6 +542,8 @@ impl Storage {
                 ",
             )?;
 
+            // FTS5 doesn't support INSERT OR REPLACE, so we must delete first to avoid duplicates
+            let mut fts_delete_stmt = tx.prepare("DELETE FROM fts_grok WHERE grok_id = ?")?;
             let mut fts_stmt =
                 tx.prepare("INSERT INTO fts_grok (grok_id, message) VALUES (?, ?)")?;
 
@@ -545,9 +555,16 @@ impl Storage {
                     msg.created_at.to_rfc3339(),
                     msg.grok_mode,
                 ])?;
-                // Use chat_id + timestamp as unique ID for FTS
-                let grok_id = format!("{}_{}", msg.chat_id, msg.created_at.timestamp());
-                fts_stmt.execute(params![grok_id, msg.message])?;
+                // Use chat_id + timestamp_nanos + sender for better uniqueness
+                let grok_id = format!(
+                    "{}_{}_{}_{}",
+                    msg.chat_id,
+                    msg.created_at.timestamp(),
+                    msg.created_at.timestamp_subsec_nanos(),
+                    msg.sender
+                );
+                fts_delete_stmt.execute(params![&grok_id])?;
+                fts_stmt.execute(params![&grok_id, &msg.message])?;
                 count += 1;
             }
         }

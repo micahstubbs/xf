@@ -48,10 +48,7 @@ fn main() -> Result<()> {
         Commands::Tweet(args) => cmd_tweet(&cli, args),
         Commands::List(args) => cmd_list(&cli, args),
         Commands::Export(args) => cmd_export(&cli, args),
-        Commands::Config(args) => {
-            cmd_config(&cli, args);
-            Ok(())
-        }
+        Commands::Config(args) => cmd_config(&cli, args),
         Commands::Update => {
             cmd_update();
             Ok(())
@@ -709,6 +706,9 @@ fn format_count(n: i64) -> String {
 }
 
 fn cmd_tweet(cli: &Cli, args: &cli::TweetArgs) -> Result<()> {
+    if args.thread {
+        anyhow::bail!("Tweet thread output is not implemented yet.");
+    }
     let db_path = get_db_path(cli);
     let storage = Storage::open(&db_path)?;
 
@@ -1029,7 +1029,8 @@ fn csv_escape(value: &serde_json::Value) -> String {
         serde_json::Value::Bool(b) => b.to_string(),
         serde_json::Value::Number(n) => n.to_string(),
         serde_json::Value::String(s) => {
-            if s.contains(',') || s.contains('"') || s.contains('\n') {
+            // Quote if contains comma, quote, newline, or carriage return per RFC 4180
+            if s.contains(',') || s.contains('"') || s.contains('\n') || s.contains('\r') {
                 format!("\"{}\"", s.replace('"', "\"\""))
             } else {
                 s.clone()
@@ -1046,12 +1047,16 @@ fn csv_escape(value: &serde_json::Value) -> String {
     }
 }
 
-fn cmd_config(cli: &Cli, args: &cli::ConfigArgs) {
+fn cmd_config(cli: &Cli, args: &cli::ConfigArgs) -> Result<()> {
+    if args.set.is_some() || args.archive.is_some() {
+        anyhow::bail!("Config update flags (--set/--archive) are not implemented yet.");
+    }
     if args.show {
         println!("{}", "Current Configuration".bold().cyan());
         println!("  Database: {}", get_db_path(cli).display());
         println!("  Index: {}", get_index_path(cli).display());
     }
+    Ok(())
 }
 
 fn cmd_update() {
