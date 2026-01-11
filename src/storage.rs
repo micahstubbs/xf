@@ -629,27 +629,11 @@ impl Storage {
         let mut count = 0;
 
         {
-            // Compute grok_ids for batch FTS delete
-            let grok_ids: Vec<String> = messages
-                .iter()
-                .map(|msg| {
-                    format!(
-                        "{}_{}_{}_{}",
-                        msg.chat_id,
-                        msg.created_at.timestamp(),
-                        msg.created_at.timestamp_subsec_nanos(),
-                        msg.sender
-                    )
-                })
-                .collect();
-
-            if !grok_ids.is_empty() {
-                let placeholders: String =
-                    grok_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-                let delete_sql = format!("DELETE FROM fts_grok WHERE grok_id IN ({placeholders})");
-                let mut delete_stmt = tx.prepare(&delete_sql)?;
-                delete_stmt.execute(rusqlite::params_from_iter(grok_ids.iter()))?;
-            }
+            // Clear existing data to ensure FTS and main table correspondence.
+            // Unlike tweets/likes/dms which have natural primary keys for INSERT OR REPLACE,
+            // grok_messages uses auto-increment, so we clear and repopulate.
+            tx.execute("DELETE FROM fts_grok", [])?;
+            tx.execute("DELETE FROM grok_messages", [])?;
 
             let mut stmt = tx.prepare(
                 r"
@@ -660,7 +644,7 @@ impl Storage {
             let mut fts_stmt =
                 tx.prepare("INSERT INTO fts_grok (grok_id, message) VALUES (?, ?)")?;
 
-            for (msg, grok_id) in messages.iter().zip(grok_ids.iter()) {
+            for msg in messages {
                 stmt.execute(params![
                     msg.chat_id,
                     msg.message,
@@ -668,7 +652,9 @@ impl Storage {
                     msg.created_at.to_rfc3339(),
                     msg.grok_mode,
                 ])?;
-                fts_stmt.execute(params![grok_id, &msg.message])?;
+                // Use the auto-generated id as grok_id for proper FTS joining
+                let grok_id = tx.last_insert_rowid();
+                fts_stmt.execute(params![grok_id.to_string(), &msg.message])?;
                 count += 1;
             }
         }
@@ -1245,9 +1231,9 @@ impl Storage {
             r"
             SELECT g.chat_id, g.message, g.sender, g.created_at, g.grok_mode
             FROM grok_messages g
-            WHERE g.rowid IN (
-                SELECT rowid FROM fts_grok WHERE fts_grok MATCH ?
-            )
+            JOIN fts_grok fts ON g.id = CAST(fts.grok_id AS INTEGER)
+            WHERE fts_grok MATCH ?
+            ORDER BY rank
             LIMIT ?
             ",
         )?;
