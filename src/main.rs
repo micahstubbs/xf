@@ -3,23 +3,26 @@
 //! Main entry point for the xf command-line tool.
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{DateTime, Datelike, NaiveDate, Utc};
 use clap::{CommandFactory, Parser};
 use clap_complete::generate;
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::ThreadPoolBuilder;
+use serde::Serialize;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::PathBuf;
 use tracing::{Level, info};
 use tracing_subscriber::EnvFilter;
 
 use xf::cli;
+use xf::config::Config;
 use xf::search;
 use xf::{
-    ArchiveParser, Cli, Commands, DataType, ExportFormat, ExportTarget, ListTarget, OutputFormat,
-    SearchEngine, SearchResult, SearchResultType, SortOrder, Storage, default_db_path,
-    default_index_path,
+    ArchiveParser, ArchiveStats, Cli, Commands, DataType, ExportFormat, ExportTarget, ListTarget,
+    OutputFormat, SearchEngine, SearchResult, SearchResultType, SortOrder, Storage, Tweet,
+    TweetUrl,
 };
 
 fn main() -> Result<()> {
@@ -61,11 +64,19 @@ fn main() -> Result<()> {
 }
 
 fn get_db_path(cli: &Cli) -> PathBuf {
-    cli.db.clone().unwrap_or_else(default_db_path)
+    if let Some(db) = &cli.db {
+        return db.clone();
+    }
+    let config = Config::load();
+    config.db_path()
 }
 
 fn get_index_path(cli: &Cli) -> PathBuf {
-    cli.index.clone().unwrap_or_else(default_index_path)
+    if let Some(index) = &cli.index {
+        return index.clone();
+    }
+    let config = Config::load();
+    config.index_path()
 }
 
 #[allow(clippy::too_many_lines)]
@@ -276,10 +287,23 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
     }
 
     if args.context {
-        anyhow::bail!("DM context output is not implemented yet.");
+        if !matches!(
+            cli.format,
+            OutputFormat::Text | OutputFormat::Json | OutputFormat::JsonPretty
+        ) {
+            anyhow::bail!("--context only supports text or json output.");
+        }
+        if let Some(types) = &args.types {
+            if types.len() != 1 || !types.contains(&DataType::Dm) {
+                anyhow::bail!("--context only supports --types dm.");
+            }
+        }
     }
 
     if let Some(fields) = &args.fields {
+        if args.context {
+            anyhow::bail!("--fields is not supported with --context.");
+        }
         if !matches!(cli.format, OutputFormat::Json | OutputFormat::JsonPretty) {
             anyhow::bail!("--fields is only supported with --format json or json-pretty.");
         }
@@ -287,21 +311,29 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
     }
 
     let search_engine = SearchEngine::open(&index_path)?;
-    let _storage = Storage::open(&db_path)?;
+    let storage = if args.context {
+        Some(Storage::open(&db_path)?)
+    } else {
+        None
+    };
 
     // Convert data types to search doc types
-    let doc_types: Option<Vec<search::DocType>> = args.types.as_ref().map(|types| {
-        types
-            .iter()
-            .filter_map(|t| match t {
-                DataType::Tweet => Some(search::DocType::Tweet),
-                DataType::Like => Some(search::DocType::Like),
-                DataType::Dm => Some(search::DocType::DirectMessage),
-                DataType::Grok => Some(search::DocType::GrokMessage),
-                _ => None,
-            })
-            .collect()
-    });
+    let doc_types: Option<Vec<search::DocType>> = if args.context {
+        Some(vec![search::DocType::DirectMessage])
+    } else {
+        args.types.as_ref().map(|types| {
+            types
+                .iter()
+                .filter_map(|t| match t {
+                    DataType::Tweet => Some(search::DocType::Tweet),
+                    DataType::Like => Some(search::DocType::Like),
+                    DataType::Dm => Some(search::DocType::DirectMessage),
+                    DataType::Grok => Some(search::DocType::GrokMessage),
+                    _ => None,
+                })
+                .collect()
+        })
+    };
 
     let mut results = search_engine.search(
         &args.query,
@@ -322,6 +354,12 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
 
     if results.is_empty() {
         println!("{}", "No results found.".yellow());
+        return Ok(());
+    }
+
+    if args.context {
+        let contexts = build_dm_context(&results, storage.as_ref().unwrap())?;
+        output_dm_context(cli, &contexts)?;
         return Ok(());
     }
 
@@ -375,6 +413,138 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[derive(Serialize)]
+struct DmConversationContext {
+    conversation_id: String,
+    messages: Vec<DmContextMessage>,
+}
+
+#[derive(Serialize)]
+struct DmContextMessage {
+    id: String,
+    sender_id: String,
+    recipient_id: String,
+    text: String,
+    created_at: DateTime<Utc>,
+    urls: Vec<TweetUrl>,
+    media_urls: Vec<String>,
+    is_match: bool,
+    highlights: Vec<String>,
+}
+
+fn build_dm_context(
+    results: &[SearchResult],
+    storage: &Storage,
+) -> Result<Vec<DmConversationContext>> {
+    let mut conversation_order = Vec::new();
+    let mut seen = HashSet::new();
+    let mut matches: HashMap<String, HashMap<String, Vec<String>>> = HashMap::new();
+
+    for result in results {
+        let conv_id = result
+            .metadata
+            .get("conversation_id")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| anyhow::anyhow!("DM result missing conversation_id metadata"))?;
+        let conv_id = conv_id.to_string();
+
+        if seen.insert(conv_id.clone()) {
+            conversation_order.push(conv_id.clone());
+        }
+
+        matches
+            .entry(conv_id)
+            .or_default()
+            .entry(result.id.clone())
+            .or_insert_with(|| result.highlights.clone());
+    }
+
+    let mut contexts = Vec::with_capacity(conversation_order.len());
+    for conversation_id in conversation_order {
+        let messages = storage.get_conversation_messages(&conversation_id)?;
+        let mut context_messages = Vec::with_capacity(messages.len());
+
+        let message_matches = matches.get(&conversation_id);
+        for message in messages {
+            let (is_match, highlights) = match message_matches {
+                Some(match_map) => match_map
+                    .get(&message.id)
+                    .map_or((false, Vec::new()), |items| (true, items.clone())),
+                None => (false, Vec::new()),
+            };
+
+            context_messages.push(DmContextMessage {
+                id: message.id,
+                sender_id: message.sender_id,
+                recipient_id: message.recipient_id,
+                text: message.text,
+                created_at: message.created_at,
+                urls: message.urls,
+                media_urls: message.media_urls,
+                is_match,
+                highlights,
+            });
+        }
+
+        contexts.push(DmConversationContext {
+            conversation_id,
+            messages: context_messages,
+        });
+    }
+
+    Ok(contexts)
+}
+
+fn output_dm_context(cli: &Cli, contexts: &[DmConversationContext]) -> Result<()> {
+    match cli.format {
+        OutputFormat::Json => {
+            println!("{}", serde_json::to_string(contexts)?);
+        }
+        OutputFormat::JsonPretty => {
+            println!("{}", serde_json::to_string_pretty(contexts)?);
+        }
+        OutputFormat::Text => {
+            print_dm_context_text(contexts);
+        }
+        _ => {
+            anyhow::bail!("--context only supports text or json output.");
+        }
+    }
+    Ok(())
+}
+
+fn print_dm_context_text(contexts: &[DmConversationContext]) {
+    for context in contexts {
+        println!(
+            "{} {}",
+            "Conversation".bold().cyan(),
+            context.conversation_id.dimmed()
+        );
+        println!("{}", "─".repeat(60));
+
+        for message in &context.messages {
+            let timestamp = message.created_at.format("%Y-%m-%d %H:%M").to_string();
+            println!(
+                "{} {} {} {}",
+                timestamp.dimmed(),
+                message.sender_id.green(),
+                "→".dimmed(),
+                message.recipient_id.blue()
+            );
+
+            let lines = textwrap::wrap(&message.text, 78);
+            for line in lines {
+                if message.is_match {
+                    println!("  {}", line.yellow().bold());
+                } else {
+                    println!("  {line}");
+                }
+            }
+            println!();
+        }
+    }
 }
 
 fn print_result(num: usize, result: &SearchResult) {
@@ -610,6 +780,7 @@ fn filter_results_fields(
     Ok(filtered)
 }
 
+#[allow(clippy::too_many_lines)]
 fn cmd_stats(cli: &Cli, args: &cli::StatsArgs) -> Result<()> {
     let db_path = get_db_path(cli);
 
@@ -617,21 +788,69 @@ fn cmd_stats(cli: &Cli, args: &cli::StatsArgs) -> Result<()> {
         anyhow::bail!("No indexed archive found. Run 'xf index <archive_path>' first.");
     }
 
-    if args.detailed || args.hashtags || args.mentions || args.top != 10 {
-        anyhow::bail!("Detailed stats options are not implemented yet.");
-    }
-
     let storage = Storage::open(&db_path)?;
     let stats = storage.get_stats()?;
+    let needs_tweets = args.detailed || args.hashtags || args.mentions;
+    let tweets = if needs_tweets {
+        storage.get_all_tweets(None)?
+    } else {
+        Vec::new()
+    };
+
+    let detailed = if args.detailed {
+        Some(build_monthly_counts(&tweets))
+    } else {
+        None
+    };
+
+    let top_hashtags = if args.hashtags {
+        Some(top_counts(
+            tweets
+                .iter()
+                .flat_map(|tweet| tweet.hashtags.iter().map(|tag| tag.to_lowercase())),
+            args.top,
+        ))
+    } else {
+        None
+    };
+
+    let top_mentions = if args.mentions {
+        Some(top_counts(
+            tweets.iter().flat_map(|tweet| {
+                tweet
+                    .user_mentions
+                    .iter()
+                    .map(|m| m.screen_name.to_lowercase())
+            }),
+            args.top,
+        ))
+    } else {
+        None
+    };
 
     match cli.format {
         OutputFormat::Json | OutputFormat::JsonPretty => {
-            let json = if matches!(cli.format, OutputFormat::JsonPretty) {
-                serde_json::to_string_pretty(&stats)?
+            if needs_tweets {
+                let extended = StatsExtended {
+                    stats,
+                    detailed,
+                    top_hashtags,
+                    top_mentions,
+                };
+                let json = if matches!(cli.format, OutputFormat::JsonPretty) {
+                    serde_json::to_string_pretty(&extended)?
+                } else {
+                    serde_json::to_string(&extended)?
+                };
+                println!("{json}");
             } else {
-                serde_json::to_string(&stats)?
-            };
-            println!("{json}");
+                let json = if matches!(cli.format, OutputFormat::JsonPretty) {
+                    serde_json::to_string_pretty(&stats)?
+                } else {
+                    serde_json::to_string(&stats)?
+                };
+                println!("{json}");
+            }
         }
         _ => {
             println!("{}", "Archive Statistics".bold().cyan());
@@ -685,10 +904,120 @@ fn cmd_stats(cli: &Cli, args: &cli::StatsArgs) -> Result<()> {
                     last.format("%Y-%m-%d").to_string().green()
                 );
             }
+
+            if let Some(detailed) = detailed {
+                if !detailed.is_empty() {
+                    println!();
+                    println!("{}", "Tweets by Month".bold().cyan());
+                    println!("{}", "─".repeat(40));
+                    for entry in detailed {
+                        println!(
+                            "  {:04}-{:02}: {}",
+                            entry.year,
+                            entry.month,
+                            format_count(i64::try_from(entry.count).unwrap_or(i64::MAX))
+                        );
+                    }
+                }
+            }
+
+            if let Some(items) = top_hashtags {
+                if !items.is_empty() {
+                    println!();
+                    println!("{}", "Top Hashtags".bold().cyan());
+                    println!("{}", "─".repeat(40));
+                    for item in items {
+                        println!(
+                            "  {:<20} {}",
+                            item.value,
+                            format_count(i64::try_from(item.count).unwrap_or(i64::MAX))
+                        );
+                    }
+                }
+            }
+
+            if let Some(items) = top_mentions {
+                if !items.is_empty() {
+                    println!();
+                    println!("{}", "Top Mentions".bold().cyan());
+                    println!("{}", "─".repeat(40));
+                    for item in items {
+                        println!(
+                            "  {:<20} {}",
+                            item.value,
+                            format_count(i64::try_from(item.count).unwrap_or(i64::MAX))
+                        );
+                    }
+                }
+            }
         }
     }
 
     Ok(())
+}
+
+#[derive(Serialize)]
+struct StatsExtended {
+    stats: ArchiveStats,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detailed: Option<Vec<StatsPeriod>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    top_hashtags: Option<Vec<CountItem>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    top_mentions: Option<Vec<CountItem>>,
+}
+
+#[derive(Serialize)]
+struct StatsPeriod {
+    year: i32,
+    month: u32,
+    count: usize,
+}
+
+#[derive(Serialize)]
+struct CountItem {
+    value: String,
+    count: usize,
+}
+
+fn build_monthly_counts(tweets: &[Tweet]) -> Vec<StatsPeriod> {
+    use std::collections::BTreeMap;
+
+    let mut counts: BTreeMap<(i32, u32), usize> = BTreeMap::new();
+    for tweet in tweets {
+        let date = tweet.created_at;
+        let key = (date.year(), date.month());
+        *counts.entry(key).or_insert(0) += 1;
+    }
+
+    counts
+        .into_iter()
+        .map(|((year, month), count)| StatsPeriod { year, month, count })
+        .collect()
+}
+
+fn top_counts<I>(items: I, limit: usize) -> Vec<CountItem>
+where
+    I: Iterator<Item = String>,
+{
+    if limit == 0 {
+        return Vec::new();
+    }
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for item in items {
+        if item.is_empty() {
+            continue;
+        }
+        *counts.entry(item).or_insert(0) += 1;
+    }
+
+    let mut sorted: Vec<(String, usize)> = counts.into_iter().collect();
+    sorted.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    sorted
+        .into_iter()
+        .take(limit)
+        .map(|(value, count)| CountItem { value, count })
+        .collect()
 }
 
 fn format_count(n: i64) -> String {
@@ -706,11 +1035,12 @@ fn format_count(n: i64) -> String {
 }
 
 fn cmd_tweet(cli: &Cli, args: &cli::TweetArgs) -> Result<()> {
-    if args.thread {
-        anyhow::bail!("Tweet thread output is not implemented yet.");
-    }
     let db_path = get_db_path(cli);
     let storage = Storage::open(&db_path)?;
+
+    if args.thread {
+        return cmd_tweet_thread(cli, &storage, args);
+    }
 
     let tweet = storage.get_tweet(&args.id)?;
 
@@ -756,6 +1086,7 @@ fn cmd_tweet(cli: &Cli, args: &cli::TweetArgs) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 fn cmd_list(cli: &Cli, args: &cli::ListArgs) -> Result<()> {
     let db_path = get_db_path(cli);
 
@@ -850,10 +1181,28 @@ fn cmd_list(cli: &Cli, args: &cli::ListArgs) -> Result<()> {
             }
         }
         ListTarget::Blocks => {
-            println!("{}", "Blocks listing not yet implemented.".yellow());
+            let blocks = storage.get_all_blocks(limit)?;
+            println!(
+                "{} {} blocks:\n",
+                "Showing".dimmed(),
+                blocks.len().to_string().cyan()
+            );
+            for block in &blocks {
+                let link = block.user_link.as_deref().unwrap_or("[no link]");
+                println!("{} {}", block.account_id.cyan(), link.dimmed());
+            }
         }
         ListTarget::Mutes => {
-            println!("{}", "Mutes listing not yet implemented.".yellow());
+            let mutes = storage.get_all_mutes(limit)?;
+            println!(
+                "{} {} mutes:\n",
+                "Showing".dimmed(),
+                mutes.len().to_string().cyan()
+            );
+            for mute in &mutes {
+                let link = mute.user_link.as_deref().unwrap_or("[no link]");
+                println!("{} {}", mute.account_id.cyan(), link.dimmed());
+            }
         }
     }
 
@@ -1048,15 +1397,184 @@ fn csv_escape(value: &serde_json::Value) -> String {
 }
 
 fn cmd_config(cli: &Cli, args: &cli::ConfigArgs) -> Result<()> {
-    if args.set.is_some() || args.archive.is_some() {
-        anyhow::bail!("Config update flags (--set/--archive) are not implemented yet.");
+    let mut config = Config::load();
+    let set_present = args.set.is_some();
+    let archive_present = args.archive.is_some();
+
+    if let Some(set) = &args.set {
+        apply_config_set(&mut config, set)?;
+    }
+
+    if let Some(archive) = &args.archive {
+        config.paths.archive = Some(archive.clone());
+    }
+
+    if set_present || archive_present {
+        config
+            .save()
+            .with_context(|| "Failed to save config file".to_string())?;
+        println!("{}", "✓ Updated configuration".green());
     }
     if args.show {
         println!("{}", "Current Configuration".bold().cyan());
         println!("  Database: {}", get_db_path(cli).display());
         println!("  Index: {}", get_index_path(cli).display());
+        if let Some(archive) = &config.paths.archive {
+            println!("  Archive: {}", archive.display());
+        }
     }
     Ok(())
+}
+
+fn cmd_tweet_thread(cli: &Cli, storage: &Storage, args: &cli::TweetArgs) -> Result<()> {
+    let thread = storage.get_tweet_thread(&args.id)?;
+
+    if thread.is_empty() {
+        println!("{}", format!("Tweet {} not found.", args.id).red());
+        return Ok(());
+    }
+
+    match cli.format {
+        OutputFormat::Json | OutputFormat::JsonPretty => {
+            let json = if matches!(cli.format, OutputFormat::JsonPretty) {
+                serde_json::to_string_pretty(&thread)?
+            } else {
+                serde_json::to_string(&thread)?
+            };
+            println!("{json}");
+        }
+        _ => {
+            println!("{}", "Thread".bold().cyan());
+            println!("{}", "─".repeat(60));
+            for tweet in &thread {
+                let date = tweet.created_at.format("%Y-%m-%d %H:%M").to_string();
+                let text = truncate_text(&tweet.full_text, 100);
+                println!("{} {} {}", date.dimmed(), tweet.id.cyan(), text);
+                if args.engagement {
+                    println!(
+                        "  {} likes  {} retweets",
+                        tweet.favorite_count.to_string().cyan(),
+                        tweet.retweet_count.to_string().cyan()
+                    );
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn apply_config_set(config: &mut Config, raw: &str) -> Result<()> {
+    let (key, value) = raw
+        .split_once('=')
+        .map(|(k, v)| (k.trim(), v.trim()))
+        .ok_or_else(|| anyhow::anyhow!("Invalid --set format. Use key=value."))?;
+
+    if key.is_empty() {
+        anyhow::bail!("Invalid --set key. Use key=value.");
+    }
+
+    match key {
+        "db" | "paths.db" => {
+            config.paths.db = parse_optional_path(value);
+        }
+        "index" | "paths.index" => {
+            config.paths.index = parse_optional_path(value);
+        }
+        "archive" | "paths.archive" => {
+            config.paths.archive = parse_optional_path(value);
+        }
+        "search.default_limit" => {
+            config.search.default_limit = parse_usize(value, key)?;
+        }
+        "search.highlight" => {
+            config.search.highlight = parse_bool(value, key)?;
+        }
+        "search.fuzzy" => {
+            config.search.fuzzy = parse_bool(value, key)?;
+        }
+        "search.min_score" => {
+            let parsed = parse_f32(value, key)?;
+            if !(0.0..=1.0).contains(&parsed) {
+                anyhow::bail!("{key} must be between 0.0 and 1.0.");
+            }
+            config.search.min_score = parsed;
+        }
+        "search.cache_size" => {
+            config.search.cache_size = parse_usize(value, key)?;
+        }
+        "indexing.parallel" => {
+            config.indexing.parallel = parse_bool(value, key)?;
+        }
+        "indexing.buffer_size_mb" => {
+            config.indexing.buffer_size_mb = parse_usize(value, key)?;
+        }
+        "indexing.threads" => {
+            config.indexing.threads = parse_usize(value, key)?;
+        }
+        "indexing.skip_types" => {
+            config.indexing.skip_types = parse_csv_list(value);
+        }
+        "output.format" => {
+            if value.is_empty() {
+                anyhow::bail!("output.format cannot be empty.");
+            }
+            config.output.format = value.to_string();
+        }
+        "output.colors" => {
+            config.output.colors = parse_bool(value, key)?;
+        }
+        "output.quiet" => {
+            config.output.quiet = parse_bool(value, key)?;
+        }
+        "output.timings" => {
+            config.output.timings = parse_bool(value, key)?;
+        }
+        _ => {
+            anyhow::bail!("Unknown config key: {key}");
+        }
+    }
+
+    Ok(())
+}
+
+fn parse_optional_path(value: &str) -> Option<PathBuf> {
+    if value.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(value))
+    }
+}
+
+fn parse_bool(value: &str, key: &str) -> Result<bool> {
+    match value.to_lowercase().as_str() {
+        "true" | "1" | "yes" | "y" | "on" => Ok(true),
+        "false" | "0" | "no" | "n" | "off" => Ok(false),
+        _ => anyhow::bail!("Invalid boolean value for {key}: {value}"),
+    }
+}
+
+fn parse_usize(value: &str, key: &str) -> Result<usize> {
+    value
+        .parse()
+        .map_err(|_| anyhow::anyhow!("Invalid integer value for {key}: {value}"))
+}
+
+fn parse_f32(value: &str, key: &str) -> Result<f32> {
+    value
+        .parse()
+        .map_err(|_| anyhow::anyhow!("Invalid float value for {key}: {value}"))
+}
+
+fn parse_csv_list(value: &str) -> Vec<String> {
+    if value.is_empty() {
+        return Vec::new();
+    }
+    value
+        .split(',')
+        .map(|entry| entry.trim().to_string())
+        .filter(|entry| !entry.is_empty())
+        .collect()
 }
 
 fn cmd_update() {

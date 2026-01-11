@@ -9,6 +9,7 @@ use crate::model::{
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, params};
+use std::collections::{HashSet, VecDeque};
 use std::path::Path;
 use tracing::info;
 
@@ -277,7 +278,8 @@ impl Storage {
             // Batch delete for performance: one DELETE with IN clause instead of N individual DELETEs.
             if !tweets.is_empty() {
                 let placeholders: String = tweets.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-                let delete_sql = format!("DELETE FROM fts_tweets WHERE tweet_id IN ({placeholders})");
+                let delete_sql =
+                    format!("DELETE FROM fts_tweets WHERE tweet_id IN ({placeholders})");
                 let mut delete_stmt = tx.prepare(&delete_sql)?;
                 delete_stmt.execute(rusqlite::params_from_iter(tweets.iter().map(|t| &t.id)))?;
             }
@@ -335,10 +337,17 @@ impl Storage {
             // FTS5 batch delete for likes with text
             let likes_with_text: Vec<_> = likes.iter().filter(|l| l.full_text.is_some()).collect();
             if !likes_with_text.is_empty() {
-                let placeholders: String = likes_with_text.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-                let delete_sql = format!("DELETE FROM fts_likes WHERE tweet_id IN ({placeholders})");
+                let placeholders: String = likes_with_text
+                    .iter()
+                    .map(|_| "?")
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let delete_sql =
+                    format!("DELETE FROM fts_likes WHERE tweet_id IN ({placeholders})");
                 let mut delete_stmt = tx.prepare(&delete_sql)?;
-                delete_stmt.execute(rusqlite::params_from_iter(likes_with_text.iter().map(|l| &l.tweet_id)))?;
+                delete_stmt.execute(rusqlite::params_from_iter(
+                    likes_with_text.iter().map(|l| &l.tweet_id),
+                ))?;
             }
 
             let mut stmt = tx.prepare(
@@ -377,7 +386,11 @@ impl Storage {
                 .flat_map(|c| c.messages.iter().map(|m| m.id.as_str()))
                 .collect();
             if !all_msg_ids.is_empty() {
-                let placeholders: String = all_msg_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+                let placeholders: String = all_msg_ids
+                    .iter()
+                    .map(|_| "?")
+                    .collect::<Vec<_>>()
+                    .join(",");
                 let delete_sql = format!("DELETE FROM fts_dms WHERE dm_id IN ({placeholders})");
                 let mut delete_stmt = tx.prepare(&delete_sql)?;
                 delete_stmt.execute(rusqlite::params_from_iter(all_msg_ids.iter()))?;
@@ -570,7 +583,8 @@ impl Storage {
                 .collect();
 
             if !grok_ids.is_empty() {
-                let placeholders: String = grok_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+                let placeholders: String =
+                    grok_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
                 let delete_sql = format!("DELETE FROM fts_grok WHERE grok_id IN ({placeholders})");
                 let mut delete_stmt = tx.prepare(&delete_sql)?;
                 delete_stmt.execute(rusqlite::params_from_iter(grok_ids.iter()))?;
@@ -801,6 +815,43 @@ impl Storage {
         Ok(dms)
     }
 
+    /// Get all messages for a conversation, ordered by timestamp.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database query fails.
+    pub fn get_conversation_messages(&self, conversation_id: &str) -> Result<Vec<DirectMessage>> {
+        let mut stmt = self.conn.prepare(
+            r"
+            SELECT id, sender_id, recipient_id, text, created_at, urls_json, media_urls_json
+            FROM direct_messages
+            WHERE conversation_id = ?
+            ORDER BY created_at ASC
+            ",
+        )?;
+
+        let messages = stmt
+            .query_map(params![conversation_id], |row| {
+                Ok(DirectMessage {
+                    id: row.get(0)?,
+                    sender_id: row.get(1)?,
+                    recipient_id: row.get(2)?,
+                    text: row.get(3)?,
+                    created_at: row
+                        .get::<_, String>(4)
+                        .ok()
+                        .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
+                        .map_or_else(Utc::now, |dt| dt.with_timezone(&Utc)),
+                    urls: serde_json::from_str(&row.get::<_, String>(5)?).unwrap_or_default(),
+                    media_urls: serde_json::from_str(&row.get::<_, String>(6)?).unwrap_or_default(),
+                })
+            })?
+            .filter_map(std::result::Result::ok)
+            .collect();
+
+        Ok(messages)
+    }
+
     /// Search Grok messages using FTS5.
     ///
     /// # Errors
@@ -884,6 +935,100 @@ impl Storage {
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(e.into()),
         }
+    }
+
+    /// Get replies to a tweet by parent ID, ordered by creation time.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database query fails.
+    pub fn get_tweet_replies(&self, parent_id: &str) -> Result<Vec<Tweet>> {
+        let mut stmt = self.conn.prepare(
+            r"
+            SELECT id, created_at, full_text, source, favorite_count, retweet_count,
+                   lang, in_reply_to_status_id, in_reply_to_user_id, in_reply_to_screen_name,
+                   is_retweet, hashtags_json, mentions_json, urls_json, media_json
+            FROM tweets
+            WHERE in_reply_to_status_id = ?
+            ORDER BY created_at ASC
+            ",
+        )?;
+
+        let tweets = stmt
+            .query_map(params![parent_id], |row| {
+                Ok(Tweet {
+                    id: row.get(0)?,
+                    created_at: row
+                        .get::<_, String>(1)
+                        .ok()
+                        .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
+                        .map_or_else(Utc::now, |dt| dt.with_timezone(&Utc)),
+                    full_text: row.get(2)?,
+                    source: row.get(3)?,
+                    favorite_count: row.get(4)?,
+                    retweet_count: row.get(5)?,
+                    lang: row.get(6)?,
+                    in_reply_to_status_id: row.get(7)?,
+                    in_reply_to_user_id: row.get(8)?,
+                    in_reply_to_screen_name: row.get(9)?,
+                    is_retweet: row.get::<_, i32>(10)? != 0,
+                    hashtags: serde_json::from_str(&row.get::<_, String>(11)?).unwrap_or_default(),
+                    user_mentions: serde_json::from_str(&row.get::<_, String>(12)?)
+                        .unwrap_or_default(),
+                    urls: serde_json::from_str(&row.get::<_, String>(13)?).unwrap_or_default(),
+                    media: serde_json::from_str(&row.get::<_, String>(14)?).unwrap_or_default(),
+                })
+            })?
+            .filter_map(std::result::Result::ok)
+            .collect();
+
+        Ok(tweets)
+    }
+
+    /// Get a tweet thread rooted at the earliest ancestor, including all replies.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database query fails.
+    pub fn get_tweet_thread(&self, id: &str) -> Result<Vec<Tweet>> {
+        let Some(mut root) = self.get_tweet(id)? else {
+            return Ok(Vec::new());
+        };
+
+        let mut seen = HashSet::new();
+        seen.insert(root.id.clone());
+
+        while let Some(parent_id) = root.in_reply_to_status_id.clone() {
+            if !seen.insert(parent_id.clone()) {
+                break;
+            }
+            match self.get_tweet(&parent_id)? {
+                Some(parent) => root = parent,
+                None => break,
+            }
+        }
+
+        let mut thread = Vec::new();
+        let mut queue = VecDeque::new();
+        let mut visited = HashSet::new();
+
+        queue.push_back(root);
+
+        while let Some(tweet) = queue.pop_front() {
+            if !visited.insert(tweet.id.clone()) {
+                continue;
+            }
+            let replies = self.get_tweet_replies(&tweet.id)?;
+            for reply in replies {
+                if !visited.contains(&reply.id) {
+                    queue.push_back(reply);
+                }
+            }
+            thread.push(tweet);
+        }
+
+        thread.sort_by_key(|tweet| tweet.created_at);
+        Ok(thread)
     }
 
     /// Get all tweets, optionally limited.
@@ -1062,6 +1207,56 @@ impl Storage {
 
         Ok(following)
     }
+
+    /// Get all blocks, optionally limited.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database query fails.
+    pub fn get_all_blocks(&self, limit: Option<usize>) -> Result<Vec<Block>> {
+        let query = limit.map_or_else(
+            || "SELECT account_id, user_link FROM blocks".to_string(),
+            |lim| format!("SELECT account_id, user_link FROM blocks LIMIT {lim}"),
+        );
+
+        let mut stmt = self.conn.prepare(&query)?;
+        let blocks = stmt
+            .query_map([], |row| {
+                Ok(Block {
+                    account_id: row.get(0)?,
+                    user_link: row.get(1)?,
+                })
+            })?
+            .filter_map(std::result::Result::ok)
+            .collect();
+
+        Ok(blocks)
+    }
+
+    /// Get all mutes, optionally limited.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database query fails.
+    pub fn get_all_mutes(&self, limit: Option<usize>) -> Result<Vec<Mute>> {
+        let query = limit.map_or_else(
+            || "SELECT account_id, user_link FROM mutes".to_string(),
+            |lim| format!("SELECT account_id, user_link FROM mutes LIMIT {lim}"),
+        );
+
+        let mut stmt = self.conn.prepare(&query)?;
+        let mutes = stmt
+            .query_map([], |row| {
+                Ok(Mute {
+                    account_id: row.get(0)?,
+                    user_link: row.get(1)?,
+                })
+            })?
+            .filter_map(std::result::Result::ok)
+            .collect();
+
+        Ok(mutes)
+    }
 }
 
 fn limit_to_i64(limit: usize) -> i64 {
@@ -1071,6 +1266,7 @@ fn limit_to_i64(limit: usize) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Duration;
 
     fn create_test_tweet(id: &str, text: &str) -> Tweet {
         Tweet {
@@ -1158,6 +1354,104 @@ mod tests {
         let storage = Storage::open_memory().unwrap();
         let tweet = storage.get_tweet("nonexistent").unwrap();
         assert!(tweet.is_none());
+    }
+
+    #[test]
+    fn test_get_tweet_thread() {
+        let mut storage = Storage::open_memory().unwrap();
+
+        let root_date = DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let reply_first_date = DateTime::parse_from_rfc3339("2024-01-01T00:01:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let reply_followup_date = DateTime::parse_from_rfc3339("2024-01-01T00:02:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let branch_date = DateTime::parse_from_rfc3339("2024-01-01T00:03:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let root = Tweet {
+            id: "1".to_string(),
+            created_at: root_date,
+            full_text: "Root tweet".to_string(),
+            source: None,
+            favorite_count: 0,
+            retweet_count: 0,
+            lang: None,
+            in_reply_to_status_id: None,
+            in_reply_to_user_id: None,
+            in_reply_to_screen_name: None,
+            is_retweet: false,
+            hashtags: vec![],
+            user_mentions: vec![],
+            urls: vec![],
+            media: vec![],
+        };
+        let reply = Tweet {
+            id: "2".to_string(),
+            created_at: reply_first_date,
+            full_text: "Reply tweet".to_string(),
+            source: None,
+            favorite_count: 0,
+            retweet_count: 0,
+            lang: None,
+            in_reply_to_status_id: Some("1".to_string()),
+            in_reply_to_user_id: None,
+            in_reply_to_screen_name: None,
+            is_retweet: false,
+            hashtags: vec![],
+            user_mentions: vec![],
+            urls: vec![],
+            media: vec![],
+        };
+        let reply2 = Tweet {
+            id: "3".to_string(),
+            created_at: reply_followup_date,
+            full_text: "Reply to reply".to_string(),
+            source: None,
+            favorite_count: 0,
+            retweet_count: 0,
+            lang: None,
+            in_reply_to_status_id: Some("2".to_string()),
+            in_reply_to_user_id: None,
+            in_reply_to_screen_name: None,
+            is_retweet: false,
+            hashtags: vec![],
+            user_mentions: vec![],
+            urls: vec![],
+            media: vec![],
+        };
+        let branch = Tweet {
+            id: "4".to_string(),
+            created_at: branch_date,
+            full_text: "Branch reply".to_string(),
+            source: None,
+            favorite_count: 0,
+            retweet_count: 0,
+            lang: None,
+            in_reply_to_status_id: Some("1".to_string()),
+            in_reply_to_user_id: None,
+            in_reply_to_screen_name: None,
+            is_retweet: false,
+            hashtags: vec![],
+            user_mentions: vec![],
+            urls: vec![],
+            media: vec![],
+        };
+
+        storage
+            .store_tweets(&[root, reply, reply2, branch])
+            .unwrap();
+
+        let thread = storage.get_tweet_thread("3").unwrap();
+        assert_eq!(thread.len(), 4);
+        assert_eq!(thread[0].id, "1");
+        assert_eq!(thread[1].id, "2");
+        assert_eq!(thread[2].id, "3");
+        assert_eq!(thread[3].id, "4");
     }
 
     #[test]
@@ -1258,6 +1552,47 @@ mod tests {
         let results = storage.search_dms("rust", 10).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id, "dm1");
+    }
+
+    #[test]
+    fn test_get_conversation_messages() {
+        let mut storage = Storage::open_memory().unwrap();
+
+        let base_time = DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let later_time = base_time + Duration::minutes(5);
+
+        let conversation = DmConversation {
+            conversation_id: "conv1".to_string(),
+            messages: vec![
+                DirectMessage {
+                    id: "dm2".to_string(),
+                    sender_id: "user2".to_string(),
+                    recipient_id: "user1".to_string(),
+                    text: "Second message".to_string(),
+                    created_at: later_time,
+                    urls: vec![],
+                    media_urls: vec![],
+                },
+                DirectMessage {
+                    id: "dm1".to_string(),
+                    sender_id: "user1".to_string(),
+                    recipient_id: "user2".to_string(),
+                    text: "First message".to_string(),
+                    created_at: base_time,
+                    urls: vec![],
+                    media_urls: vec![],
+                },
+            ],
+        };
+
+        storage.store_dm_conversations(&[conversation]).unwrap();
+
+        let messages = storage.get_conversation_messages("conv1").unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].id, "dm1");
+        assert_eq!(messages[1].id, "dm2");
     }
 
     #[test]
