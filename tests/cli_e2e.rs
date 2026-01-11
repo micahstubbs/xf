@@ -1080,3 +1080,161 @@ fn test_doctor_performance_check() {
 
     test_log!("test_doctor_performance_check completed in {:?}", elapsed);
 }
+
+// =============================================================================
+// Shell Command Tests (xf-11.3.4)
+// =============================================================================
+
+#[test]
+fn test_shell_help() {
+    test_log!("Starting test_shell_help");
+    let start = Instant::now();
+
+    let mut cmd = xf_cmd();
+    cmd.arg("shell")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Launch interactive REPL mode"))
+        .stdout(predicate::str::contains("--prompt"))
+        .stdout(predicate::str::contains("--page-size"))
+        .stdout(predicate::str::contains("--no-history"))
+        .stdout(predicate::str::contains("--history-file"));
+
+    test_log!("test_shell_help completed in {:?}", start.elapsed());
+}
+
+#[test]
+fn test_shell_requires_database() {
+    test_log!("Starting test_shell_requires_database");
+    let start = Instant::now();
+
+    let output_dir = TempDir::new().expect("Failed to create output dir");
+    let db_path = output_dir.path().join("nonexistent.db");
+    let index_path = output_dir.path().join("nonexistent_index");
+
+    // Shell should fail when database doesn't exist
+    let mut cmd = xf_cmd();
+    cmd.arg("shell")
+        .arg("--db")
+        .arg(&db_path)
+        .arg("--index")
+        .arg(&index_path)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Database not found").or(predicate::str::contains("not found")));
+
+    test_log!(
+        "test_shell_requires_database completed in {:?}",
+        start.elapsed()
+    );
+}
+
+#[test]
+fn test_shell_requires_index() {
+    test_log!("Starting test_shell_requires_index");
+    let start = Instant::now();
+
+    let output_dir = TempDir::new().expect("Failed to create output dir");
+    let db_path = output_dir.path().join("test.db");
+    let index_path = output_dir.path().join("nonexistent_index");
+
+    // Create an empty db file
+    fs::write(&db_path, "").expect("Failed to create test db file");
+
+    // Shell should fail when index doesn't exist
+    let mut cmd = xf_cmd();
+    cmd.arg("shell")
+        .arg("--db")
+        .arg(&db_path)
+        .arg("--index")
+        .arg(&index_path)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Search index not found").or(predicate::str::contains("not found")));
+
+    test_log!(
+        "test_shell_requires_index completed in {:?}",
+        start.elapsed()
+    );
+}
+
+#[test]
+fn test_shell_custom_prompt_parsing() {
+    test_log!("Starting test_shell_custom_prompt_parsing");
+    let start = Instant::now();
+
+    // Verify that custom prompt option is parsed correctly via help
+    let mut cmd = xf_cmd();
+    cmd.arg("shell")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--prompt"))
+        .stdout(predicate::str::contains("Custom prompt string"));
+
+    test_log!(
+        "test_shell_custom_prompt_parsing completed in {:?}",
+        start.elapsed()
+    );
+}
+
+#[test]
+fn test_shell_page_size_parsing() {
+    test_log!("Starting test_shell_page_size_parsing");
+    let start = Instant::now();
+
+    // Verify that page-size option is parsed correctly via help
+    let mut cmd = xf_cmd();
+    cmd.arg("shell")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--page-size"))
+        .stdout(predicate::str::contains("Number of results per page"));
+
+    test_log!(
+        "test_shell_page_size_parsing completed in {:?}",
+        start.elapsed()
+    );
+}
+
+#[test]
+fn test_shell_no_history_parsing() {
+    test_log!("Starting test_shell_no_history_parsing");
+    let start = Instant::now();
+
+    // Verify that no-history option is parsed correctly via help
+    let mut cmd = xf_cmd();
+    cmd.arg("shell")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--no-history"))
+        .stdout(predicate::str::contains("Disable history file"));
+
+    test_log!(
+        "test_shell_no_history_parsing completed in {:?}",
+        start.elapsed()
+    );
+}
+
+#[test]
+fn test_shell_history_file_parsing() {
+    test_log!("Starting test_shell_history_file_parsing");
+    let start = Instant::now();
+
+    // Verify that history-file option is parsed correctly via help
+    let mut cmd = xf_cmd();
+    cmd.arg("shell")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--history-file"))
+        .stdout(predicate::str::contains("Path to history file"));
+
+    test_log!(
+        "test_shell_history_file_parsing completed in {:?}",
+        start.elapsed()
+    );
+}

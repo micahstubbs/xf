@@ -18,6 +18,7 @@ use tracing::{Level, info, warn};
 use tracing_subscriber::EnvFilter;
 
 use xf::cli;
+use xf::repl;
 use xf::config::Config;
 use xf::date_parser;
 use xf::search;
@@ -63,6 +64,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         Commands::Doctor(args) => cmd_doctor(&cli, args),
+        Commands::Shell(args) => cmd_shell(&cli, args),
     }
 }
 
@@ -2121,4 +2123,44 @@ fn cmd_doctor(cli: &Cli, args: &cli::DoctorArgs) -> Result<()> {
         std::process::exit(1);
     }
     Ok(())
+}
+
+/// Launch interactive REPL shell.
+fn cmd_shell(cli: &Cli, args: &cli::ShellArgs) -> Result<()> {
+    let db_path = get_db_path(cli);
+    let index_path = get_index_path(cli);
+
+    // Check that DB exists
+    if !db_path.exists() {
+        anyhow::bail!(
+            "Database not found at {}. Run 'xf index <archive>' first.",
+            db_path.display()
+        );
+    }
+
+    // Check that index exists
+    if !index_path.exists() {
+        anyhow::bail!(
+            "Search index not found at {}. Run 'xf index <archive>' first.",
+            index_path.display()
+        );
+    }
+
+    info!(
+        db = %db_path.display(),
+        index = %index_path.display(),
+        "Starting REPL shell"
+    );
+
+    let storage = Storage::open(&db_path)?;
+    let search = SearchEngine::open(&index_path)?;
+
+    let config = repl::ReplConfig {
+        prompt: args.prompt.clone(),
+        page_size: args.page_size,
+        no_history: args.no_history,
+        history_file: args.history_file.clone(),
+    };
+
+    repl::run(storage, search, config)
 }

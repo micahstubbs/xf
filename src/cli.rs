@@ -88,6 +88,9 @@ pub enum Commands {
 
     /// Check archive, database, and index health
     Doctor(DoctorArgs),
+
+    /// Launch interactive REPL mode
+    Shell(ShellArgs),
 }
 
 #[derive(Args, Debug)]
@@ -263,6 +266,25 @@ pub struct DoctorArgs {
     /// Apply safe, idempotent repairs when issues are found
     #[arg(long)]
     pub fix: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct ShellArgs {
+    /// Custom prompt string (default: "xf> ")
+    #[arg(long, default_value = "xf> ")]
+    pub prompt: String,
+
+    /// Number of results per page (default: 10)
+    #[arg(long, default_value = "10")]
+    pub page_size: usize,
+
+    /// Disable history file
+    #[arg(long)]
+    pub no_history: bool,
+
+    /// Path to history file (default: `~/.xf_history`)
+    #[arg(long)]
+    pub history_file: Option<PathBuf>,
 }
 
 #[derive(ValueEnum, Clone, Debug, PartialEq, Eq)]

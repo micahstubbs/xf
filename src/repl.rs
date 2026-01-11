@@ -12,18 +12,44 @@ use tracing::{debug, info, warn};
 
 use crate::{SearchEngine, SearchResult, Storage};
 
+/// Configuration for the REPL session.
+#[derive(Debug, Clone)]
+pub struct ReplConfig {
+    /// Custom prompt string
+    pub prompt: String,
+    /// Number of results per page
+    pub page_size: usize,
+    /// Disable history file
+    pub no_history: bool,
+    /// Path to history file (None = use default `~/.xf_history`)
+    pub history_file: Option<PathBuf>,
+}
+
+impl Default for ReplConfig {
+    fn default() -> Self {
+        Self {
+            prompt: "xf> ".to_string(),
+            page_size: 10,
+            no_history: false,
+            history_file: None,
+        }
+    }
+}
+
 /// REPL session state.
 pub struct ReplSession {
     storage: Storage,
     search: SearchEngine,
     last_results: Vec<SearchResult>,
     last_query: Option<String>,
-    history_path: PathBuf,
+    history_path: Option<PathBuf>,
     prompt_context: PromptContext,
     /// Current offset for pagination
     current_offset: usize,
     /// Page size for results
     page_size: usize,
+    /// Custom prompt string
+    prompt_str: String,
 }
 
 #[derive(Default)]
@@ -71,19 +97,37 @@ enum ExportFormat {
 /// # Errors
 ///
 /// Returns an error if readline setup, history persistence, or command execution fails.
-pub fn run(storage: Storage, search: SearchEngine) -> Result<()> {
-    let config = Config::builder()
+pub fn run(storage: Storage, search: SearchEngine, repl_config: ReplConfig) -> Result<()> {
+    let rl_config = Config::builder()
         .history_ignore_space(true)
         .history_ignore_dups(true)?
         .completion_type(CompletionType::List)
         .edit_mode(EditMode::Emacs)
         .build();
 
-    let mut rl: Editor<(), DefaultHistory> = Editor::with_config(config)?;
+    let mut rl: Editor<(), DefaultHistory> = Editor::with_config(rl_config)?;
 
-    let history_path = dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".xf_history");
+    // Determine history path
+    let history_path = if repl_config.no_history {
+        None
+    } else {
+        Some(
+            repl_config
+                .history_file
+                .unwrap_or_else(|| {
+                    dirs::home_dir()
+                        .unwrap_or_else(|| PathBuf::from("."))
+                        .join(".xf_history")
+                }),
+        )
+    };
+
+    debug!(
+        prompt = %repl_config.prompt,
+        page_size = repl_config.page_size,
+        history_path = ?history_path,
+        "REPL configuration"
+    );
 
     let mut session = ReplSession {
         storage,
@@ -93,10 +137,14 @@ pub fn run(storage: Storage, search: SearchEngine) -> Result<()> {
         history_path,
         prompt_context: PromptContext::Normal,
         current_offset: 0,
-        page_size: 10,
+        page_size: repl_config.page_size,
+        prompt_str: repl_config.prompt,
     };
 
-    let _ = rl.load_history(&session.history_path);
+    // Load history if enabled
+    if let Some(ref path) = session.history_path {
+        let _ = rl.load_history(path);
+    }
 
     info!("Starting xf REPL session");
     println!(
@@ -141,7 +189,10 @@ pub fn run(storage: Storage, search: SearchEngine) -> Result<()> {
         }
     }
 
-    rl.save_history(&session.history_path)?;
+    // Save history if enabled
+    if let Some(ref path) = session.history_path {
+        rl.save_history(path)?;
+    }
     info!("Ended xf REPL session");
     println!("Goodbye!");
     Ok(())
@@ -149,12 +200,14 @@ pub fn run(storage: Storage, search: SearchEngine) -> Result<()> {
 
 impl ReplSession {
     fn format_prompt(&self) -> String {
+        // Extract the base prompt (without trailing "> " if present)
+        let base = self.prompt_str.trim_end_matches("> ").trim_end_matches('>');
         match &self.prompt_context {
-            PromptContext::Normal => "xf> ".to_string(),
-            PromptContext::WithResults(n) => format!("xf [{n}]> "),
+            PromptContext::Normal => self.prompt_str.clone(),
+            PromptContext::WithResults(n) => format!("{base} [{n}]> "),
             PromptContext::InConversation(id) => {
                 let snippet = id.get(..8.min(id.len())).unwrap_or(id);
-                format!("xf [dm:{snippet}]> ")
+                format!("{base} [dm:{snippet}]> ")
             }
         }
     }
