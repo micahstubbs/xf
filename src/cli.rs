@@ -54,7 +54,7 @@ pub struct Cli {
     pub quiet: bool,
 
     /// Disable colored output (also respects `NO_COLOR` env var)
-    #[arg(long, global = true, env = "NO_COLOR", hide_env = true)]
+    #[arg(long, global = true)]
     pub no_color: bool,
 
     #[command(subcommand)]

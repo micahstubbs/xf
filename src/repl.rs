@@ -885,7 +885,7 @@ impl ReplSession {
                 for r in &self.last_results {
                     let created = r.created_at.to_rfc3339();
                     // Escape quotes and replace newlines/carriage returns for valid CSV
-                    let text_escaped = r.text.replace('"', "\"\"").replace(['\n', '\r'], " ");
+                    let text_escaped = escape_csv_text(&r.text);
                     println!(
                         "{},{},{:.2},{},\"{}\"",
                         r.id, r.result_type, r.score, created, text_escaped
@@ -900,6 +900,10 @@ impl ReplSession {
         );
         Ok(())
     }
+}
+
+fn escape_csv_text(text: &str) -> String {
+    text.replace('"', "\"\"").replace(['\n', '\r'], " ")
 }
 
 fn parse_command(input: &str) -> Result<Command> {
@@ -1126,6 +1130,13 @@ mod tests {
     use super::*;
 
     // ======================== Command Parsing Tests ========================
+
+    #[test]
+    fn test_escape_csv_text_sanitizes_newlines_and_quotes() {
+        let input = "Hello\r\n\"world\", ok";
+        let escaped = escape_csv_text(input);
+        assert_eq!(escaped, "Hello  \"\"world\"\", ok");
+    }
 
     #[test]
     fn test_parse_search_command() {

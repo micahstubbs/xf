@@ -1356,8 +1356,8 @@ fn format_count(n: i64) -> String {
 /// - < 1 hour: "Nm ago"
 /// - < 24 hours: "Nh ago"
 /// - < 7 days: "Nd ago"
-/// - < 1 year: "Mon D"
-/// - >= 1 year: "Mon D, YYYY"
+/// - Same calendar year: "Mon D"
+/// - Different year: "Mon D, YYYY"
 fn format_relative_date(dt: DateTime<Utc>) -> String {
     format_relative_date_with_base(dt, Utc::now())
 }
@@ -1383,8 +1383,8 @@ fn format_relative_date_with_base(dt: DateTime<Utc>, now: DateTime<Utc>) -> Stri
         format!("{hours}h ago")
     } else if days < 7 {
         format!("{days}d ago")
-    } else if days < 365 {
-        // Same year: "Jan 15"
+    } else if dt.year() == now.year() {
+        // Same calendar year: "Jan 15"
         dt.format("%b %d").to_string()
     } else {
         // Different year: "Jan 15, 2023"
@@ -2347,4 +2347,72 @@ fn cmd_shell(cli: &Cli, args: &cli::ShellArgs) -> Result<()> {
     };
 
     repl::run(storage, search, config)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{csv_escape_text, format_relative_date_with_base};
+    use chrono::{Duration, TimeZone, Utc};
+
+    #[test]
+    fn format_relative_date_with_base_thresholds() {
+        let base = Utc
+            .with_ymd_and_hms(2025, 1, 10, 12, 0, 0)
+            .single()
+            .unwrap();
+
+        assert_eq!(
+            format_relative_date_with_base(base - Duration::seconds(30), base),
+            "just now"
+        );
+        assert_eq!(
+            format_relative_date_with_base(base - Duration::minutes(5), base),
+            "5m ago"
+        );
+        assert_eq!(
+            format_relative_date_with_base(base - Duration::hours(3), base),
+            "3h ago"
+        );
+        assert_eq!(
+            format_relative_date_with_base(base - Duration::days(2), base),
+            "2d ago"
+        );
+
+        // Same calendar year: shows "Mon DD" without year
+        let same_year = Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).single().unwrap();
+        assert_eq!(
+            format_relative_date_with_base(same_year, base),
+            "Jan 01" // Same year (2025), no year suffix
+        );
+
+        // Different calendar year (even if less than 365 days): shows year
+        let different_year = Utc
+            .with_ymd_and_hms(2024, 12, 11, 0, 0, 0)
+            .single()
+            .unwrap();
+        assert_eq!(
+            format_relative_date_with_base(different_year, base),
+            "Dec 11, 2024" // Different year, must show year
+        );
+
+        // Over a year ago: shows year
+        let over_year = base - Duration::days(400);
+        assert_eq!(
+            format_relative_date_with_base(over_year, base),
+            over_year.format("%b %d, %Y").to_string()
+        );
+
+        let future = base + Duration::days(2);
+        assert_eq!(
+            format_relative_date_with_base(future, base),
+            future.format("%b %d, %Y").to_string()
+        );
+    }
+
+    #[test]
+    fn csv_escape_text_sanitizes_newlines_and_quotes() {
+        let input = "Hello\r\n\"world\", ok";
+        let escaped = csv_escape_text(input);
+        assert_eq!(escaped, "Hello  \"\"world\"\", ok");
+    }
 }
