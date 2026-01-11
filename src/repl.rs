@@ -605,7 +605,7 @@ impl ReplSession {
     fn run_stats(&self) -> Result<()> {
         let stats = self.storage.get_stats()?;
         println!("{}", "Archive Statistics".bold().cyan());
-        println!("{}", "─".repeat(40));
+        println!("{}", "─".repeat(60));
         println!("  {:<20} {}", "Tweets:", stats.tweets_count);
         println!("  {:<20} {}", "Likes:", stats.likes_count);
         println!("  {:<20} {}", "DM Messages:", stats.dms_count);

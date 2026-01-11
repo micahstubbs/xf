@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Datelike, Utc};
 use clap::{CommandFactory, Parser};
 use clap_complete::generate;
-use colored::Colorize;
+use colored::{Colorize, control};
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::ThreadPoolBuilder;
 use serde::Serialize;
@@ -30,6 +30,12 @@ use xf::{
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    // Handle --no-color flag and NO_COLOR env var
+    // The colored crate respects NO_COLOR by default, but we also support --no-color flag
+    if cli.no_color || std::env::var("NO_COLOR").is_ok() {
+        control::set_override(false);
+    }
 
     // Setup logging
     let log_level = if cli.verbose {
@@ -930,19 +936,19 @@ fn cmd_stats(cli: &Cli, args: &cli::StatsArgs) -> Result<()> {
         _ => {
             // Show fancy banner for --detailed mode
             if args.detailed {
-                println!("{}", "═".repeat(65).bright_blue());
+                println!("{}", "═".repeat(70).bright_blue());
                 println!(
                     "{}",
                     "              ARCHIVE ANALYTICS DASHBOARD              "
                         .bold()
                         .on_bright_blue()
                 );
-                println!("{}", "═".repeat(65).bright_blue());
+                println!("{}", "═".repeat(70).bright_blue());
                 println!();
             }
 
             println!("{}", "📊 Overview".bold().cyan());
-            println!("{}", "─".repeat(40));
+            println!("{}", "─".repeat(60));
             println!(
                 "  {:<20} {:>10}",
                 "Tweets:",
@@ -980,7 +986,7 @@ fn cmd_stats(cli: &Cli, args: &cli::StatsArgs) -> Result<()> {
                 format_count(stats.blocks_count)
             );
             println!("  {:<20} {:>10}", "Mutes:", format_count(stats.mutes_count));
-            println!("{}", "─".repeat(40));
+            println!("{}", "─".repeat(60));
 
             if let (Some(first), Some(last)) = (stats.first_tweet_date, stats.last_tweet_date) {
                 println!(
@@ -997,7 +1003,7 @@ fn cmd_stats(cli: &Cli, args: &cli::StatsArgs) -> Result<()> {
                 if !detailed.is_empty() {
                     println!();
                     println!("{}", "📅 Tweets by Month".bold().cyan());
-                    println!("{}", "─".repeat(40));
+                    println!("{}", "─".repeat(60));
                     for entry in detailed {
                         println!(
                             "  {:04}-{:02}: {}",
@@ -1013,7 +1019,7 @@ fn cmd_stats(cli: &Cli, args: &cli::StatsArgs) -> Result<()> {
                 if !items.is_empty() {
                     println!();
                     println!("{}", "#️⃣ Top Hashtags".bold().cyan());
-                    println!("{}", "─".repeat(40));
+                    println!("{}", "─".repeat(60));
                     for item in items {
                         println!(
                             "  {:<20} {}",
@@ -1028,7 +1034,7 @@ fn cmd_stats(cli: &Cli, args: &cli::StatsArgs) -> Result<()> {
                 if !items.is_empty() {
                     println!();
                     println!("{}", "👤 Top Mentions".bold().cyan());
-                    println!("{}", "─".repeat(40));
+                    println!("{}", "─".repeat(60));
                     for item in items {
                         println!(
                             "  {:<20} {}",
@@ -2148,14 +2154,14 @@ fn cmd_doctor(cli: &Cli, args: &cli::DoctorArgs) -> Result<()> {
         }
         _ => {
             // Text output with colors and emojis
-            println!("{}", "═".repeat(65).bright_blue());
+            println!("{}", "═".repeat(70).bright_blue());
             println!(
                 "{}",
                 "                    XF HEALTH CHECK                    "
                     .bold()
                     .on_bright_blue()
             );
-            println!("{}", "═".repeat(65).bright_blue());
+            println!("{}", "═".repeat(70).bright_blue());
             println!();
 
             // Group by category
@@ -2185,7 +2191,7 @@ fn cmd_doctor(cli: &Cli, args: &cli::DoctorArgs) -> Result<()> {
 
             // Summary
             println!();
-            println!("{}", "═".repeat(65).bright_blue());
+            println!("{}", "═".repeat(70).bright_blue());
             println!(
                 "  {} {} passed  {} {} warnings  {} {} errors  ({} total, {}ms)",
                 passed.to_string().green(),
