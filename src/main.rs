@@ -1352,11 +1352,39 @@ fn cmd_list(cli: &Cli, args: &cli::ListArgs) -> Result<()> {
     let db_path = get_db_path(cli);
 
     if matches!(args.what, ListTarget::Files) {
+        let config = Config::load();
+        let Some(archive_path) = config.paths.archive else {
+            println!(
+                "{}",
+                "No archive path configured. Use 'xf config --archive <path>' or set XF_ARCHIVE."
+                    .yellow()
+            );
+            return Ok(());
+        };
+
+        if !archive_path.exists() {
+            println!(
+                "{}",
+                format!("Archive path not found: {}", archive_path.display()).red()
+            );
+            return Ok(());
+        }
+
+        let parser = ArchiveParser::new(&archive_path);
+        let files = parser.list_data_files()?;
+        if files.is_empty() {
+            println!("{}", "No data files found in archive.".yellow());
+            return Ok(());
+        }
+
         println!(
-            "{}",
-            "Use 'xf index <path>' to index an archive first, then use list commands to browse data."
-                .yellow()
+            "{} {} files:\n",
+            "Showing".dimmed(),
+            files.len().to_string().cyan()
         );
+        for file in &files {
+            println!("{}", file.cyan());
+        }
         return Ok(());
     }
 
@@ -1397,7 +1425,7 @@ fn cmd_list(cli: &Cli, args: &cli::ListArgs) -> Result<()> {
                 println!("{} {}", like.tweet_id.cyan(), text);
             }
         }
-        ListTarget::Dms | ListTarget::Conversations => {
+        ListTarget::Dms => {
             let dms = storage.get_all_dms(limit)?;
             println!(
                 "{} {} DM messages:\n",
@@ -1414,6 +1442,31 @@ fn cmd_list(cli: &Cli, args: &cli::ListArgs) -> Result<()> {
                     "→".dimmed(),
                     dm.recipient_id.blue(),
                     text
+                );
+            }
+        }
+        ListTarget::Conversations => {
+            let conversations = storage.get_dm_conversation_summaries(limit)?;
+            println!(
+                "{} {} conversations:\n",
+                "Showing".dimmed(),
+                conversations.len().to_string().cyan()
+            );
+            for convo in &conversations {
+                let participants = if convo.participant_ids.is_empty() {
+                    "[unknown]".to_string()
+                } else {
+                    convo.participant_ids.join(", ")
+                };
+                let first = format_optional_date(convo.first_message_at);
+                let last = format_optional_date(convo.last_message_at);
+                println!(
+                    "{} {} msgs  {} → {}  {}",
+                    convo.conversation_id.cyan(),
+                    convo.message_count.to_string().cyan(),
+                    first.dimmed(),
+                    last.dimmed(),
+                    participants.blue()
                 );
             }
         }
@@ -1481,6 +1534,13 @@ fn truncate_text(text: &str, max_len: usize) -> String {
         let truncated: String = text.chars().take(max_len.saturating_sub(3)).collect();
         format!("{truncated}...")
     }
+}
+
+fn format_optional_date(value: Option<DateTime<Utc>>) -> String {
+    value.map_or_else(
+        || "unknown".to_string(),
+        |dt| dt.format("%Y-%m-%d %H:%M").to_string(),
+    )
 }
 
 fn cmd_export(cli: &Cli, args: &cli::ExportArgs) -> Result<()> {

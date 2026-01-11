@@ -66,6 +66,16 @@ pub struct DmConversation {
     pub messages: Vec<DirectMessage>,
 }
 
+/// Summary information for a DM conversation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DmConversationSummary {
+    pub conversation_id: String,
+    pub participant_ids: Vec<String>,
+    pub message_count: i64,
+    pub first_message_at: Option<DateTime<Utc>>,
+    pub last_message_at: Option<DateTime<Utc>>,
+}
+
 /// A direct message
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DirectMessage {

@@ -4,8 +4,8 @@
 
 use crate::doctor::{CheckCategory, CheckStatus, HealthCheck, TableStat};
 use crate::model::{
-    ArchiveInfo, ArchiveStats, Block, DirectMessage, DmConversation, Follower, Following,
-    GrokMessage, Like, Mute, Tweet,
+    ArchiveInfo, ArchiveStats, Block, DirectMessage, DmConversation, DmConversationSummary,
+    Follower, Following, GrokMessage, Like, Mute, Tweet,
 };
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -27,6 +27,12 @@ fn parse_rfc3339_or_epoch(value: Option<String>) -> DateTime<Utc> {
     value
         .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
         .map_or_else(epoch_utc, |dt| dt.with_timezone(&Utc))
+}
+
+fn parse_rfc3339_opt(value: Option<String>) -> Option<DateTime<Utc>> {
+    value
+        .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
+        .map(|dt| dt.with_timezone(&Utc))
 }
 
 /// `SQLite` storage manager
@@ -1479,6 +1485,58 @@ impl Storage {
         Ok(dms)
     }
 
+    /// Get DM conversation summaries, optionally limited.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database query fails.
+    pub fn get_dm_conversation_summaries(
+        &self,
+        limit: Option<usize>,
+    ) -> Result<Vec<DmConversationSummary>> {
+        let query = limit.map_or_else(
+            || {
+                r"SELECT conversation_id, participant_ids, message_count,
+                   first_message_at, last_message_at
+                FROM dm_conversations
+                ORDER BY last_message_at DESC"
+                    .to_string()
+            },
+            |lim| {
+                format!(
+                    r"SELECT conversation_id, participant_ids, message_count,
+                   first_message_at, last_message_at
+                FROM dm_conversations
+                ORDER BY last_message_at DESC LIMIT {lim}"
+                )
+            },
+        );
+
+        let mut stmt = self.conn.prepare(&query)?;
+        let summaries = stmt
+            .query_map([], |row| {
+                let participants: String = row.get(1)?;
+                let participant_ids = participants
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .collect();
+
+                Ok(DmConversationSummary {
+                    conversation_id: row.get(0)?,
+                    participant_ids,
+                    message_count: row.get(2)?,
+                    first_message_at: parse_rfc3339_opt(row.get::<_, Option<String>>(3)?),
+                    last_message_at: parse_rfc3339_opt(row.get::<_, Option<String>>(4)?),
+                })
+            })?
+            .filter_map(std::result::Result::ok)
+            .collect();
+
+        Ok(summaries)
+    }
+
     /// Get all followers, optionally limited.
     ///
     /// # Errors
@@ -1624,6 +1682,7 @@ fn limit_to_i64(limit: usize) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::TweetUrl;
     use chrono::Duration;
 
     fn create_test_tweet(id: &str, text: &str) -> Tweet {
@@ -1951,6 +2010,175 @@ mod tests {
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].id, "dm1");
         assert_eq!(messages[1].id, "dm2");
+    }
+
+    #[test]
+    fn test_get_dm_conversation_summaries() {
+        let mut storage = Storage::open_memory().unwrap();
+
+        let base_time = DateTime::parse_from_rfc3339("2024-02-01T10:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let later_time = base_time + Duration::minutes(30);
+
+        let conversation = DmConversation {
+            conversation_id: "conv_summary".to_string(),
+            messages: vec![
+                DirectMessage {
+                    id: "dm1".to_string(),
+                    sender_id: "user2".to_string(),
+                    recipient_id: "user1".to_string(),
+                    text: "Second message".to_string(),
+                    created_at: later_time,
+                    urls: vec![],
+                    media_urls: vec![],
+                },
+                DirectMessage {
+                    id: "dm0".to_string(),
+                    sender_id: "user1".to_string(),
+                    recipient_id: "user2".to_string(),
+                    text: "First message".to_string(),
+                    created_at: base_time,
+                    urls: vec![],
+                    media_urls: vec![],
+                },
+            ],
+        };
+
+        storage.store_dm_conversations(&[conversation]).unwrap();
+
+        let summaries = storage.get_dm_conversation_summaries(None).unwrap();
+        assert_eq!(summaries.len(), 1);
+
+        let summary = &summaries[0];
+        assert_eq!(summary.conversation_id, "conv_summary");
+        assert_eq!(summary.message_count, 2);
+        assert_eq!(summary.participant_ids, vec!["user1", "user2"]);
+        assert_eq!(summary.first_message_at, Some(base_time));
+        assert_eq!(summary.last_message_at, Some(later_time));
+    }
+
+    #[test]
+    fn test_get_conversation_messages_empty() {
+        // Empty/missing conversation_id should return empty vec, not error
+        let storage = Storage::open_memory().unwrap();
+        let messages = storage.get_conversation_messages("nonexistent").unwrap();
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn test_get_conversation_messages_single() {
+        let mut storage = Storage::open_memory().unwrap();
+
+        let conversation = DmConversation {
+            conversation_id: "single_conv".to_string(),
+            messages: vec![DirectMessage {
+                id: "dm_only".to_string(),
+                sender_id: "alice".to_string(),
+                recipient_id: "bob".to_string(),
+                text: "Single message".to_string(),
+                created_at: DateTime::parse_from_rfc3339("2024-06-15T12:00:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+                urls: vec![],
+                media_urls: vec![],
+            }],
+        };
+
+        storage.store_dm_conversations(&[conversation]).unwrap();
+
+        let messages = storage.get_conversation_messages("single_conv").unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].id, "dm_only");
+        assert_eq!(messages[0].sender_id, "alice");
+        assert_eq!(messages[0].text, "Single message");
+    }
+
+    #[test]
+    fn test_get_conversation_messages_field_preservation() {
+        // Verify URLs and media_urls round-trip correctly
+        let mut storage = Storage::open_memory().unwrap();
+
+        let conversation = DmConversation {
+            conversation_id: "rich_conv".to_string(),
+            messages: vec![DirectMessage {
+                id: "dm_rich".to_string(),
+                sender_id: "user1".to_string(),
+                recipient_id: "user2".to_string(),
+                text: "Check out this link!".to_string(),
+                created_at: DateTime::parse_from_rfc3339("2024-07-01T09:30:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+                urls: vec![TweetUrl {
+                    url: "https://t.co/abc".to_string(),
+                    expanded_url: Some("https://example.com/article".to_string()),
+                    display_url: Some("example.com/article".to_string()),
+                }],
+                media_urls: vec![
+                    "https://pbs.twimg.com/media/abc.jpg".to_string(),
+                    "https://pbs.twimg.com/media/def.png".to_string(),
+                ],
+            }],
+        };
+
+        storage.store_dm_conversations(&[conversation]).unwrap();
+
+        let messages = storage.get_conversation_messages("rich_conv").unwrap();
+        assert_eq!(messages.len(), 1);
+
+        let msg = &messages[0];
+        assert_eq!(msg.urls.len(), 1);
+        assert_eq!(msg.urls[0].url, "https://t.co/abc");
+        assert_eq!(
+            msg.urls[0].expanded_url,
+            Some("https://example.com/article".to_string())
+        );
+
+        assert_eq!(msg.media_urls.len(), 2);
+        assert_eq!(msg.media_urls[0], "https://pbs.twimg.com/media/abc.jpg");
+        assert_eq!(msg.media_urls[1], "https://pbs.twimg.com/media/def.png");
+    }
+
+    #[test]
+    fn test_get_conversation_messages_id_tiebreaker() {
+        // When timestamps are identical, id should be used as tiebreaker
+        let mut storage = Storage::open_memory().unwrap();
+
+        let same_time = DateTime::parse_from_rfc3339("2024-01-01T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let conversation = DmConversation {
+            conversation_id: "tie_conv".to_string(),
+            messages: vec![
+                DirectMessage {
+                    id: "dm_z".to_string(),
+                    sender_id: "user1".to_string(),
+                    recipient_id: "user2".to_string(),
+                    text: "Message Z".to_string(),
+                    created_at: same_time,
+                    urls: vec![],
+                    media_urls: vec![],
+                },
+                DirectMessage {
+                    id: "dm_a".to_string(),
+                    sender_id: "user2".to_string(),
+                    recipient_id: "user1".to_string(),
+                    text: "Message A".to_string(),
+                    created_at: same_time,
+                    urls: vec![],
+                    media_urls: vec![],
+                },
+            ],
+        };
+
+        storage.store_dm_conversations(&[conversation]).unwrap();
+
+        let messages = storage.get_conversation_messages("tie_conv").unwrap();
+        assert_eq!(messages.len(), 2);
+        // dm_a should come before dm_z (alphabetical order)
+        assert_eq!(messages[0].id, "dm_a");
+        assert_eq!(messages[1].id, "dm_z");
     }
 
     #[test]
