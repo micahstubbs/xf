@@ -2021,13 +2021,14 @@ fn cmd_doctor(cli: &Cli, args: &cli::DoctorArgs) -> Result<()> {
         total: all_checks.len(),
     };
 
-    // Collect unique suggestions
-    let suggestions: Vec<String> = all_checks
+    // Collect unique suggestions (sorted for deterministic output)
+    let mut suggestions: Vec<String> = all_checks
         .iter()
         .filter_map(|c| c.suggestion.clone())
         .collect::<std::collections::HashSet<_>>()
         .into_iter()
         .collect();
+    suggestions.sort();
 
     #[allow(clippy::cast_possible_truncation)]
     let runtime_ms = start.elapsed().as_millis() as u64; // Safe: health check won't run 584M years
