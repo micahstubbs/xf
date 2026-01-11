@@ -952,9 +952,16 @@ fn parse_command(input: &str) -> Result<Command> {
                 anyhow::bail!("Usage: set <name> <value>");
             }
             let name = parts[1].trim_start_matches('$').to_string();
-            if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+            // Variable names must:
+            // 1. Not be empty
+            // 2. Not start with a digit (since $123 means "result index 123")
+            // 3. Contain only alphanumeric chars and underscores
+            if name.is_empty()
+                || name.chars().next().is_some_and(|c| c.is_ascii_digit())
+                || !name.chars().all(|c| c.is_alphanumeric() || c == '_')
+            {
                 anyhow::bail!(
-                    "Invalid variable name '{}'. Use alphanumeric characters and underscores only.",
+                    "Invalid variable name '{}'. Names must start with a letter or underscore, and contain only alphanumeric characters and underscores.",
                     parts[1]
                 );
             }
@@ -1760,6 +1767,38 @@ mod tests {
         let cmd = parse_command("set _private secret").unwrap();
         assert!(
             matches!(cmd, Command::Set { name, value } if name == "_private" && value == "secret")
+        );
+    }
+
+    #[test]
+    fn test_parse_set_numeric_name_fails() {
+        // Variable names starting with digit should be rejected
+        // because $123 is interpreted as "result index 123", not "variable named 123"
+        let result = parse_command("set 123 value");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Invalid variable name") && err.contains("start with a letter"),
+            "Expected error about invalid name starting with digit, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_set_numeric_prefix_fails() {
+        // Even partial numeric prefix should fail
+        let result = parse_command("set 1abc value");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_set_valid_with_numbers() {
+        // Numbers in the middle/end of name are fine
+        let cmd = parse_command("set var123 test").unwrap();
+        assert!(matches!(cmd, Command::Set { name, value } if name == "var123" && value == "test"));
+
+        let cmd = parse_command("set my2cents opinion").unwrap();
+        assert!(
+            matches!(cmd, Command::Set { name, value } if name == "my2cents" && value == "opinion")
         );
     }
 
