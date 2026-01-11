@@ -11,7 +11,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use rayon::ThreadPoolBuilder;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
-use std::io;
+use std::io::{self, IsTerminal};
 use std::path::PathBuf;
 use std::time::Instant;
 use tracing::{Level, info, warn};
@@ -24,16 +24,16 @@ use xf::repl;
 use xf::search;
 use xf::stats_analytics::{self, ContentStats, EngagementStats, TemporalStats};
 use xf::{
-    ArchiveParser, ArchiveStats, Cli, Commands, DataType, ExportFormat, ExportTarget, ListTarget,
-    OutputFormat, SearchEngine, SearchResult, SearchResultType, SortOrder, Storage, TweetUrl,
+    ArchiveParser, ArchiveStats, CONTENT_DIVIDER_WIDTH, Cli, Commands, DataType, ExportFormat,
+    ExportTarget, HEADER_DIVIDER_WIDTH, ListTarget, OutputFormat, SearchEngine, SearchResult,
+    SearchResultType, SortOrder, Storage, TweetUrl,
 };
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // Handle --no-color flag and NO_COLOR env var
-    // The colored crate respects NO_COLOR by default, but we also support --no-color flag
-    if cli.no_color || std::env::var("NO_COLOR").is_ok() {
+    // Handle --no-color flag, NO_COLOR env var, and non-interactive output
+    if should_disable_color(&cli) {
         control::set_override(false);
     }
 
@@ -72,6 +72,18 @@ fn main() -> Result<()> {
         Commands::Doctor(args) => cmd_doctor(&cli, args),
         Commands::Shell(args) => cmd_shell(&cli, args),
     }
+}
+
+fn no_color_env_set() -> bool {
+    match std::env::var("NO_COLOR") {
+        Ok(value) => !value.is_empty(),
+        Err(std::env::VarError::NotPresent) => false,
+        Err(std::env::VarError::NotUnicode(_)) => true,
+    }
+}
+
+fn should_disable_color(cli: &Cli) -> bool {
+    cli.no_color || no_color_env_set() || !std::io::stdout().is_terminal()
 }
 
 fn get_db_path(cli: &Cli) -> PathBuf {
@@ -365,6 +377,9 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
         limit_target
     };
 
+    // Time the search operation
+    let search_start = Instant::now();
+
     let mut fetch_limit = limit_target.min(max_docs);
     let mut results = loop {
         let mut batch = search_engine.search(&args.query, doc_types.as_deref(), fetch_limit)?;
@@ -392,8 +407,29 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
         results.truncate(args.limit);
     }
 
+    let search_elapsed = search_start.elapsed();
+
     if results.is_empty() {
-        println!("{}", "No results found.".yellow());
+        println!(
+            "{} for \"{}\"\n",
+            "No results found".yellow(),
+            args.query.bold()
+        );
+        println!("  {}", "Try:".dimmed());
+        println!("    {} Using different keywords", "•".dimmed());
+        println!("    {} Checking your spelling", "•".dimmed());
+        if args.since.is_some() || args.until.is_some() {
+            println!("    {} Removing date filters", "•".dimmed());
+        }
+        if let Some(types) = &args.types {
+            if types.len() == 1 {
+                println!(
+                    "    {} Searching other data types: {}",
+                    "•".dimmed(),
+                    "xf search \"...\" --types tweet,dm,like".cyan()
+                );
+            }
+        }
         return Ok(());
     }
 
@@ -440,10 +476,18 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
             }
         }
         OutputFormat::Text => {
+            // Format timing: use ms for < 1s, otherwise show as seconds
+            let timing_str = if search_elapsed.as_secs_f64() < 1.0 {
+                format!("{:.1}ms", search_elapsed.as_secs_f64() * 1000.0)
+            } else {
+                format!("{:.2}s", search_elapsed.as_secs_f64())
+            };
+
             println!(
-                "{} results for \"{}\":\n",
+                "Found {} results for \"{}\" in {}\n",
                 results.len().to_string().cyan(),
-                args.query.bold()
+                args.query.bold(),
+                timing_str.dimmed()
             );
 
             for (i, r) in results.iter().enumerate() {
@@ -562,7 +606,7 @@ fn print_dm_context_text(contexts: &[DmConversationContext]) {
             "Conversation".bold().cyan(),
             context.conversation_id.dimmed()
         );
-        println!("{}", "─".repeat(60));
+        println!("{}", "─".repeat(CONTENT_DIVIDER_WIDTH));
 
         for message in &context.messages {
             let timestamp = message.created_at.format("%Y-%m-%d %H:%M").to_string();
@@ -595,12 +639,13 @@ fn print_result(num: usize, result: &SearchResult) {
         SearchResultType::GrokMessage => "GROK".on_yellow(),
     };
 
+    // Result number is bold for easy scanning, ID is shown but dimmed
+    // Score is hidden in text output (kept in JSON for programmatic use)
     println!(
-        "{}. {} {} {}",
-        num.to_string().dimmed(),
+        "{}. {} {}",
+        num.to_string().bold(),
         type_badge,
-        result.id.dimmed(),
-        format!("({:.2})", result.score).dimmed()
+        truncate(&result.id, 12).dimmed()
     );
 
     // Use highlighted text if available, otherwise use plain text
@@ -936,19 +981,19 @@ fn cmd_stats(cli: &Cli, args: &cli::StatsArgs) -> Result<()> {
         _ => {
             // Show fancy banner for --detailed mode
             if args.detailed {
-                println!("{}", "═".repeat(70).bright_blue());
+                println!("{}", "═".repeat(HEADER_DIVIDER_WIDTH).bright_blue());
                 println!(
                     "{}",
                     "              ARCHIVE ANALYTICS DASHBOARD              "
                         .bold()
                         .on_bright_blue()
                 );
-                println!("{}", "═".repeat(70).bright_blue());
+                println!("{}", "═".repeat(HEADER_DIVIDER_WIDTH).bright_blue());
                 println!();
             }
 
             println!("{}", "📊 Overview".bold().cyan());
-            println!("{}", "─".repeat(60));
+            println!("{}", "─".repeat(CONTENT_DIVIDER_WIDTH));
             println!(
                 "  {:<20} {:>10}",
                 "Tweets:",
@@ -986,7 +1031,7 @@ fn cmd_stats(cli: &Cli, args: &cli::StatsArgs) -> Result<()> {
                 format_count(stats.blocks_count)
             );
             println!("  {:<20} {:>10}", "Mutes:", format_count(stats.mutes_count));
-            println!("{}", "─".repeat(60));
+            println!("{}", "─".repeat(CONTENT_DIVIDER_WIDTH));
 
             if let (Some(first), Some(last)) = (stats.first_tweet_date, stats.last_tweet_date) {
                 println!(
@@ -1003,7 +1048,7 @@ fn cmd_stats(cli: &Cli, args: &cli::StatsArgs) -> Result<()> {
                 if !detailed.is_empty() {
                     println!();
                     println!("{}", "📅 Tweets by Month".bold().cyan());
-                    println!("{}", "─".repeat(60));
+                    println!("{}", "─".repeat(CONTENT_DIVIDER_WIDTH));
                     for entry in detailed {
                         println!(
                             "  {:04}-{:02}: {}",
@@ -1019,7 +1064,7 @@ fn cmd_stats(cli: &Cli, args: &cli::StatsArgs) -> Result<()> {
                 if !items.is_empty() {
                     println!();
                     println!("{}", "#️⃣ Top Hashtags".bold().cyan());
-                    println!("{}", "─".repeat(60));
+                    println!("{}", "─".repeat(CONTENT_DIVIDER_WIDTH));
                     for item in items {
                         println!(
                             "  {:<20} {}",
@@ -1034,7 +1079,7 @@ fn cmd_stats(cli: &Cli, args: &cli::StatsArgs) -> Result<()> {
                 if !items.is_empty() {
                     println!();
                     println!("{}", "👤 Top Mentions".bold().cyan());
-                    println!("{}", "─".repeat(60));
+                    println!("{}", "─".repeat(CONTENT_DIVIDER_WIDTH));
                     for item in items {
                         println!(
                             "  {:<20} {}",
@@ -1049,7 +1094,7 @@ fn cmd_stats(cli: &Cli, args: &cli::StatsArgs) -> Result<()> {
             if let Some(ref temporal) = temporal {
                 println!();
                 println!("{}", "📅 Temporal Patterns".bold().cyan());
-                println!("{}", "─".repeat(60));
+                println!("{}", "─".repeat(CONTENT_DIVIDER_WIDTH));
 
                 // Activity sparkline
                 let sparkline = stats_analytics::sparkline_from_daily(&temporal.daily_counts, 50);
@@ -1128,7 +1173,7 @@ fn cmd_stats(cli: &Cli, args: &cli::StatsArgs) -> Result<()> {
             if let Some(ref engagement) = engagement {
                 println!();
                 println!("{}", "📈 Engagement Analytics".bold().cyan());
-                println!("{}", "─".repeat(60));
+                println!("{}", "─".repeat(CONTENT_DIVIDER_WIDTH));
 
                 // Summary metrics
                 println!(
@@ -1181,7 +1226,7 @@ fn cmd_stats(cli: &Cli, args: &cli::StatsArgs) -> Result<()> {
             if let Some(ref content) = content {
                 println!();
                 println!("{}", "📝 Content Analysis".bold().cyan());
-                println!("{}", "─".repeat(60));
+                println!("{}", "─".repeat(CONTENT_DIVIDER_WIDTH));
 
                 // Content type ratios
                 println!(
@@ -1330,9 +1375,9 @@ fn cmd_tweet(cli: &Cli, args: &cli::TweetArgs) -> Result<()> {
                 println!("{json}");
             }
             _ => {
-                println!("{}", "─".repeat(60));
+                println!("{}", "─".repeat(CONTENT_DIVIDER_WIDTH));
                 println!("{}", t.full_text);
-                println!("{}", "─".repeat(60));
+                println!("{}", "─".repeat(CONTENT_DIVIDER_WIDTH));
                 println!(
                     "  ID: {}  Date: {}",
                     t.id.dimmed(),
@@ -1783,7 +1828,7 @@ fn cmd_tweet_thread(cli: &Cli, storage: &Storage, args: &cli::TweetArgs) -> Resu
         }
         _ => {
             println!("{}", "Thread".bold().cyan());
-            println!("{}", "─".repeat(60));
+            println!("{}", "─".repeat(CONTENT_DIVIDER_WIDTH));
             for tweet in &thread {
                 let date = tweet.created_at.format("%Y-%m-%d %H:%M").to_string();
                 let text = truncate_text(&tweet.full_text, 100);
@@ -2154,14 +2199,14 @@ fn cmd_doctor(cli: &Cli, args: &cli::DoctorArgs) -> Result<()> {
         }
         _ => {
             // Text output with colors and emojis
-            println!("{}", "═".repeat(70).bright_blue());
+            println!("{}", "═".repeat(HEADER_DIVIDER_WIDTH).bright_blue());
             println!(
                 "{}",
                 "                    XF HEALTH CHECK                    "
                     .bold()
                     .on_bright_blue()
             );
-            println!("{}", "═".repeat(70).bright_blue());
+            println!("{}", "═".repeat(HEADER_DIVIDER_WIDTH).bright_blue());
             println!();
 
             // Group by category
@@ -2177,7 +2222,7 @@ fn cmd_doctor(cli: &Cli, args: &cli::DoctorArgs) -> Result<()> {
                     };
                     println!();
                     println!("{}", category_name.bold().cyan());
-                    println!("{}", "─".repeat(60));
+                    println!("{}", "─".repeat(CONTENT_DIVIDER_WIDTH));
                 }
 
                 let status_icon = match check.status {
@@ -2191,7 +2236,7 @@ fn cmd_doctor(cli: &Cli, args: &cli::DoctorArgs) -> Result<()> {
 
             // Summary
             println!();
-            println!("{}", "═".repeat(70).bright_blue());
+            println!("{}", "═".repeat(HEADER_DIVIDER_WIDTH).bright_blue());
             println!(
                 "  {} {} passed  {} {} warnings  {} {} errors  ({} total, {}ms)",
                 passed.to_string().green(),

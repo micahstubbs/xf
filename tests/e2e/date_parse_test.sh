@@ -53,6 +53,20 @@ window.YTD.tweets.part0 = [
   }
 ]
 JSON
+cat <<'JSON' > "$ARCHIVE_DIR/data/manifest.js"
+window.YTD.manifest.part0 = {
+  "userInfo": {
+    "accountId": "999999999",
+    "userName": "test_user",
+    "displayName": "Test User"
+  },
+  "archiveInfo": {
+    "sizeBytes": "1234",
+    "generationDate": "2025-01-01T00:00:00Z",
+    "isPartialArchive": false
+  }
+}
+JSON
 
 LAST_STDOUT=""
 LAST_STDERR=""

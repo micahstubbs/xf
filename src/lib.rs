@@ -39,6 +39,12 @@ pub const DEFAULT_DB_NAME: &str = "xf.db";
 /// Default index directory name
 pub const DEFAULT_INDEX_DIR: &str = "xf_index";
 
+/// Standard width for content dividers in CLI output
+pub const CONTENT_DIVIDER_WIDTH: usize = 60;
+
+/// Standard width for major header dividers in CLI output
+pub const HEADER_DIVIDER_WIDTH: usize = 70;
+
 /// Get the default data directory for xf
 #[must_use]
 pub fn default_data_dir() -> std::path::PathBuf {

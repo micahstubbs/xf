@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use tracing::{debug, info, trace, warn};
 
-use crate::{SearchEngine, SearchResult, Storage};
+use crate::{CONTENT_DIVIDER_WIDTH, SearchEngine, SearchResult, Storage};
 
 /// Configuration for the REPL session.
 #[derive(Debug, Clone)]
@@ -605,7 +605,7 @@ impl ReplSession {
     fn run_stats(&self) -> Result<()> {
         let stats = self.storage.get_stats()?;
         println!("{}", "Archive Statistics".bold().cyan());
-        println!("{}", "─".repeat(60));
+        println!("{}", "─".repeat(CONTENT_DIVIDER_WIDTH));
         println!("  {:<20} {}", "Tweets:", stats.tweets_count);
         println!("  {:<20} {}", "Likes:", stats.likes_count);
         println!("  {:<20} {}", "DM Messages:", stats.dms_count);
@@ -848,7 +848,7 @@ impl ReplSession {
         let result = &self.last_results[index - 1];
         debug!(index, result_type = %result.result_type, "Showing result details");
 
-        println!("{}", "─".repeat(60));
+        println!("{}", "─".repeat(CONTENT_DIVIDER_WIDTH));
         println!("{}: {}", "Type".cyan(), result.result_type);
         println!("{}: {}", "ID".cyan(), result.id);
         println!(
@@ -859,7 +859,7 @@ impl ReplSession {
         println!("{}: {:.2}", "Score".cyan(), result.score);
         println!();
         println!("{}", result.text);
-        println!("{}", "─".repeat(60));
+        println!("{}", "─".repeat(CONTENT_DIVIDER_WIDTH));
         Ok(())
     }
 

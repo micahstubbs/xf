@@ -76,6 +76,20 @@ window.YTD.tweets.part0 = [
   }
 ]
 JSON
+  cat <<'JSON' > "$ARCHIVE_DIR/data/manifest.js"
+window.YTD.manifest.part0 = {
+  "userInfo": {
+    "accountId": "999999999",
+    "userName": "test_user",
+    "displayName": "Test User"
+  },
+  "archiveInfo": {
+    "sizeBytes": "1234",
+    "generationDate": "2025-01-01T00:00:00Z",
+    "isPartialArchive": false
+  }
+}
+JSON
 fi
 
 LAST_STDOUT=""
@@ -146,6 +160,26 @@ if [ -z "${XF_DB:-}" ] || [ -z "${XF_INDEX:-}" ]; then
   fi
   pass "index command succeeded"
 fi
+
+# Test 0: --no-color disables ANSI codes
+run_cmd "search_no_color" "$XF_BIN" search "rust" --types tweet --no-color --db "$DB_PATH" --index "$INDEX_PATH"
+if [ $LAST_STATUS -ne 0 ]; then
+  fail "search with --no-color failed"
+fi
+if grep -q $'\x1b' "$LAST_STDOUT"; then
+  fail "expected no ANSI color codes with --no-color"
+fi
+pass "--no-color disables ANSI codes"
+
+# Test 0b: NO_COLOR env var disables ANSI codes
+run_cmd "search_no_color_env" env NO_COLOR=1 "$XF_BIN" search "rust" --types tweet --db "$DB_PATH" --index "$INDEX_PATH"
+if [ $LAST_STATUS -ne 0 ]; then
+  fail "search with NO_COLOR env failed"
+fi
+if grep -q $'\x1b' "$LAST_STDOUT"; then
+  fail "expected no ANSI color codes with NO_COLOR=1"
+fi
+pass "NO_COLOR env disables ANSI codes"
 
 # Test 1: shell --help shows all options
 run_cmd "shell_help" "$XF_BIN" shell --help
