@@ -99,7 +99,7 @@ impl ArchiveParser {
             generation_date: archive_info["generationDate"]
                 .as_str()
                 .and_then(Self::parse_iso_date)
-                .unwrap_or_else(Utc::now),
+                .unwrap_or_else(|| DateTime::<Utc>::from_timestamp(0, 0).unwrap_or_else(Utc::now)),
             is_partial: archive_info["isPartialArchive"].as_bool().unwrap_or(false),
         })
     }

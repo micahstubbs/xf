@@ -27,6 +27,10 @@ const FIELD_TYPE: &str = "type";
 const FIELD_CREATED_AT: &str = "created_at";
 const FIELD_METADATA: &str = "metadata";
 
+const fn epoch_utc() -> DateTime<Utc> {
+    DateTime::<Utc>::from_timestamp(0, 0).unwrap()
+}
+
 /// Document types stored in the index
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DocType {
@@ -463,7 +467,7 @@ impl SearchEngine {
                 result_type,
                 id,
                 text,
-                created_at: DateTime::from_timestamp(created_at_ts, 0).unwrap_or_else(Utc::now),
+                created_at: DateTime::from_timestamp(created_at_ts, 0).unwrap_or_else(epoch_utc),
                 score,
                 highlights,
                 metadata: serde_json::from_str(metadata_str).unwrap_or_default(),

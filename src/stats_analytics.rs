@@ -434,7 +434,7 @@ impl EngagementStats {
                     DateTime::parse_from_str(&created_at_str, "%a %b %d %H:%M:%S %z %Y")
                         .map(|dt| dt.with_timezone(&Utc))
                 })
-                .unwrap_or_else(|_| Utc::now());
+                .unwrap_or_else(|_| DateTime::<Utc>::from_timestamp(0, 0).unwrap());
 
             // Truncate text to ~50 chars at word boundary
             let text_preview = truncate_text(&full_text, 50);

@@ -340,13 +340,42 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
         })
     };
 
-    let mut results = search_engine.search(
-        &args.query,
-        doc_types.as_deref(),
-        args.limit.saturating_add(args.offset),
-    )?;
+    let since = match args.since.as_deref() {
+        Some(value) => Some(parse_date_arg("--since", value, false, cli.verbose)?),
+        None => None,
+    };
+    let until = match args.until.as_deref() {
+        Some(value) => Some(parse_date_arg("--until", value, true, cli.verbose)?),
+        None => None,
+    };
 
-    apply_search_filters(&mut results, args, cli.verbose)?;
+    let limit_target = args.limit.saturating_add(args.offset);
+    let needs_post_filter =
+        since.is_some() || until.is_some() || args.replies_only || args.no_replies;
+    let needs_full_sort = !matches!(args.sort, SortOrder::Relevance);
+    let max_docs = if needs_post_filter || needs_full_sort {
+        usize::try_from(search_engine.doc_count()).unwrap_or(usize::MAX)
+    } else {
+        limit_target
+    };
+
+    let mut fetch_limit = limit_target.min(max_docs);
+    let mut results = loop {
+        let mut batch = search_engine.search(&args.query, doc_types.as_deref(), fetch_limit)?;
+        if needs_post_filter {
+            apply_search_filters(&mut batch, since, until, args.replies_only, args.no_replies);
+        }
+
+        if batch.len() >= limit_target || fetch_limit >= max_docs {
+            break batch;
+        }
+
+        let next = fetch_limit
+            .saturating_mul(2)
+            .max(fetch_limit.saturating_add(1));
+        fetch_limit = next.min(max_docs);
+    };
+
     apply_search_sort(&mut results, &args.sort);
 
     // Apply offset
@@ -653,18 +682,11 @@ fn is_reply(result: &SearchResult) -> bool {
 
 fn apply_search_filters(
     results: &mut Vec<SearchResult>,
-    args: &cli::SearchArgs,
-    verbose: bool,
-) -> Result<()> {
-    let since = match args.since.as_deref() {
-        Some(value) => Some(parse_date_arg("--since", value, false, verbose)?),
-        None => None,
-    };
-    let until = match args.until.as_deref() {
-        Some(value) => Some(parse_date_arg("--until", value, true, verbose)?),
-        None => None,
-    };
-
+    since: Option<DateTime<Utc>>,
+    until: Option<DateTime<Utc>>,
+    replies_only: bool,
+    no_replies: bool,
+) {
     if since.is_some() || until.is_some() {
         results.retain(|r| {
             if r.result_type != SearchResultType::Tweet {
@@ -684,13 +706,11 @@ fn apply_search_filters(
         });
     }
 
-    if args.replies_only {
+    if replies_only {
         results.retain(is_reply);
-    } else if args.no_replies {
+    } else if no_replies {
         results.retain(|r| !is_reply(r));
     }
-
-    Ok(())
 }
 
 fn engagement_score(result: &SearchResult) -> i64 {

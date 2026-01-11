@@ -19,6 +19,16 @@ const BYTES_PER_KB: u64 = 1024;
 const BYTES_PER_MB: u64 = 1024 * 1024;
 const BYTES_PER_GB: u64 = 1024 * 1024 * 1024;
 
+const fn epoch_utc() -> DateTime<Utc> {
+    DateTime::<Utc>::from_timestamp(0, 0).unwrap()
+}
+
+fn parse_rfc3339_or_epoch(value: Option<String>) -> DateTime<Utc> {
+    value
+        .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
+        .map_or_else(epoch_utc, |dt| dt.with_timezone(&Utc))
+}
+
 /// `SQLite` storage manager
 pub struct Storage {
     conn: Connection,
@@ -1058,11 +1068,7 @@ impl Storage {
             .query_map(params![query, limit], |row| {
                 Ok(Tweet {
                     id: row.get(0)?,
-                    created_at: row
-                        .get::<_, String>(1)
-                        .ok()
-                        .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
-                        .map_or_else(Utc::now, |dt| dt.with_timezone(&Utc)),
+                    created_at: parse_rfc3339_or_epoch(row.get::<_, Option<String>>(1)?),
                     full_text: row.get(2)?,
                     source: row.get(3)?,
                     favorite_count: row.get(4)?,
@@ -1143,11 +1149,7 @@ impl Storage {
                     sender_id: row.get(2)?,
                     recipient_id: row.get(3)?,
                     text: row.get(4)?,
-                    created_at: row
-                        .get::<_, String>(5)
-                        .ok()
-                        .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
-                        .map_or_else(Utc::now, |dt| dt.with_timezone(&Utc)),
+                    created_at: parse_rfc3339_or_epoch(row.get::<_, Option<String>>(5)?),
                     urls: serde_json::from_str(&row.get::<_, String>(6)?).unwrap_or_default(),
                     media_urls: serde_json::from_str(&row.get::<_, String>(7)?).unwrap_or_default(),
                 })
@@ -1169,7 +1171,7 @@ impl Storage {
             SELECT id, sender_id, recipient_id, text, created_at, urls_json, media_urls_json
             FROM direct_messages
             WHERE conversation_id = ?
-            ORDER BY created_at ASC
+            ORDER BY created_at ASC, id ASC
             ",
         )?;
 
@@ -1180,11 +1182,7 @@ impl Storage {
                     sender_id: row.get(1)?,
                     recipient_id: row.get(2)?,
                     text: row.get(3)?,
-                    created_at: row
-                        .get::<_, String>(4)
-                        .ok()
-                        .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
-                        .map_or_else(Utc::now, |dt| dt.with_timezone(&Utc)),
+                    created_at: parse_rfc3339_or_epoch(row.get::<_, Option<String>>(4)?),
                     urls: serde_json::from_str(&row.get::<_, String>(5)?).unwrap_or_default(),
                     media_urls: serde_json::from_str(&row.get::<_, String>(6)?).unwrap_or_default(),
                 })
@@ -1219,11 +1217,7 @@ impl Storage {
                     chat_id: row.get(0)?,
                     message: row.get(1)?,
                     sender: row.get(2)?,
-                    created_at: row
-                        .get::<_, String>(3)
-                        .ok()
-                        .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
-                        .map_or_else(Utc::now, |dt| dt.with_timezone(&Utc)),
+                    created_at: parse_rfc3339_or_epoch(row.get::<_, Option<String>>(3)?),
                     grok_mode: row.get(4)?,
                 })
             })?
@@ -1250,11 +1244,7 @@ impl Storage {
             |row| {
                 Ok(Tweet {
                     id: row.get(0)?,
-                    created_at: row
-                        .get::<_, String>(1)
-                        .ok()
-                        .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
-                        .map_or_else(Utc::now, |dt| dt.with_timezone(&Utc)),
+                    created_at: parse_rfc3339_or_epoch(row.get::<_, Option<String>>(1)?),
                     full_text: row.get(2)?,
                     source: row.get(3)?,
                     favorite_count: row.get(4)?,
@@ -1301,11 +1291,7 @@ impl Storage {
             .query_map(params![parent_id], |row| {
                 Ok(Tweet {
                     id: row.get(0)?,
-                    created_at: row
-                        .get::<_, String>(1)
-                        .ok()
-                        .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
-                        .map_or_else(Utc::now, |dt| dt.with_timezone(&Utc)),
+                    created_at: parse_rfc3339_or_epoch(row.get::<_, Option<String>>(1)?),
                     full_text: row.get(2)?,
                     source: row.get(3)?,
                     favorite_count: row.get(4)?,
@@ -1403,11 +1389,7 @@ impl Storage {
             .query_map([], |row| {
                 Ok(Tweet {
                     id: row.get(0)?,
-                    created_at: row
-                        .get::<_, String>(1)
-                        .ok()
-                        .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
-                        .map_or_else(Utc::now, |dt| dt.with_timezone(&Utc)),
+                    created_at: parse_rfc3339_or_epoch(row.get::<_, Option<String>>(1)?),
                     full_text: row.get(2)?,
                     source: row.get(3)?,
                     favorite_count: row.get(4)?,
@@ -1486,11 +1468,7 @@ impl Storage {
                     sender_id: row.get(2)?,
                     recipient_id: row.get(3)?,
                     text: row.get(4)?,
-                    created_at: row
-                        .get::<_, String>(5)
-                        .ok()
-                        .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
-                        .map_or_else(Utc::now, |dt| dt.with_timezone(&Utc)),
+                    created_at: parse_rfc3339_or_epoch(row.get::<_, Option<String>>(5)?),
                     urls: serde_json::from_str(&row.get::<_, String>(6)?).unwrap_or_default(),
                     media_urls: serde_json::from_str(&row.get::<_, String>(7)?).unwrap_or_default(),
                 })
