@@ -520,15 +520,24 @@ impl ReplSession {
 
                 // Check for special cases first
                 if chars[start] == '_' {
-                    // $_ = last selected result
-                    if let Some(idx) = self.last_selected {
-                        if let Some(r) = self.last_results.get(idx) {
-                            result.push_str(&r.id);
+                    // Check if this is $_ alone (not $_abc which would be variable _abc)
+                    let next_idx = start + 1;
+                    let is_standalone = next_idx >= chars.len()
+                        || (!chars[next_idx].is_alphanumeric() && chars[next_idx] != '_');
+
+                    if is_standalone {
+                        // $_ = last selected result
+                        if let Some(idx) = self.last_selected {
+                            if let Some(r) = self.last_results.get(idx) {
+                                result.push_str(&r.id);
+                            }
                         }
+                        i += 2;
+                        continue;
                     }
-                    i += 2;
-                    continue;
-                } else if chars[start] == '*' {
+                    // Fall through to named variable handling for $_abc
+                }
+                if chars[start] == '*' {
                     // $* = all result IDs
                     let ids: Vec<&str> = self.last_results.iter().map(|r| r.id.as_str()).collect();
                     result.push_str(&ids.join(" "));
@@ -1794,6 +1803,7 @@ mod tests {
         let mut named_vars = HashMap::new();
         named_vars.insert("myquery".to_string(), "rust async".to_string());
         named_vars.insert("user".to_string(), "alice".to_string());
+        named_vars.insert("_private".to_string(), "secret_value".to_string());
 
         (results, named_vars, Some(1)) // last_selected = index 1 (second result)
     }
@@ -1815,14 +1825,23 @@ mod tests {
                 let start = i + 1;
 
                 if chars[start] == '_' {
-                    if let Some(idx) = last_selected {
-                        if let Some(r) = results.get(idx) {
-                            result.push_str(&r.id);
+                    // Check if this is $_ alone (not $_abc which would be variable _abc)
+                    let next_idx = start + 1;
+                    let is_standalone = next_idx >= chars.len()
+                        || (!chars[next_idx].is_alphanumeric() && chars[next_idx] != '_');
+
+                    if is_standalone {
+                        if let Some(idx) = last_selected {
+                            if let Some(r) = results.get(idx) {
+                                result.push_str(&r.id);
+                            }
                         }
+                        i += 2;
+                        continue;
                     }
-                    i += 2;
-                    continue;
-                } else if chars[start] == '*' {
+                    // Fall through to named variable handling for $_abc
+                }
+                if chars[start] == '*' {
                     let ids: Vec<&str> = results.iter().map(|r| r.id.as_str()).collect();
                     result.push_str(&ids.join(" "));
                     i += 2;
@@ -1925,6 +1944,30 @@ mod tests {
         // $unknown should be empty since it's not defined
         let result = substitute_vars_test("search $unknown", &results, &named_vars, last_selected);
         assert_eq!(result, "search ");
+    }
+
+    #[test]
+    fn test_substitute_var_underscore_prefix() {
+        let (results, named_vars, last_selected) = create_test_session_vars();
+        // $_private should be the variable _private, NOT $_ + literal "private"
+        let result = substitute_vars_test("search $_private", &results, &named_vars, last_selected);
+        assert_eq!(result, "search secret_value");
+    }
+
+    #[test]
+    fn test_substitute_underscore_alone() {
+        let (results, named_vars, last_selected) = create_test_session_vars();
+        // $_ alone should be last selected (index 1 = tweet_002)
+        let result = substitute_vars_test("show $_", &results, &named_vars, last_selected);
+        assert_eq!(result, "show tweet_002");
+    }
+
+    #[test]
+    fn test_substitute_underscore_with_space() {
+        let (results, named_vars, last_selected) = create_test_session_vars();
+        // "$_ foo" should be last selected + " foo"
+        let result = substitute_vars_test("show $_ foo", &results, &named_vars, last_selected);
+        assert_eq!(result, "show tweet_002 foo");
     }
 
     #[test]
