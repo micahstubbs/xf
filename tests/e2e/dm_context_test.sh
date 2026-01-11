@@ -176,15 +176,15 @@ if ! grep -q "is_match" "$LAST_STDOUT"; then
 fi
 pass "DM context JSON output works"
 
-# Test 4: --context without --types dm should fail with clear error
-run_cmd "dm_context_wrong_type" "$XF_BIN" search "test" --context --db "$DB_PATH" --index "$INDEX_PATH"
+# Test 4: --context with non-DM type should fail with clear error
+run_cmd "dm_context_wrong_type" "$XF_BIN" search "test" --context --types tweet --db "$DB_PATH" --index "$INDEX_PATH"
 if [ $LAST_STATUS -eq 0 ]; then
-  fail "--context without --types dm should fail"
+  fail "--context with --types tweet should fail"
 fi
 if ! grep -qi "dm" "$LAST_STDERR"; then
   fail "--context error message should mention DM"
 fi
-pass "--context without DM types correctly fails"
+pass "--context with non-DM type correctly fails"
 
 # Test 5: --context with CSV should fail (not supported yet)
 run_cmd "dm_context_csv" "$XF_BIN" search "Alice" --types dm --context --format csv --db "$DB_PATH" --index "$INDEX_PATH"
@@ -194,8 +194,9 @@ fi
 pass "--context with CSV correctly reports unsupported"
 
 # Test 6: JSON schema validation (if jq is available)
+# Use --quiet to suppress Tantivy's INFO logs that would pollute JSON output
 if command -v jq &> /dev/null; then
-  run_cmd "dm_context_json_validate" "$XF_BIN" search "Alice" --types dm --context --format json --db "$DB_PATH" --index "$INDEX_PATH"
+  run_cmd "dm_context_json_validate" "$XF_BIN" search "Alice" --types dm --context --format json --quiet --db "$DB_PATH" --index "$INDEX_PATH"
   if ! jq -e '.[0].conversation_id' "$LAST_STDOUT" > /dev/null 2>&1; then
     fail "JSON schema: missing conversation_id at top level"
   fi
