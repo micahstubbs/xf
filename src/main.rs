@@ -461,7 +461,7 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
             println!("type,id,created_at,score,text");
             for r in &results {
                 // Escape quotes and replace newlines/carriage returns for valid CSV
-                let text_escaped = r.text.replace('"', "\"\"").replace(['\n', '\r'], " ");
+                let text_escaped = csv_escape_text(&r.text);
                 println!(
                     "{},{},{},{:.4},\"{}\"",
                     r.result_type,
@@ -1359,7 +1359,10 @@ fn format_count(n: i64) -> String {
 /// - < 1 year: "Mon D"
 /// - >= 1 year: "Mon D, YYYY"
 fn format_relative_date(dt: DateTime<Utc>) -> String {
-    let now = Utc::now();
+    format_relative_date_with_base(dt, Utc::now())
+}
+
+fn format_relative_date_with_base(dt: DateTime<Utc>, now: DateTime<Utc>) -> String {
     let duration = now.signed_duration_since(dt);
 
     // Handle future dates (shouldn't happen, but be safe)
@@ -1787,6 +1790,10 @@ fn format_export<T: serde::Serialize>(data: &[T], format: &ExportFormat) -> Resu
             }
         }
     }
+}
+
+fn csv_escape_text(text: &str) -> String {
+    text.replace('"', "\"\"").replace(['\n', '\r'], " ")
 }
 
 /// Escape a JSON value for CSV output
