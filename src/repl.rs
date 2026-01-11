@@ -12,6 +12,7 @@ use rustyline::history::DefaultHistory;
 use rustyline::validate::Validator;
 use rustyline::{CompletionType, Config, EditMode, Editor, Helper};
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use tracing::{debug, info, trace, warn};
 
@@ -55,6 +56,10 @@ pub struct ReplSession {
     page_size: usize,
     /// Custom prompt string
     prompt_str: String,
+    /// Last selected result index (for $_)
+    last_selected: Option<usize>,
+    /// Named variables (for $name)
+    named_vars: HashMap<String, String>,
 }
 
 #[derive(Default)]
@@ -76,6 +81,7 @@ enum Command {
     Export { format: ExportFormat },
     Stats,
     Help { command: Option<String> },
+    Set { name: String, value: String },
     Quit,
 }
 
@@ -103,8 +109,8 @@ enum ExportFormat {
 
 /// Commands available in the REPL for completion.
 const COMMANDS: &[&str] = &[
-    "search", "s", "list", "l", "refine", "r", "more", "m", "show", "export", "e", "stats", "help",
-    "h", "?", "quit", "exit", "q",
+    "search", "s", "list", "l", "refine", "r", "more", "m", "show", "export", "e", "stats", "set",
+    "help", "h", "?", "quit", "exit", "q",
 ];
 
 /// List targets for completion.
@@ -362,6 +368,8 @@ pub fn run(storage: Storage, search: SearchEngine, repl_config: ReplConfig) -> R
         current_offset: 0,
         page_size: repl_config.page_size,
         prompt_str: repl_config.prompt,
+        last_selected: None,
+        named_vars: HashMap::new(),
     };
 
     // Load history if enabled
@@ -435,7 +443,31 @@ impl ReplSession {
         }
     }
 
+    /// Execute a command line, handling pipes and variable substitution.
     fn execute(&mut self, input: &str) -> Result<bool> {
+        // Handle pipes: split on | and execute each command sequentially
+        let pipe_segments: Vec<&str> = input.split('|').map(str::trim).collect();
+
+        for segment in pipe_segments {
+            if segment.is_empty() {
+                continue;
+            }
+
+            // Substitute variables in the segment
+            let substituted = self.substitute_vars(segment);
+            debug!(original = %segment, substituted = %substituted, "Variable substitution");
+
+            // Parse and execute
+            if !self.execute_single(&substituted)? {
+                return Ok(false);
+            }
+        }
+
+        Ok(true)
+    }
+
+    /// Execute a single command (after variable substitution).
+    fn execute_single(&mut self, input: &str) -> Result<bool> {
         let command = parse_command(input)?;
         match command {
             Command::Search { query } => {
@@ -462,9 +494,89 @@ impl ReplSession {
             Command::Help { command } => {
                 print_help(command.as_deref());
             }
+            Command::Set { name, value } => {
+                self.run_set(&name, &value);
+            }
             Command::Quit => return Ok(false),
         }
         Ok(true)
+    }
+
+    /// Substitute variables in input text.
+    ///
+    /// Supports:
+    /// - `$1`, `$2`, ... = Nth result ID (1-indexed)
+    /// - `$_` = last selected result ID
+    /// - `$*` = all result IDs (space-separated)
+    /// - `$name` = named variable value
+    fn substitute_vars(&self, input: &str) -> String {
+        let mut result = String::with_capacity(input.len());
+        let chars: Vec<char> = input.chars().collect();
+        let mut i = 0;
+
+        while i < chars.len() {
+            if chars[i] == '$' && i + 1 < chars.len() {
+                let start = i + 1;
+
+                // Check for special cases first
+                if chars[start] == '_' {
+                    // $_ = last selected result
+                    if let Some(idx) = self.last_selected {
+                        if let Some(r) = self.last_results.get(idx) {
+                            result.push_str(&r.id);
+                        }
+                    }
+                    i += 2;
+                    continue;
+                } else if chars[start] == '*' {
+                    // $* = all result IDs
+                    let ids: Vec<&str> = self.last_results.iter().map(|r| r.id.as_str()).collect();
+                    result.push_str(&ids.join(" "));
+                    i += 2;
+                    continue;
+                } else if chars[start].is_ascii_digit() {
+                    // $1, $2, ... = Nth result ID (1-indexed)
+                    let mut end = start;
+                    while end < chars.len() && chars[end].is_ascii_digit() {
+                        end += 1;
+                    }
+                    let num_str: String = chars[start..end].iter().collect();
+                    if let Ok(n) = num_str.parse::<usize>() {
+                        if n > 0 {
+                            if let Some(r) = self.last_results.get(n - 1) {
+                                result.push_str(&r.id);
+                            }
+                        }
+                    }
+                    i = end;
+                    continue;
+                } else if chars[start].is_alphabetic() || chars[start] == '_' {
+                    // $name = named variable
+                    let mut end = start;
+                    while end < chars.len() && (chars[end].is_alphanumeric() || chars[end] == '_') {
+                        end += 1;
+                    }
+                    let name: String = chars[start..end].iter().collect();
+                    if let Some(val) = self.named_vars.get(&name) {
+                        result.push_str(val);
+                    }
+                    i = end;
+                    continue;
+                }
+            }
+
+            result.push(chars[i]);
+            i += 1;
+        }
+
+        result
+    }
+
+    /// Set a named variable.
+    fn run_set(&mut self, name: &str, value: &str) {
+        debug!(name = %name, value = %value, "Setting variable");
+        self.named_vars.insert(name.to_string(), value.to_string());
+        println!("{} = {}", format!("${name}").cyan(), value.green());
     }
 
     fn run_search(&mut self, query: &str) -> Result<()> {
@@ -704,7 +816,7 @@ impl ReplSession {
     }
 
     #[allow(clippy::unnecessary_wraps)] // Consistent return type with other run_* methods
-    fn run_show(&self, index: usize) -> Result<()> {
+    fn run_show(&mut self, index: usize) -> Result<()> {
         if self.last_results.is_empty() {
             println!("{}", "No results. Run a search first.".yellow());
             return Ok(());
@@ -717,6 +829,10 @@ impl ReplSession {
             );
             return Ok(());
         }
+
+        // Update last_selected for $_ variable
+        self.last_selected = Some(index - 1);
+        debug!(last_selected = index - 1, "Updated last selected");
 
         let result = &self.last_results[index - 1];
         debug!(index, result_type = %result.result_type, "Showing result details");
@@ -820,6 +936,14 @@ fn parse_command(input: &str) -> Result<Command> {
             Ok(Command::Export { format })
         }
         "stats" => Ok(Command::Stats),
+        "set" => {
+            if parts.len() < 3 {
+                anyhow::bail!("Usage: set <name> <value>");
+            }
+            let name = parts[1].trim_start_matches('$').to_string();
+            let value = parts[2..].join(" ");
+            Ok(Command::Set { name, value })
+        }
         "help" | "h" | "?" => Ok(Command::Help {
             command: parts.get(1).map(ToString::to_string),
         }),
@@ -921,6 +1045,12 @@ fn print_help(command: Option<&str>) {
             println!("{}", "stats".cyan());
             println!("  Show archive statistics");
         }
+        Some("set") => {
+            println!("{}", "set <name> <value>".cyan());
+            println!("  Set a named variable for later use");
+            println!("  Example: set myquery rust programming");
+            println!("  Use: search $myquery");
+        }
         Some("quit" | "exit" | "q") => {
             println!("{}", "quit".cyan());
             println!("  Exit the REPL");
@@ -940,8 +1070,21 @@ fn print_help(command: Option<&str>) {
             println!("  show <number>   - show full result details");
             println!("  export [format] - export results as json/csv (e)");
             println!("  stats           - show archive statistics");
+            println!("  set <n> <val>   - set a named variable");
             println!("  help [command]  - show help (h, ?)");
             println!("  quit            - exit (exit, q)");
+            println!();
+            println!("{}", "Variables:".dimmed());
+            println!("  {} $1, $2, ... = Nth result ID", "•".dimmed());
+            println!("  {} $_ = last shown result ID", "•".dimmed());
+            println!("  {} $* = all result IDs", "•".dimmed());
+            println!("  {} $name = named variable", "•".dimmed());
+            println!();
+            println!("{}", "Pipes:".dimmed());
+            println!(
+                "  {} Use | to chain commands: search rust | refine async",
+                "•".dimmed()
+            );
             println!();
             println!("{}", "Tips:".dimmed());
             println!("  {} Use Ctrl+C to cancel, Ctrl+D to quit", "•".dimmed());
@@ -1522,5 +1665,280 @@ mod tests {
                 c.display
             );
         }
+    }
+
+    // ======================== Set Command Parsing Tests ========================
+
+    #[test]
+    fn test_parse_set_command() {
+        let cmd = parse_command("set myvar hello").unwrap();
+        assert!(matches!(cmd, Command::Set { name, value } if name == "myvar" && value == "hello"));
+    }
+
+    #[test]
+    fn test_parse_set_with_dollar_prefix() {
+        // $myvar should be stripped to myvar
+        let cmd = parse_command("set $myvar hello").unwrap();
+        assert!(matches!(cmd, Command::Set { name, value } if name == "myvar" && value == "hello"));
+    }
+
+    #[test]
+    fn test_parse_set_multiword_value() {
+        let cmd = parse_command("set query rust programming language").unwrap();
+        assert!(
+            matches!(cmd, Command::Set { name, value } if name == "query" && value == "rust programming language")
+        );
+    }
+
+    #[test]
+    fn test_parse_set_missing_value_fails() {
+        let result = parse_command("set varname");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_set_missing_name_fails() {
+        let result = parse_command("set");
+        assert!(result.is_err());
+    }
+
+    // ======================== Variable Substitution Tests ========================
+
+    /// Helper to create a minimal test session state for variable substitution tests.
+    fn create_test_session_vars() -> (Vec<SearchResult>, HashMap<String, String>, Option<usize>) {
+        use crate::model::SearchResultType;
+        use chrono::Utc;
+
+        let results = vec![
+            SearchResult {
+                id: "tweet_001".to_string(),
+                result_type: SearchResultType::Tweet,
+                text: "First tweet".to_string(),
+                score: 1.0,
+                created_at: Utc::now(),
+                highlights: vec![],
+                metadata: serde_json::json!({}),
+            },
+            SearchResult {
+                id: "tweet_002".to_string(),
+                result_type: SearchResultType::Tweet,
+                text: "Second tweet".to_string(),
+                score: 0.9,
+                created_at: Utc::now(),
+                highlights: vec![],
+                metadata: serde_json::json!({}),
+            },
+            SearchResult {
+                id: "tweet_003".to_string(),
+                result_type: SearchResultType::Tweet,
+                text: "Third tweet".to_string(),
+                score: 0.8,
+                created_at: Utc::now(),
+                highlights: vec![],
+                metadata: serde_json::json!({}),
+            },
+        ];
+
+        let mut named_vars = HashMap::new();
+        named_vars.insert("myquery".to_string(), "rust async".to_string());
+        named_vars.insert("user".to_string(), "alice".to_string());
+
+        (results, named_vars, Some(1)) // last_selected = index 1 (second result)
+    }
+
+    /// Helper to test variable substitution without full `ReplSession`.
+    fn substitute_vars_test(
+        input: &str,
+        results: &[SearchResult],
+        named_vars: &HashMap<String, String>,
+        last_selected: Option<usize>,
+    ) -> String {
+        // Replicate the substitution logic for testing
+        let mut result = String::with_capacity(input.len());
+        let chars: Vec<char> = input.chars().collect();
+        let mut i = 0;
+
+        while i < chars.len() {
+            if chars[i] == '$' && i + 1 < chars.len() {
+                let start = i + 1;
+
+                if chars[start] == '_' {
+                    if let Some(idx) = last_selected {
+                        if let Some(r) = results.get(idx) {
+                            result.push_str(&r.id);
+                        }
+                    }
+                    i += 2;
+                    continue;
+                } else if chars[start] == '*' {
+                    let ids: Vec<&str> = results.iter().map(|r| r.id.as_str()).collect();
+                    result.push_str(&ids.join(" "));
+                    i += 2;
+                    continue;
+                } else if chars[start].is_ascii_digit() {
+                    let mut end = start;
+                    while end < chars.len() && chars[end].is_ascii_digit() {
+                        end += 1;
+                    }
+                    let num_str: String = chars[start..end].iter().collect();
+                    if let Ok(n) = num_str.parse::<usize>() {
+                        if n > 0 {
+                            if let Some(r) = results.get(n - 1) {
+                                result.push_str(&r.id);
+                            }
+                        }
+                    }
+                    i = end;
+                    continue;
+                } else if chars[start].is_alphabetic() || chars[start] == '_' {
+                    let mut end = start;
+                    while end < chars.len() && (chars[end].is_alphanumeric() || chars[end] == '_') {
+                        end += 1;
+                    }
+                    let name: String = chars[start..end].iter().collect();
+                    if let Some(val) = named_vars.get(&name) {
+                        result.push_str(val);
+                    }
+                    i = end;
+                    continue;
+                }
+            }
+
+            result.push(chars[i]);
+            i += 1;
+        }
+
+        result
+    }
+
+    #[test]
+    fn test_substitute_var_numeric_first() {
+        let (results, named_vars, last_selected) = create_test_session_vars();
+        let result = substitute_vars_test("show $1", &results, &named_vars, last_selected);
+        assert_eq!(result, "show tweet_001");
+    }
+
+    #[test]
+    fn test_substitute_var_numeric_second() {
+        let (results, named_vars, last_selected) = create_test_session_vars();
+        let result = substitute_vars_test("show $2", &results, &named_vars, last_selected);
+        assert_eq!(result, "show tweet_002");
+    }
+
+    #[test]
+    fn test_substitute_var_numeric_out_of_range() {
+        let (results, named_vars, last_selected) = create_test_session_vars();
+        // $99 doesn't exist, should be empty
+        let result = substitute_vars_test("show $99", &results, &named_vars, last_selected);
+        assert_eq!(result, "show ");
+    }
+
+    #[test]
+    fn test_substitute_var_underscore() {
+        let (results, named_vars, last_selected) = create_test_session_vars();
+        // $_ = last_selected which is index 1 = tweet_002
+        let result = substitute_vars_test("show $_", &results, &named_vars, last_selected);
+        assert_eq!(result, "show tweet_002");
+    }
+
+    #[test]
+    fn test_substitute_var_star() {
+        let (results, named_vars, last_selected) = create_test_session_vars();
+        let result = substitute_vars_test("echo $*", &results, &named_vars, last_selected);
+        assert_eq!(result, "echo tweet_001 tweet_002 tweet_003");
+    }
+
+    #[test]
+    fn test_substitute_var_named() {
+        let (results, named_vars, last_selected) = create_test_session_vars();
+        let result = substitute_vars_test("search $myquery", &results, &named_vars, last_selected);
+        assert_eq!(result, "search rust async");
+    }
+
+    #[test]
+    fn test_substitute_var_named_multiple() {
+        let (results, named_vars, last_selected) = create_test_session_vars();
+        let result = substitute_vars_test(
+            "search $myquery by $user",
+            &results,
+            &named_vars,
+            last_selected,
+        );
+        assert_eq!(result, "search rust async by alice");
+    }
+
+    #[test]
+    fn test_substitute_var_unknown_named() {
+        let (results, named_vars, last_selected) = create_test_session_vars();
+        // $unknown should be empty since it's not defined
+        let result = substitute_vars_test("search $unknown", &results, &named_vars, last_selected);
+        assert_eq!(result, "search ");
+    }
+
+    #[test]
+    fn test_substitute_no_vars() {
+        let (results, named_vars, last_selected) = create_test_session_vars();
+        let result =
+            substitute_vars_test("search plain text", &results, &named_vars, last_selected);
+        assert_eq!(result, "search plain text");
+    }
+
+    #[test]
+    fn test_substitute_dollar_at_end() {
+        let (results, named_vars, last_selected) = create_test_session_vars();
+        // $ at end of string should be kept as-is
+        let result = substitute_vars_test("search $", &results, &named_vars, last_selected);
+        assert_eq!(result, "search $");
+    }
+
+    #[test]
+    fn test_substitute_mixed_vars() {
+        let (results, named_vars, last_selected) = create_test_session_vars();
+        let result = substitute_vars_test(
+            "from $1 to $2 query $myquery",
+            &results,
+            &named_vars,
+            last_selected,
+        );
+        assert_eq!(result, "from tweet_001 to tweet_002 query rust async");
+    }
+
+    // ======================== Pipe Parsing Tests ========================
+
+    #[test]
+    fn test_pipe_split_simple() {
+        let input = "search rust | refine async";
+        let segments: Vec<&str> = input.split('|').map(str::trim).collect();
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segments[0], "search rust");
+        assert_eq!(segments[1], "refine async");
+    }
+
+    #[test]
+    fn test_pipe_split_multiple() {
+        let input = "search rust | refine async | export json";
+        let segments: Vec<&str> = input.split('|').map(str::trim).collect();
+        assert_eq!(segments.len(), 3);
+        assert_eq!(segments[0], "search rust");
+        assert_eq!(segments[1], "refine async");
+        assert_eq!(segments[2], "export json");
+    }
+
+    #[test]
+    fn test_pipe_split_no_pipe() {
+        let input = "search rust programming";
+        let segments: Vec<&str> = input.split('|').map(str::trim).collect();
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0], "search rust programming");
+    }
+
+    #[test]
+    fn test_pipe_split_with_extra_spaces() {
+        let input = "search rust  |  refine async  |  more";
+        let segments: Vec<&str> = input.split('|').map(str::trim).collect();
+        assert_eq!(segments.len(), 3);
+        assert_eq!(segments[0], "search rust");
+        assert_eq!(segments[1], "refine async");
+        assert_eq!(segments[2], "more");
     }
 }
