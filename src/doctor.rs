@@ -416,3 +416,297 @@ pub fn validate_archive(archive_path: &Path) -> crate::Result<Vec<HealthCheck>> 
 
     Ok(all_checks)
 }
+
+// ============================================================================
+// Performance Benchmarks (xf-11.4.4)
+// ============================================================================
+
+use crate::SearchEngine;
+
+/// Performance thresholds for query latency (milliseconds).
+mod thresholds {
+    /// Acceptable: under 50ms
+    pub const QUERY_ACCEPTABLE_MS: f64 = 50.0;
+    /// Slow: over 100ms is a warning
+    pub const QUERY_SLOW_MS: f64 = 100.0;
+
+    /// Index load time thresholds
+    pub const LOAD_ACCEPTABLE_MS: f64 = 500.0;
+    pub const LOAD_SLOW_MS: f64 = 1000.0;
+
+    /// Number of iterations for benchmark stability
+    pub const BENCHMARK_ITERATIONS: usize = 10;
+}
+
+/// Latency statistics from a benchmark run.
+#[derive(Debug, Clone, Serialize)]
+pub struct LatencyStats {
+    pub min_ms: f64,
+    pub max_ms: f64,
+    pub mean_ms: f64,
+    pub p50_ms: f64,
+    pub p95_ms: f64,
+    pub p99_ms: f64,
+    pub iterations: usize,
+}
+
+impl LatencyStats {
+    /// Compute statistics from a vector of durations in milliseconds.
+    fn from_durations(durations: &mut [f64]) -> Self {
+        durations.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+        let n = durations.len();
+        let sum: f64 = durations.iter().sum();
+        let n_f64 = f64::from(u32::try_from(n).unwrap_or(u32::MAX));
+
+        Self {
+            min_ms: durations.first().copied().unwrap_or(0.0),
+            max_ms: durations.last().copied().unwrap_or(0.0),
+            mean_ms: if n > 0 { sum / n_f64 } else { 0.0 },
+            p50_ms: percentile(durations, 50),
+            p95_ms: percentile(durations, 95),
+            p99_ms: percentile(durations, 99),
+            iterations: n,
+        }
+    }
+
+    /// Format as a concise string for health check messages.
+    #[must_use]
+    fn format_summary(&self) -> String {
+        format!(
+            "p50={:.1}ms, p95={:.1}ms, p99={:.1}ms (n={})",
+            self.p50_ms, self.p95_ms, self.p99_ms, self.iterations
+        )
+    }
+}
+
+/// Calculate a percentile from a sorted slice.
+fn percentile(sorted: &[f64], pct: usize) -> f64 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    let idx = (pct * sorted.len() / 100).min(sorted.len() - 1);
+    sorted[idx]
+}
+
+/// Benchmark index load time.
+///
+/// Opens the index multiple times and measures load latency.
+#[must_use]
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+pub fn benchmark_index_load(index_path: &Path) -> HealthCheck {
+    let mut durations = Vec::with_capacity(3);
+
+    // Fewer iterations for load test since it's more expensive
+    for _ in 0..3 {
+        let start = Instant::now();
+        let result = SearchEngine::open(index_path);
+        let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+
+        match result {
+            Ok(_) => durations.push(elapsed_ms),
+            Err(e) => {
+                return HealthCheck {
+                    category: CheckCategory::Performance,
+                    name: "Index Load Time".to_string(),
+                    status: CheckStatus::Error,
+                    message: format!("Failed to load index: {e}"),
+                    suggestion: Some("Verify index exists and is not corrupted".to_string()),
+                };
+            }
+        }
+    }
+
+    let mut sorted = durations.clone();
+    let latency_stats = LatencyStats::from_durations(&mut sorted);
+    let median = latency_stats.p50_ms;
+
+    let (check_status, suggestion) = if median < thresholds::LOAD_ACCEPTABLE_MS {
+        (CheckStatus::Pass, None)
+    } else if median < thresholds::LOAD_SLOW_MS {
+        (
+            CheckStatus::Warning,
+            Some("Index load is slow. Consider running 'xf optimize'".to_string()),
+        )
+    } else {
+        (
+            CheckStatus::Warning,
+            Some("Index load is very slow. Consider SSD storage or index rebuild".to_string()),
+        )
+    };
+
+    HealthCheck {
+        category: CheckCategory::Performance,
+        name: "Index Load Time".to_string(),
+        status: check_status,
+        message: format!("{median:.0}ms"),
+        suggestion,
+    }
+}
+
+/// Benchmark simple single-word queries.
+#[must_use]
+pub fn benchmark_simple_query(engine: &SearchEngine) -> HealthCheck {
+    let test_queries = ["the", "and", "test", "hello", "world"];
+    let mut durations = Vec::with_capacity(thresholds::BENCHMARK_ITERATIONS * test_queries.len());
+
+    for query in test_queries {
+        for _ in 0..thresholds::BENCHMARK_ITERATIONS {
+            let start = Instant::now();
+            let _ = engine.search(query, None, 10);
+            durations.push(start.elapsed().as_secs_f64() * 1000.0);
+        }
+    }
+
+    let latency = LatencyStats::from_durations(&mut durations);
+    let (check_status, suggestion) = evaluate_query_latency(&latency);
+
+    HealthCheck {
+        category: CheckCategory::Performance,
+        name: "Simple Query Latency".to_string(),
+        status: check_status,
+        message: latency.format_summary(),
+        suggestion,
+    }
+}
+
+/// Benchmark phrase queries (multi-word, quoted).
+#[must_use]
+pub fn benchmark_phrase_query(engine: &SearchEngine) -> HealthCheck {
+    let test_queries = ["\"hello world\"", "\"the quick\"", "\"test message\""];
+    let mut durations = Vec::with_capacity(thresholds::BENCHMARK_ITERATIONS * test_queries.len());
+
+    for query in test_queries {
+        for _ in 0..thresholds::BENCHMARK_ITERATIONS {
+            let start = Instant::now();
+            let _ = engine.search(query, None, 10);
+            durations.push(start.elapsed().as_secs_f64() * 1000.0);
+        }
+    }
+
+    let latency = LatencyStats::from_durations(&mut durations);
+    let (check_status, suggestion) = evaluate_query_latency(&latency);
+
+    HealthCheck {
+        category: CheckCategory::Performance,
+        name: "Phrase Query Latency".to_string(),
+        status: check_status,
+        message: latency.format_summary(),
+        suggestion,
+    }
+}
+
+/// Benchmark complex boolean queries.
+#[must_use]
+pub fn benchmark_complex_query(engine: &SearchEngine) -> HealthCheck {
+    let test_queries = [
+        "hello AND world",
+        "test OR example",
+        "NOT spam",
+        "(hello OR hi) AND world",
+    ];
+    let mut durations = Vec::with_capacity(thresholds::BENCHMARK_ITERATIONS * test_queries.len());
+
+    for query in test_queries {
+        for _ in 0..thresholds::BENCHMARK_ITERATIONS {
+            let start = Instant::now();
+            let _ = engine.search(query, None, 10);
+            durations.push(start.elapsed().as_secs_f64() * 1000.0);
+        }
+    }
+
+    let latency = LatencyStats::from_durations(&mut durations);
+    let (check_status, suggestion) = evaluate_query_latency(&latency);
+
+    HealthCheck {
+        category: CheckCategory::Performance,
+        name: "Complex Query Latency".to_string(),
+        status: check_status,
+        message: latency.format_summary(),
+        suggestion,
+    }
+}
+
+/// Benchmark FTS5 queries via `SQLite`.
+#[must_use]
+pub fn benchmark_fts5_query(storage: &crate::Storage) -> HealthCheck {
+    let test_queries = ["the", "test", "hello", "and"];
+    let mut durations = Vec::with_capacity(thresholds::BENCHMARK_ITERATIONS * test_queries.len());
+
+    for query in test_queries {
+        for _ in 0..thresholds::BENCHMARK_ITERATIONS {
+            let start = Instant::now();
+            // Use search_tweets which queries via FTS5
+            let _ = storage.search_tweets(query, 10);
+            durations.push(start.elapsed().as_secs_f64() * 1000.0);
+        }
+    }
+
+    let latency = LatencyStats::from_durations(&mut durations);
+    let (check_status, suggestion) = evaluate_query_latency(&latency);
+
+    HealthCheck {
+        category: CheckCategory::Performance,
+        name: "FTS5 Query Latency".to_string(),
+        status: check_status,
+        message: latency.format_summary(),
+        suggestion,
+    }
+}
+
+/// Evaluate query latency against thresholds.
+fn evaluate_query_latency(latency: &LatencyStats) -> (CheckStatus, Option<String>) {
+    let p95 = latency.p95_ms;
+
+    if p95 < thresholds::QUERY_ACCEPTABLE_MS {
+        (CheckStatus::Pass, None)
+    } else if p95 < thresholds::QUERY_SLOW_MS {
+        (
+            CheckStatus::Warning,
+            Some("Query latency is elevated. Consider 'xf optimize'".to_string()),
+        )
+    } else {
+        (
+            CheckStatus::Warning,
+            Some("Query latency is high. Consider index optimization or SSD storage".to_string()),
+        )
+    }
+}
+
+/// Run all performance benchmarks.
+///
+/// Returns a vector of health checks covering index load time,
+/// simple/phrase/complex query latencies, and FTS5 performance.
+pub fn run_performance_benchmarks(
+    index_path: &Path,
+    engine: &SearchEngine,
+    storage: &crate::Storage,
+) -> Vec<HealthCheck> {
+    let mut checks = Vec::with_capacity(5);
+
+    info!("Running performance benchmarks...");
+
+    // Index load time
+    debug!("Benchmarking index load time");
+    checks.push(benchmark_index_load(index_path));
+
+    // Simple queries
+    debug!("Benchmarking simple queries");
+    checks.push(benchmark_simple_query(engine));
+
+    // Phrase queries
+    debug!("Benchmarking phrase queries");
+    checks.push(benchmark_phrase_query(engine));
+
+    // Complex boolean queries
+    debug!("Benchmarking complex queries");
+    checks.push(benchmark_complex_query(engine));
+
+    // FTS5 queries
+    debug!("Benchmarking FTS5 queries");
+    checks.push(benchmark_fts5_query(storage));
+
+    info!("Performance benchmarks complete: {} checks", checks.len());
+
+    checks
+}
