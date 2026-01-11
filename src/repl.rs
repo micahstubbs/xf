@@ -1011,4 +1011,149 @@ mod tests {
         let result = truncate_text(text, 11);
         assert_eq!(result, text);
     }
+
+    // ======================== ReplConfig Tests ========================
+
+    #[test]
+    fn test_repl_config_default() {
+        let config = ReplConfig::default();
+        assert_eq!(config.prompt, "xf> ");
+        assert_eq!(config.page_size, 10);
+        assert!(!config.no_history);
+        assert!(config.history_file.is_none());
+    }
+
+    #[test]
+    fn test_repl_config_custom_values() {
+        let config = ReplConfig {
+            prompt: "custom> ".to_string(),
+            page_size: 25,
+            no_history: true,
+            history_file: Some(PathBuf::from("/tmp/test_history")),
+        };
+        assert_eq!(config.prompt, "custom> ");
+        assert_eq!(config.page_size, 25);
+        assert!(config.no_history);
+        assert_eq!(
+            config.history_file,
+            Some(PathBuf::from("/tmp/test_history"))
+        );
+    }
+
+    #[test]
+    fn test_repl_config_clone() {
+        let config = ReplConfig {
+            prompt: "test> ".to_string(),
+            page_size: 15,
+            no_history: false,
+            history_file: None,
+        };
+        let cloned = config.clone();
+        assert_eq!(cloned.prompt, config.prompt);
+        assert_eq!(cloned.page_size, config.page_size);
+        assert_eq!(cloned.no_history, config.no_history);
+        assert_eq!(cloned.history_file, config.history_file);
+    }
+
+    // ======================== Prompt Base Extraction Tests ========================
+
+    /// Helper to test prompt base extraction logic (same as `format_prompt` uses).
+    fn extract_prompt_base(prompt_str: &str) -> &str {
+        prompt_str
+            .trim_end_matches("> ")
+            .trim_end_matches('>')
+    }
+
+    #[test]
+    fn test_extract_prompt_base_default() {
+        assert_eq!(extract_prompt_base("xf> "), "xf");
+    }
+
+    #[test]
+    fn test_extract_prompt_base_custom() {
+        assert_eq!(extract_prompt_base("myshell> "), "myshell");
+    }
+
+    #[test]
+    fn test_extract_prompt_base_with_arrow_only() {
+        assert_eq!(extract_prompt_base(">"), "");
+    }
+
+    #[test]
+    fn test_extract_prompt_base_no_suffix() {
+        assert_eq!(extract_prompt_base("test"), "test");
+    }
+
+    #[test]
+    fn test_extract_prompt_base_with_spaces() {
+        assert_eq!(extract_prompt_base("my app> "), "my app");
+    }
+
+    // ======================== ListTarget Tests ========================
+
+    #[test]
+    fn test_list_target_debug() {
+        // Verify Debug trait is implemented
+        let target = ListTarget::Tweets;
+        let debug_str = format!("{target:?}");
+        assert!(debug_str.contains("Tweets"));
+    }
+
+    #[test]
+    fn test_list_target_copy() {
+        let target = ListTarget::Likes;
+        let copied = target;
+        assert!(matches!(copied, ListTarget::Likes));
+    }
+
+    // ======================== ExportFormat Tests ========================
+
+    #[test]
+    fn test_export_format_debug() {
+        let format = ExportFormat::Json;
+        let debug_str = format!("{format:?}");
+        assert!(debug_str.contains("Json"));
+    }
+
+    #[test]
+    fn test_export_format_copy() {
+        let format = ExportFormat::Csv;
+        let copied = format;
+        assert!(matches!(copied, ExportFormat::Csv));
+    }
+
+    // ======================== Edge Case Tests ========================
+
+    #[test]
+    fn test_parse_command_whitespace_handling() {
+        // Leading/trailing whitespace should be handled
+        let cmd = parse_command("  search  query  ").unwrap();
+        assert!(matches!(cmd, Command::Search { query } if query == "query"));
+    }
+
+    #[test]
+    fn test_parse_list_requires_lowercase() {
+        // Targets must be lowercase
+        let result = parse_command("list TWEETS");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_export_requires_lowercase() {
+        // Formats must be lowercase
+        let result = parse_command("export JSON");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_empty_input_fails() {
+        let result = parse_command("");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_whitespace_only_fails() {
+        let result = parse_command("   ");
+        assert!(result.is_err());
+    }
 }
