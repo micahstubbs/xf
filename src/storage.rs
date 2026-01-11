@@ -65,6 +65,14 @@ impl Storage {
         Ok(storage)
     }
 
+    /// Get a reference to the underlying database connection.
+    ///
+    /// This is useful for modules that need to execute custom queries.
+    #[must_use]
+    pub const fn connection(&self) -> &Connection {
+        &self.conn
+    }
+
     /// Run database migrations
     fn migrate(&self) -> Result<()> {
         let current_version = self.get_schema_version();

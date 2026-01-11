@@ -20,6 +20,7 @@ pub mod model;
 pub mod parser;
 pub mod perf;
 pub mod search;
+pub mod stats_analytics;
 pub mod storage;
 
 pub use cli::*;

@@ -19,6 +19,7 @@ use tracing_subscriber::EnvFilter;
 use xf::cli;
 use xf::config::Config;
 use xf::search;
+use xf::stats_analytics::{self, TemporalStats};
 use xf::{
     ArchiveParser, ArchiveStats, Cli, Commands, DataType, ExportFormat, ExportTarget, ListTarget,
     OutputFormat, SearchEngine, SearchResult, SearchResultType, SortOrder, Storage, Tweet,
@@ -828,14 +829,24 @@ fn cmd_stats(cli: &Cli, args: &cli::StatsArgs) -> Result<()> {
         None
     };
 
+    // Temporal analytics uses efficient SQL aggregations, not in-memory tweet iteration
+    let temporal = if args.temporal {
+        Some(TemporalStats::compute(&storage)?)
+    } else {
+        None
+    };
+
+    let needs_extended = needs_tweets || args.temporal;
+
     match cli.format {
         OutputFormat::Json | OutputFormat::JsonPretty => {
-            if needs_tweets {
+            if needs_extended {
                 let extended = StatsExtended {
                     stats,
                     detailed,
                     top_hashtags,
                     top_mentions,
+                    temporal,
                 };
                 let json = if matches!(cli.format, OutputFormat::JsonPretty) {
                     serde_json::to_string_pretty(&extended)?
@@ -950,6 +961,85 @@ fn cmd_stats(cli: &Cli, args: &cli::StatsArgs) -> Result<()> {
                     }
                 }
             }
+
+            #[allow(clippy::cast_possible_wrap)]
+            if let Some(ref temporal) = temporal {
+                println!();
+                println!("{}", "Temporal Analytics".bold().cyan());
+                println!("{}", "─".repeat(60));
+
+                // Activity sparkline
+                let sparkline = stats_analytics::sparkline_from_daily(&temporal.daily_counts, 50);
+                println!("  Activity: {}", sparkline.dimmed());
+
+                // Key metrics
+                println!(
+                    "  {:<25} {:>10}",
+                    "Active days:",
+                    format_count(temporal.active_days_count as i64)
+                );
+                println!(
+                    "  {:<25} {:>10}",
+                    "Total days in range:",
+                    format_count(temporal.total_days_in_range as i64)
+                );
+                println!(
+                    "  {:<25} {:>10.1}",
+                    "Avg tweets/active day:", temporal.avg_tweets_per_active_day
+                );
+
+                // Most active day
+                if let Some(day) = temporal.most_active_day {
+                    println!(
+                        "  {:<25} {} ({})",
+                        "Most active day:",
+                        day.format("%Y-%m-%d").to_string().green(),
+                        format_count(temporal.most_active_day_count as i64)
+                    );
+                }
+
+                // Most active hour
+                let hour_label = format!("{:02}:00", temporal.most_active_hour);
+                println!(
+                    "  {:<25} {} ({})",
+                    "Most active hour:",
+                    hour_label.green(),
+                    format_count(temporal.most_active_hour_count as i64)
+                );
+
+                // Longest gap
+                if temporal.longest_gap_days > 1 {
+                    let gap_info = if let (Some(start), Some(end)) =
+                        (temporal.longest_gap_start, temporal.longest_gap_end)
+                    {
+                        format!(
+                            "{} days ({} to {})",
+                            temporal.longest_gap_days,
+                            start.format("%Y-%m-%d"),
+                            end.format("%Y-%m-%d")
+                        )
+                    } else {
+                        format!("{} days", temporal.longest_gap_days)
+                    };
+                    println!("  {:<25} {}", "Longest gap:", gap_info.yellow());
+                }
+
+                // Hourly distribution
+                println!();
+                println!("  {} (00-23):", "Hourly distribution".dimmed());
+                let hourly_sparkline =
+                    stats_analytics::format_hourly_sparkline(&temporal.hourly_distribution);
+                println!("  {hourly_sparkline}");
+
+                // Day of week distribution
+                println!();
+                println!("  {}:", "Day of week".dimmed());
+                let dow_chart =
+                    stats_analytics::format_dow_distribution(&temporal.dow_distribution);
+                for line in dow_chart.lines() {
+                    println!("  {line}");
+                }
+            }
         }
     }
 
@@ -965,6 +1055,8 @@ struct StatsExtended {
     top_hashtags: Option<Vec<CountItem>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     top_mentions: Option<Vec<CountItem>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temporal: Option<TemporalStats>,
 }
 
 #[derive(Serialize)]

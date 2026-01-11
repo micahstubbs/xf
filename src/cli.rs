@@ -156,6 +156,7 @@ pub struct SearchArgs {
 }
 
 #[derive(Args, Debug)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct StatsArgs {
     /// Show detailed breakdown by month/year
     #[arg(long, short = 'd')]
@@ -168,6 +169,10 @@ pub struct StatsArgs {
     /// Include top mentions
     #[arg(long)]
     pub mentions: bool,
+
+    /// Show temporal analytics (activity patterns, gaps, sparklines)
+    #[arg(long)]
+    pub temporal: bool,
 
     /// Number of top items to show
     #[arg(long, short = 'n', default_value = "10")]
