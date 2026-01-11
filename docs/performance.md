@@ -2,6 +2,105 @@
 
 This document covers performance characteristics, optimization strategies, and benchmarking for xf.
 
+## System Investigation & Optimization Plan (xf-9rf)
+
+This plan is self-contained and executable without external context. It covers architecture review,
+correctness/risk audit, and a performance investigation/optimization program with reproducible
+commands, test oracles, and rollback guidance.
+
+### Objectives
+
+- Map end-to-end data flow (parser → storage → search → CLI output).
+- Identify correctness, reliability, and security risks in critical paths.
+- Establish baseline performance (p50/p95/p99 latency, throughput, peak RSS).
+- Profile CPU, allocation, and I/O hot paths with reproducible commands.
+- Deliver a ranked optimization backlog using (Impact × Confidence) / Effort.
+- Add regression guardrails (bench/e2e/perf scripts with detailed logging).
+
+### Structured Task List (with Dependencies, Estimates, and Acceptance Criteria)
+
+| ID | Task | Depends On | Estimate | Acceptance Criteria |
+|---|---|---|---|---|
+| T0 | Environment + dataset baseline capture | — | 0.5h | Document dataset path, size, OS, CPU, RAM, Rust toolchain, and git revision used for baselines. |
+| T1 | Architecture walk-through (parser/storage/search/CLI) | T0 | 1.5h | Updated architecture notes include data flow, module boundaries, and I/O points. |
+| T2 | Correctness + reliability audit of critical paths | T1 | 2.0h | Issue list with risk classification + repro steps; each issue has a test/validation plan. |
+| T3 | Baseline performance measurements | T0 | 2.0h | p50/p95/p99 for index/search; throughput and peak RSS captured with commands and logs. |
+| T4 | Profiling + bottleneck validation | T3 | 2.0h | CPU/allocation/I/O hotspots identified with supporting traces. |
+| T5 | Optimization backlog + ranking | T4 | 1.5h | Backlog ranked with (Impact × Confidence) / Effort and explicit rollback plan per item. |
+| T6 | Regression guardrails | T2, T3 | 2.0h | E2E/perf scripts with detailed logging; unit/integration tests for fixes. |
+| T7 | Summary + next steps | T5, T6 | 1.0h | Summary includes outcomes, residual risks, and next experiments. |
+
+### Equivalence Oracles (Correctness Guardrails)
+
+All optimizations must preserve these outputs for identical inputs:
+
+- `xf index` on fixture archive: identical total document counts, unchanged stored metadata.
+- `xf search "rust" --format json`: identical JSON shape and result set ordering for equal scores.
+- `xf search "rust" --types tweet --sort date`: ordering consistent with timestamps.
+- `xf stats` (basic + detailed): totals and derived metrics unchanged.
+- `xf export tweets --format csv`: identical CSV header + row count.
+- `xf doctor`: same health check statuses for the same archive/index.
+
+Each change must include at least one of:
+- unit test (logic), or
+- integration test (DB/search), or
+- e2e/perf script with detailed logging (command, stdout/stderr, exit code, timing, env).
+
+### Performance Workflow (Reproducible Commands)
+
+Baseline metrics (example commands; adjust paths):
+
+```bash
+# Index baseline
+time target/release/xf index /path/to/archive --db /tmp/xf.db --index /tmp/xf_index
+
+# Search latency samples (repeat N times for p50/p95/p99)
+for i in {1..50}; do target/release/xf search "rust" --db /tmp/xf.db --index /tmp/xf_index >/tmp/xf.out; done
+
+# RSS sampling (Linux)
+/usr/bin/time -v target/release/xf search "rust" --db /tmp/xf.db --index /tmp/xf_index >/tmp/xf.out
+```
+
+Profiling:
+
+```bash
+# CPU
+perf record --call-graph=dwarf target/release/xf search "rust" --db /tmp/xf.db --index /tmp/xf_index
+perf report
+
+# Allocations (if available)
+valgrind --tool=massif target/release/xf index /path/to/archive --db /tmp/xf.db --index /tmp/xf_index
+```
+
+All profiling runs must log: command, stdout/stderr, exit code, elapsed time, and environment.
+
+### Optimization Backlog (Ranked by (Impact × Confidence) / Effort)
+
+Scores use a 1–5 scale; higher is better. These are hypotheses to validate via profiling.
+
+| Rank | Candidate | Impact | Confidence | Effort | Score | Rationale |
+|---|---|---:|---:|---:|---:|---|
+| 1 | Reduce Tantivy commit overhead by tuning writer memory and commit cadence | 5 | 3 | 2 | 7.5 | Indexing hot path dominated by commit/merge; likely win for large archives. |
+| 2 | Avoid repeated JSON serialization in hot loops (metadata strings) | 3 | 4 | 2 | 6.0 | Indexing builds many small JSON strings; pre-allocate or reuse buffers. |
+| 3 | Optimize prefix generation for large text fields (cap per-doc tokens) | 3 | 3 | 2 | 4.5 | Prefix generation may dominate long text; reduce workload while preserving recall. |
+| 4 | Batch SQLite inserts with prepared statement reuse in tight loops | 3 | 3 | 3 | 3.0 | Already using transactions; further batching might help large archives. |
+| 5 | Add FTS fallback for search when Tantivy index is missing | 2 | 4 | 3 | 2.7 | Improves resilience but not performance; user-visible reliability benefit. |
+| 6 | Avoid extra allocations in CLI formatting (string joins/wrap) | 2 | 3 | 2 | 3.0 | Small wins; low risk. |
+| 7 | Tighten parsing by streaming JS wrapper removal for huge files | 4 | 2 | 5 | 1.6 | High impact but high effort; only if profiling shows parser bottleneck. |
+
+### Minimal-Diff Policy (Performance Changes)
+
+- One performance lever per change.
+- No unrelated refactors.
+- Provide before/after metrics and a proof sketch for output equivalence.
+
+### Rollback Guidance
+
+For any risky change:
+- Keep the change isolated to a single commit.
+- Provide a clear rollback note: `git revert <commit>` with justification.
+- Re-run the baseline equivalence oracles after rollback to confirm restoration.
+
 ## Performance Budgets
 
 xf uses explicit performance budgets defined in `src/perf.rs` to ensure consistent latency:
