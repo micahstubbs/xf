@@ -249,7 +249,7 @@ if [ "$FROM_SOURCE" -eq 0 ]; then
     TAR=$(basename "$ARTIFACT_URL")
     URL="$ARTIFACT_URL"
   elif [ -n "$TARGET" ]; then
-    TAR="xf-${TARGET}.tar.xz"
+    TAR="xf-${TARGET}.tar.gz"
     URL="https://github.com/${OWNER}/${REPO}/releases/download/${VERSION}/${TAR}"
   else
     warn "No prebuilt artifact for ${OS}/${ARCH}; falling back to build-from-source"
@@ -316,15 +316,23 @@ if [ "$FROM_SOURCE" -eq 1 ]; then
 fi
 
 if [ -z "$CHECKSUM" ]; then
-  [ -z "$CHECKSUM_URL" ] && CHECKSUM_URL="${URL}.sha256"
+  # Use SHA256SUMS file from release (contains checksums for all artifacts)
+  if [ -z "$CHECKSUM_URL" ]; then
+    CHECKSUM_URL="https://github.com/${OWNER}/${REPO}/releases/download/${VERSION}/SHA256SUMS"
+  fi
   info "Fetching checksum from ${CHECKSUM_URL}"
-  CHECKSUM_FILE="$TMP/checksum.sha256"
+  CHECKSUM_FILE="$TMP/SHA256SUMS"
   if ! curl -fsSL "$CHECKSUM_URL" -o "$CHECKSUM_FILE"; then
     warn "Checksum not available; skipping verification"
     CHECKSUM="SKIP"
   else
-    CHECKSUM=$(awk '{print $1}' "$CHECKSUM_FILE")
-    if [ -z "$CHECKSUM" ]; then warn "Empty checksum file; skipping verification"; CHECKSUM="SKIP"; fi
+    # Extract checksum for our specific file from SHA256SUMS
+    CHECKSUM=$(grep "  ${TAR}$" "$CHECKSUM_FILE" 2>/dev/null | awk '{print $1}')
+    if [ -z "$CHECKSUM" ]; then
+      # Try alternate format (single space)
+      CHECKSUM=$(grep " ${TAR}$" "$CHECKSUM_FILE" 2>/dev/null | awk '{print $1}')
+    fi
+    if [ -z "$CHECKSUM" ]; then warn "Checksum for ${TAR} not found; skipping verification"; CHECKSUM="SKIP"; fi
   fi
 fi
 
