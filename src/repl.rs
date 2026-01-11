@@ -585,6 +585,7 @@ impl ReplSession {
         self.last_results = results;
         self.last_query = Some(query.to_string());
         self.current_offset = 0;
+        self.last_selected = None; // Reset: new search invalidates previous selection
         self.prompt_context = PromptContext::WithResults(count);
 
         println!("{} {}", count.to_string().cyan(), "results".dimmed());
@@ -771,6 +772,7 @@ impl ReplSession {
 
         self.last_results = filtered;
         self.current_offset = 0;
+        self.last_selected = None; // Reset: refine changes indices, invalidating previous selection
         self.prompt_context = PromptContext::WithResults(count);
 
         println!(
@@ -941,6 +943,12 @@ fn parse_command(input: &str) -> Result<Command> {
                 anyhow::bail!("Usage: set <name> <value>");
             }
             let name = parts[1].trim_start_matches('$').to_string();
+            if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                anyhow::bail!(
+                    "Invalid variable name '{}'. Use alphanumeric characters and underscores only.",
+                    parts[1]
+                );
+            }
             let value = parts[2..].join(" ");
             Ok(Command::Set { name, value })
         }
@@ -1700,6 +1708,50 @@ mod tests {
     fn test_parse_set_missing_name_fails() {
         let result = parse_command("set");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_set_empty_name_fails() {
+        // set $ value should fail since $ alone is not a valid name
+        let result = parse_command("set $ value");
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Invalid variable name")
+        );
+    }
+
+    #[test]
+    fn test_parse_set_invalid_chars_fails() {
+        // Variable names with special characters should fail
+        let result = parse_command("set $a$b value");
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Invalid variable name")
+        );
+    }
+
+    #[test]
+    fn test_parse_set_valid_underscore_name() {
+        // Underscore should be valid in variable names
+        let cmd = parse_command("set my_var hello").unwrap();
+        assert!(
+            matches!(cmd, Command::Set { name, value } if name == "my_var" && value == "hello")
+        );
+    }
+
+    #[test]
+    fn test_parse_set_valid_underscore_prefix() {
+        // Variable names starting with underscore should be valid
+        let cmd = parse_command("set _private secret").unwrap();
+        assert!(
+            matches!(cmd, Command::Set { name, value } if name == "_private" && value == "secret")
+        );
     }
 
     // ======================== Variable Substitution Tests ========================
