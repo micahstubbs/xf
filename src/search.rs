@@ -2,10 +2,13 @@
 //!
 //! Provides ultra-fast search with BM25 ranking, prefix matching, and phrase queries.
 
+use crate::doctor::{CheckCategory, CheckStatus, HealthCheck};
 use crate::model::{DmConversation, GrokMessage, Like, SearchResult, SearchResultType, Tweet};
+use crate::storage::Storage;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::Instant;
 use tantivy::collector::TopDocs;
 use tantivy::query::{BooleanQuery, Occur, Query, QueryParser, TermQuery};
 use tantivy::schema::{
@@ -97,6 +100,7 @@ pub struct SearchEngine {
     index: Index,
     schema: Schema,
     reader: IndexReader,
+    index_path: Option<PathBuf>,
 }
 
 impl SearchEngine {
@@ -128,6 +132,7 @@ impl SearchEngine {
             index,
             schema,
             reader,
+            index_path: Some(index_path.to_path_buf()),
         })
     }
 
@@ -149,7 +154,14 @@ impl SearchEngine {
             index,
             schema,
             reader,
+            index_path: None,
         })
+    }
+
+    /// Return the on-disk index path when available.
+    #[must_use]
+    pub fn index_path(&self) -> Option<&Path> {
+        self.index_path.as_deref()
     }
 
     /// Get a writer for indexing.
@@ -461,6 +473,243 @@ impl SearchEngine {
         Ok(results)
     }
 
+    /// Run Tantivy index health checks for `xf doctor`.
+    #[must_use]
+    pub fn index_health_checks(&self, storage: &Storage) -> Vec<HealthCheck> {
+        vec![
+            self.check_index_directory(),
+            self.check_index_version(),
+            self.check_segment_count(),
+            self.check_document_count(storage),
+            self.check_sample_query(),
+            self.check_index_size(),
+        ]
+    }
+
+    fn check_index_directory(&self) -> HealthCheck {
+        let Some(index_path) = self.index_path.as_deref() else {
+            return HealthCheck {
+                category: CheckCategory::Index,
+                name: "Index Directory".to_string(),
+                status: CheckStatus::Warning,
+                message: "In-memory index; no directory to inspect".to_string(),
+                suggestion: None,
+            };
+        };
+
+        if !index_path.exists() {
+            return HealthCheck {
+                category: CheckCategory::Index,
+                name: "Index Directory".to_string(),
+                status: CheckStatus::Error,
+                message: format!("Index not found at {}", index_path.display()),
+                suggestion: Some("Run 'xf index' to create the index".to_string()),
+            };
+        }
+
+        if !index_path.is_dir() {
+            return HealthCheck {
+                category: CheckCategory::Index,
+                name: "Index Directory".to_string(),
+                status: CheckStatus::Error,
+                message: format!("Index path is not a directory: {}", index_path.display()),
+                suggestion: Some("Run 'xf reindex' to rebuild the index".to_string()),
+            };
+        }
+
+        let meta_path = index_path.join("meta.json");
+        if !meta_path.exists() {
+            return HealthCheck {
+                category: CheckCategory::Index,
+                name: "Index Directory".to_string(),
+                status: CheckStatus::Error,
+                message: "Missing meta.json - index may be corrupted".to_string(),
+                suggestion: Some("Run 'xf reindex' to rebuild the index".to_string()),
+            };
+        }
+
+        HealthCheck {
+            category: CheckCategory::Index,
+            name: "Index Directory".to_string(),
+            status: CheckStatus::Pass,
+            message: format!("Found at {}", index_path.display()),
+            suggestion: None,
+        }
+    }
+
+    fn check_index_version(&self) -> HealthCheck {
+        match self.index.load_metas() {
+            Ok(_) => HealthCheck {
+                category: CheckCategory::Index,
+                name: "Index Version".to_string(),
+                status: CheckStatus::Pass,
+                message: format!("Compatible with {}", tantivy::version_string()),
+                suggestion: None,
+            },
+            Err(err) => HealthCheck {
+                category: CheckCategory::Index,
+                name: "Index Version".to_string(),
+                status: CheckStatus::Error,
+                message: format!("Index metadata unreadable: {err}"),
+                suggestion: Some("Run 'xf reindex' to rebuild the index".to_string()),
+            },
+        }
+    }
+
+    fn check_segment_count(&self) -> HealthCheck {
+        let segment_count = self.reader.searcher().segment_readers().len();
+        let (status, suggestion) = if segment_count == 0 {
+            (
+                CheckStatus::Warning,
+                Some("Run 'xf reindex' to rebuild the index".to_string()),
+            )
+        } else if segment_count <= 10 {
+            (CheckStatus::Pass, None)
+        } else {
+            (
+                CheckStatus::Warning,
+                Some("Run 'xf optimize' to merge segments".to_string()),
+            )
+        };
+
+        HealthCheck {
+            category: CheckCategory::Index,
+            name: "Segment Count".to_string(),
+            status,
+            message: format!("{segment_count} segments"),
+            suggestion,
+        }
+    }
+
+    fn check_document_count(&self, storage: &Storage) -> HealthCheck {
+        let index_count = i64::try_from(self.reader.searcher().num_docs()).unwrap_or(i64::MAX);
+
+        match storage.indexable_document_count() {
+            Ok(db_count) => {
+                let diff = (index_count - db_count).abs();
+                let percent = if db_count > 0 {
+                    diff.saturating_mul(100) / db_count
+                } else {
+                    0
+                };
+
+                let status = if diff == 0 {
+                    CheckStatus::Pass
+                } else if percent <= 1 || diff <= 10 {
+                    CheckStatus::Warning
+                } else {
+                    CheckStatus::Error
+                };
+
+                let suggestion = if diff == 0 {
+                    None
+                } else {
+                    Some(
+                        "Run 'xf reindex' to sync index contents (ignore if you skipped data types)"
+                            .to_string(),
+                    )
+                };
+
+                HealthCheck {
+                    category: CheckCategory::Index,
+                    name: "Document Count".to_string(),
+                    status,
+                    message: format!(
+                        "Index: {index_count}, DB indexable: {db_count} (diff: {diff})"
+                    ),
+                    suggestion,
+                }
+            }
+            Err(err) => HealthCheck {
+                category: CheckCategory::Index,
+                name: "Document Count".to_string(),
+                status: CheckStatus::Error,
+                message: format!("Failed to read DB counts: {err}"),
+                suggestion: Some("Run 'xf doctor' after fixing database errors".to_string()),
+            },
+        }
+    }
+
+    fn check_sample_query(&self) -> HealthCheck {
+        let start = Instant::now();
+        let result = self.search("test", None, 1);
+        let duration_ms = start.elapsed().as_millis();
+
+        match result {
+            Ok(_) => {
+                let status = if duration_ms < 10 {
+                    CheckStatus::Pass
+                } else {
+                    CheckStatus::Warning
+                };
+
+                let suggestion = if duration_ms >= 10 {
+                    Some("Consider 'xf optimize' for faster queries".to_string())
+                } else {
+                    None
+                };
+
+                HealthCheck {
+                    category: CheckCategory::Index,
+                    name: "Sample Query".to_string(),
+                    status,
+                    message: format!("{duration_ms}ms"),
+                    suggestion,
+                }
+            }
+            Err(err) => HealthCheck {
+                category: CheckCategory::Index,
+                name: "Sample Query".to_string(),
+                status: CheckStatus::Error,
+                message: format!("Query failed: {err}"),
+                suggestion: Some("Index may be corrupted. Try 'xf reindex'".to_string()),
+            },
+        }
+    }
+
+    fn check_index_size(&self) -> HealthCheck {
+        let Some(index_path) = self.index_path.as_deref() else {
+            return HealthCheck {
+                category: CheckCategory::Index,
+                name: "Index Size".to_string(),
+                status: CheckStatus::Warning,
+                message: "In-memory index; size unavailable".to_string(),
+                suggestion: None,
+            };
+        };
+
+        match directory_size_bytes(index_path) {
+            Ok(size_bytes) => {
+                let is_large = size_bytes > 500 * BYTES_PER_MB;
+                let status = if is_large {
+                    CheckStatus::Warning
+                } else {
+                    CheckStatus::Pass
+                };
+                let suggestion = if is_large {
+                    Some("Large index. Consider 'xf optimize' to reduce size".to_string())
+                } else {
+                    None
+                };
+
+                HealthCheck {
+                    category: CheckCategory::Index,
+                    name: "Index Size".to_string(),
+                    status,
+                    message: format_bytes(size_bytes),
+                    suggestion,
+                }
+            }
+            Err(err) => HealthCheck {
+                category: CheckCategory::Index,
+                name: "Index Size".to_string(),
+                status: CheckStatus::Error,
+                message: format!("Failed to read index size: {err}"),
+                suggestion: Some("Check index directory permissions".to_string()),
+            },
+        }
+    }
+
     /// Get document count.
     #[must_use]
     pub fn doc_count(&self) -> u64 {
@@ -479,6 +728,47 @@ impl SearchEngine {
         self.reload()?;
         Ok(())
     }
+}
+
+const BYTES_PER_KB: u64 = 1024;
+const BYTES_PER_MB: u64 = 1024 * 1024;
+const BYTES_PER_GB: u64 = 1024 * 1024 * 1024;
+
+fn directory_size_bytes(path: &Path) -> std::io::Result<u64> {
+    let mut total = 0u64;
+    let mut stack = vec![path.to_path_buf()];
+
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let metadata = entry.metadata()?;
+            if metadata.is_dir() {
+                stack.push(entry.path());
+            } else if metadata.is_file() {
+                total = total.saturating_add(metadata.len());
+            }
+        }
+    }
+
+    Ok(total)
+}
+
+fn format_bytes(bytes: u64) -> String {
+    if bytes < BYTES_PER_KB {
+        format!("{bytes} B")
+    } else if bytes < BYTES_PER_MB {
+        format_bytes_with_unit(bytes, BYTES_PER_KB, "KB")
+    } else if bytes < BYTES_PER_GB {
+        format_bytes_with_unit(bytes, BYTES_PER_MB, "MB")
+    } else {
+        format_bytes_with_unit(bytes, BYTES_PER_GB, "GB")
+    }
+}
+
+fn format_bytes_with_unit(bytes: u64, unit: u64, suffix: &str) -> String {
+    let whole = bytes / unit;
+    let tenths = (bytes % unit) * 10 / unit;
+    format!("{whole}.{tenths} {suffix}")
 }
 
 /// Generate prefix terms for edge n-gram style matching.

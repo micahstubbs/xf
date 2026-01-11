@@ -14,11 +14,13 @@
 
 pub mod cli;
 pub mod config;
+pub mod doctor;
 pub mod error;
 pub mod logging;
 pub mod model;
 pub mod parser;
 pub mod perf;
+pub mod repl;
 pub mod search;
 pub mod stats_analytics;
 pub mod storage;

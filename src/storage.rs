@@ -2,6 +2,7 @@
 //!
 //! Provides persistent storage with optimized schema for fast queries.
 
+use crate::doctor::{CheckCategory, CheckStatus, HealthCheck, TableStat};
 use crate::model::{
     ArchiveInfo, ArchiveStats, Block, DirectMessage, DmConversation, Follower, Following,
     GrokMessage, Like, Mute, Tweet,
@@ -14,6 +15,9 @@ use std::path::Path;
 use tracing::info;
 
 const SCHEMA_VERSION: i32 = 1;
+const BYTES_PER_KB: u64 = 1024;
+const BYTES_PER_MB: u64 = 1024 * 1024;
+const BYTES_PER_GB: u64 = 1024 * 1024 * 1024;
 
 /// `SQLite` storage manager
 pub struct Storage {
@@ -699,6 +703,337 @@ impl Storage {
         })
     }
 
+    /// Get the count of documents expected in the Tantivy index.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the count queries fail.
+    pub fn indexable_document_count(&self) -> Result<i64> {
+        let tweets_count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM tweets", [], |row| row.get(0))?;
+
+        let likes_count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM likes WHERE full_text IS NOT NULL AND full_text != ''",
+            [],
+            |row| row.get(0),
+        )?;
+
+        let dms_count: i64 =
+            self.conn
+                .query_row("SELECT COUNT(*) FROM direct_messages", [], |row| row.get(0))?;
+
+        let grok_count: i64 =
+            self.conn
+                .query_row("SELECT COUNT(*) FROM grok_messages", [], |row| row.get(0))?;
+
+        Ok(tweets_count + likes_count + dms_count + grok_count)
+    }
+
+    /// Run database health checks for `xf doctor`.
+    #[must_use]
+    pub fn database_health_checks(&self) -> Vec<HealthCheck> {
+        let mut checks = Vec::new();
+
+        checks.push(self.check_integrity());
+        checks.push(self.check_schema_version());
+        checks.extend(self.check_fts_integrity());
+        checks.extend(self.check_fts_orphaned());
+        checks.extend(self.check_fts_missing());
+        checks.push(self.check_orphaned_dm_messages());
+        checks.push(self.check_grok_fts_counts());
+        checks.push(self.check_table_stats());
+
+        checks
+    }
+
+    /// Collect per-table row counts and optional size statistics.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a table count query fails.
+    pub fn database_table_stats(&self) -> Result<Vec<TableStat>> {
+        let tables = [
+            "tweets",
+            "likes",
+            "direct_messages",
+            "dm_conversations",
+            "grok_messages",
+            "followers",
+            "following",
+            "blocks",
+            "mutes",
+            "fts_tweets",
+            "fts_likes",
+            "fts_dms",
+            "fts_grok",
+        ];
+
+        let has_dbstat = self.dbstat_available();
+        let mut stats = Vec::with_capacity(tables.len());
+
+        for table in tables {
+            let rows = self.table_row_count(table)?;
+            let bytes = if has_dbstat {
+                self.table_size_bytes(table)
+            } else {
+                None
+            };
+            stats.push(TableStat {
+                name: table.to_string(),
+                rows,
+                bytes,
+            });
+        }
+
+        Ok(stats)
+    }
+
+    fn check_integrity(&self) -> HealthCheck {
+        match self
+            .conn
+            .query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
+        {
+            Ok(result) => {
+                if result == "ok" {
+                    HealthCheck {
+                        category: CheckCategory::Database,
+                        name: "PRAGMA integrity_check".to_string(),
+                        status: CheckStatus::Pass,
+                        message: "ok".to_string(),
+                        suggestion: None,
+                    }
+                } else {
+                    HealthCheck {
+                        category: CheckCategory::Database,
+                        name: "PRAGMA integrity_check".to_string(),
+                        status: CheckStatus::Error,
+                        message: format!("Integrity check failed: {result}"),
+                        suggestion: Some(
+                            "Database corruption detected. Re-index or restore from backup."
+                                .to_string(),
+                        ),
+                    }
+                }
+            }
+            Err(err) => HealthCheck {
+                category: CheckCategory::Database,
+                name: "PRAGMA integrity_check".to_string(),
+                status: CheckStatus::Error,
+                message: format!("Integrity check failed: {err}"),
+                suggestion: Some("Re-index the archive to rebuild the database.".to_string()),
+            },
+        }
+    }
+
+    fn check_schema_version(&self) -> HealthCheck {
+        let current = self.get_schema_version();
+        if current == SCHEMA_VERSION {
+            HealthCheck {
+                category: CheckCategory::Database,
+                name: "Schema version".to_string(),
+                status: CheckStatus::Pass,
+                message: format!("schema_version={current}"),
+                suggestion: None,
+            }
+        } else {
+            HealthCheck {
+                category: CheckCategory::Database,
+                name: "Schema version".to_string(),
+                status: CheckStatus::Error,
+                message: format!("schema_version={current}, expected={SCHEMA_VERSION}"),
+                suggestion: Some("Run 'xf index --force' to rebuild the database.".to_string()),
+            }
+        }
+    }
+
+    fn check_fts_integrity(&self) -> Vec<HealthCheck> {
+        let tables = ["fts_tweets", "fts_likes", "fts_dms", "fts_grok"];
+        let mut checks = Vec::with_capacity(tables.len());
+
+        for table in tables {
+            let sql = format!("INSERT INTO {table}({table}) VALUES('integrity-check')");
+            let result = self.conn.execute(&sql, []);
+            let (status, message, suggestion) = match result {
+                Ok(_) => (CheckStatus::Pass, "ok".to_string(), None),
+                Err(err) => (
+                    CheckStatus::Error,
+                    format!("Integrity check failed: {err}"),
+                    Some("Run 'xf index --force' to rebuild FTS tables.".to_string()),
+                ),
+            };
+
+            checks.push(HealthCheck {
+                category: CheckCategory::Database,
+                name: format!("FTS5 integrity ({table})"),
+                status,
+                message,
+                suggestion,
+            });
+        }
+
+        checks
+    }
+
+    fn check_fts_orphaned(&self) -> Vec<HealthCheck> {
+        vec![
+            self.check_count(
+                "FTS orphaned rows (tweets)",
+                "SELECT COUNT(*) FROM fts_tweets fts LEFT JOIN tweets t ON fts.tweet_id = t.id WHERE t.id IS NULL",
+                "Run 'xf index --force' to rebuild FTS tables.",
+            ),
+            self.check_count(
+                "FTS orphaned rows (likes)",
+                "SELECT COUNT(*) FROM fts_likes fts LEFT JOIN likes l ON fts.tweet_id = l.tweet_id WHERE l.tweet_id IS NULL",
+                "Run 'xf index --force' to rebuild FTS tables.",
+            ),
+            self.check_count(
+                "FTS orphaned rows (dms)",
+                "SELECT COUNT(*) FROM fts_dms fts LEFT JOIN direct_messages dm ON fts.dm_id = dm.id WHERE dm.id IS NULL",
+                "Run 'xf index --force' to rebuild FTS tables.",
+            ),
+        ]
+    }
+
+    fn check_fts_missing(&self) -> Vec<HealthCheck> {
+        vec![
+            self.check_count(
+                "FTS missing rows (tweets)",
+                "SELECT COUNT(*) FROM tweets t LEFT JOIN fts_tweets fts ON fts.tweet_id = t.id WHERE fts.tweet_id IS NULL",
+                "Run 'xf index --force' to rebuild FTS tables.",
+            ),
+            self.check_count(
+                "FTS missing rows (likes)",
+                "SELECT COUNT(*) FROM likes l LEFT JOIN fts_likes fts ON fts.tweet_id = l.tweet_id WHERE l.full_text IS NOT NULL AND fts.tweet_id IS NULL",
+                "Run 'xf index --force' to rebuild FTS tables.",
+            ),
+            self.check_count(
+                "FTS missing rows (dms)",
+                "SELECT COUNT(*) FROM direct_messages dm LEFT JOIN fts_dms fts ON fts.dm_id = dm.id WHERE fts.dm_id IS NULL",
+                "Run 'xf index --force' to rebuild FTS tables.",
+            ),
+        ]
+    }
+
+    fn check_orphaned_dm_messages(&self) -> HealthCheck {
+        self.check_count(
+            "Orphaned DM messages",
+            "SELECT COUNT(*) FROM direct_messages dm LEFT JOIN dm_conversations conv ON dm.conversation_id = conv.conversation_id WHERE conv.conversation_id IS NULL",
+            "Run 'xf index --force' to rebuild DM conversations.",
+        )
+    }
+
+    fn check_grok_fts_counts(&self) -> HealthCheck {
+        let grok_count = self.table_row_count("grok_messages");
+        let fts_count = self.table_row_count("fts_grok");
+
+        match (grok_count, fts_count) {
+            (Ok(grok_rows), Ok(fts_rows)) => {
+                if grok_rows == fts_rows {
+                    HealthCheck {
+                        category: CheckCategory::Database,
+                        name: "FTS row count (grok)".to_string(),
+                        status: CheckStatus::Pass,
+                        message: format!("grok_messages={grok_rows}, fts_grok={fts_rows}"),
+                        suggestion: None,
+                    }
+                } else {
+                    HealthCheck {
+                        category: CheckCategory::Database,
+                        name: "FTS row count (grok)".to_string(),
+                        status: CheckStatus::Warning,
+                        message: format!("grok_messages={grok_rows}, fts_grok={fts_rows}"),
+                        suggestion: Some("Run 'xf index --force' to rebuild Grok FTS.".to_string()),
+                    }
+                }
+            }
+            (Err(err), _) | (_, Err(err)) => HealthCheck {
+                category: CheckCategory::Database,
+                name: "FTS row count (grok)".to_string(),
+                status: CheckStatus::Error,
+                message: format!("Failed to read row counts: {err}"),
+                suggestion: Some("Run 'xf index --force' to rebuild Grok FTS.".to_string()),
+            },
+        }
+    }
+
+    fn check_table_stats(&self) -> HealthCheck {
+        match self.database_table_stats() {
+            Ok(stats) => {
+                let message = format_table_stats(&stats);
+                HealthCheck {
+                    category: CheckCategory::Database,
+                    name: "Table stats".to_string(),
+                    status: CheckStatus::Pass,
+                    message,
+                    suggestion: None,
+                }
+            }
+            Err(err) => HealthCheck {
+                category: CheckCategory::Database,
+                name: "Table stats".to_string(),
+                status: CheckStatus::Error,
+                message: format!("Failed to collect table stats: {err}"),
+                suggestion: None,
+            },
+        }
+    }
+
+    fn check_count(&self, name: &str, sql: &str, suggestion: &str) -> HealthCheck {
+        match self.conn.query_row(sql, [], |row| row.get::<_, i64>(0)) {
+            Ok(count) => {
+                if count == 0 {
+                    HealthCheck {
+                        category: CheckCategory::Database,
+                        name: name.to_string(),
+                        status: CheckStatus::Pass,
+                        message: "0 rows".to_string(),
+                        suggestion: None,
+                    }
+                } else {
+                    HealthCheck {
+                        category: CheckCategory::Database,
+                        name: name.to_string(),
+                        status: CheckStatus::Warning,
+                        message: format!("{count} rows"),
+                        suggestion: Some(suggestion.to_string()),
+                    }
+                }
+            }
+            Err(err) => HealthCheck {
+                category: CheckCategory::Database,
+                name: name.to_string(),
+                status: CheckStatus::Error,
+                message: format!("Query failed: {err}"),
+                suggestion: Some(suggestion.to_string()),
+            },
+        }
+    }
+
+    fn table_row_count(&self, table: &str) -> Result<i64> {
+        let sql = format!("SELECT COUNT(*) FROM {table}");
+        self.conn
+            .query_row(&sql, [], |row| row.get(0))
+            .with_context(|| format!("Failed to count rows for table {table}"))
+    }
+
+    fn dbstat_available(&self) -> bool {
+        let result: std::result::Result<i64, _> = self.conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='dbstat'",
+            [],
+            |row| row.get(0),
+        );
+        result.unwrap_or(0) > 0
+    }
+
+    fn table_size_bytes(&self, table: &str) -> Option<i64> {
+        let sql = "SELECT SUM(pgsize) FROM dbstat WHERE name = ?1";
+        self.conn
+            .query_row(sql, [table], |row| row.get::<_, Option<i64>>(0))
+            .ok()
+            .flatten()
+    }
+
     /// Search tweets using FTS5.
     ///
     /// # Errors
@@ -1267,6 +1602,43 @@ impl Storage {
     }
 }
 
+fn format_table_stats(stats: &[TableStat]) -> String {
+    if stats.is_empty() {
+        return "no tables found".to_string();
+    }
+
+    stats
+        .iter()
+        .map(|stat| {
+            let size = stat
+                .bytes
+                .map_or_else(|| "size unavailable".to_string(), format_bytes);
+            format!("{}: {} rows ({size})", stat.name, stat.rows)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn format_bytes(bytes: i64) -> String {
+    let bytes = u64::try_from(bytes.max(0)).unwrap_or(0);
+
+    if bytes < BYTES_PER_KB {
+        format!("{bytes} B")
+    } else if bytes < BYTES_PER_MB {
+        format_bytes_with_unit(bytes, BYTES_PER_KB, "KB")
+    } else if bytes < BYTES_PER_GB {
+        format_bytes_with_unit(bytes, BYTES_PER_MB, "MB")
+    } else {
+        format_bytes_with_unit(bytes, BYTES_PER_GB, "GB")
+    }
+}
+
+fn format_bytes_with_unit(bytes: u64, unit: u64, suffix: &str) -> String {
+    let whole = bytes / unit;
+    let tenths = (bytes % unit) * 10 / unit;
+    format!("{whole}.{tenths} {suffix}")
+}
+
 fn limit_to_i64(limit: usize) -> i64 {
     i64::try_from(limit).unwrap_or(i64::MAX)
 }
@@ -1649,7 +2021,6 @@ mod tests {
             account_id: "blocked1".to_string(),
             user_link: None,
         }];
-
         let count = storage.store_blocks(&blocks).unwrap();
         assert_eq!(count, 1);
 
@@ -1896,5 +2267,43 @@ mod tests {
         let storage = Storage::open_memory().unwrap();
         let version = storage.get_schema_version();
         assert_eq!(version, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn test_database_health_checks_pass() {
+        let storage = Storage::open_memory().unwrap();
+        let checks = storage.database_health_checks();
+
+        let integrity = checks
+            .iter()
+            .find(|c| c.name == "PRAGMA integrity_check")
+            .expect("integrity check missing");
+        assert_eq!(integrity.status, CheckStatus::Pass);
+
+        let schema = checks
+            .iter()
+            .find(|c| c.name == "Schema version")
+            .expect("schema check missing");
+        assert_eq!(schema.status, CheckStatus::Pass);
+    }
+
+    #[test]
+    fn test_database_health_orphaned_fts() {
+        let storage = Storage::open_memory().unwrap();
+
+        storage
+            .connection()
+            .execute(
+                "INSERT INTO fts_tweets (tweet_id, full_text) VALUES ('orphan', 'text')",
+                [],
+            )
+            .unwrap();
+
+        let checks = storage.database_health_checks();
+        let orphaned = checks
+            .iter()
+            .find(|c| c.name == "FTS orphaned rows (tweets)")
+            .expect("orphan check missing");
+        assert_eq!(orphaned.status, CheckStatus::Warning);
     }
 }
