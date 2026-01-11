@@ -28,8 +28,8 @@ pub mod storage;
 
 pub use cli::*;
 pub use error::{
-    Result, ResultExt, XfError, find_closest_match, format_did_you_mean, format_error,
-    format_unknown_value_error, VALID_CONFIG_KEYS, VALID_DATA_TYPES, VALID_OUTPUT_FIELDS,
+    Result, ResultExt, VALID_CONFIG_KEYS, VALID_DATA_TYPES, VALID_OUTPUT_FIELDS, XfError,
+    find_closest_match, format_did_you_mean, format_error, format_unknown_value_error,
 };
 pub use model::*;
 pub use parser::ArchiveParser;
@@ -214,7 +214,10 @@ fn format_bytes_with_unit(bytes: u64, unit: u64, suffix: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{csv_escape_text, format_number, format_relative_date_with_base};
+    use super::{
+        csv_escape_text, format_bytes_i64, format_number, format_relative_date_with_base,
+        format_short_id,
+    };
     use chrono::{Duration, TimeZone, Utc};
 
     #[test]
@@ -228,7 +231,10 @@ mod tests {
 
     #[test]
     fn format_relative_date_thresholds() {
-        let base = Utc.with_ymd_and_hms(2025, 1, 10, 12, 0, 0).single().unwrap();
+        let base = Utc
+            .with_ymd_and_hms(2025, 1, 10, 12, 0, 0)
+            .single()
+            .unwrap();
 
         assert_eq!(
             format_relative_date_with_base(base - Duration::seconds(30), base),
@@ -248,10 +254,7 @@ mod tests {
         );
 
         let same_year = Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).single().unwrap();
-        assert_eq!(
-            format_relative_date_with_base(same_year, base),
-            "Jan 01"
-        );
+        assert_eq!(format_relative_date_with_base(same_year, base), "Jan 01");
 
         let different_year = Utc
             .with_ymd_and_hms(2024, 12, 11, 0, 0, 0)
@@ -274,5 +277,16 @@ mod tests {
         let input = "Hello\r\n\"world\", ok";
         let escaped = csv_escape_text(input);
         assert_eq!(escaped, "Hello  \"\"world\"\", ok");
+    }
+
+    #[test]
+    fn format_short_id_truncates_long_ids() {
+        assert_eq!(format_short_id("short"), "short");
+        assert_eq!(format_short_id("1234567890123"), "1234...0123");
+    }
+
+    #[test]
+    fn format_bytes_i64_clamps_negative() {
+        assert_eq!(format_bytes_i64(-5), "0 B");
     }
 }

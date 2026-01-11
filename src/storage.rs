@@ -7,6 +7,7 @@ use crate::model::{
     ArchiveInfo, ArchiveStats, Block, DirectMessage, DmConversation, DmConversationSummary,
     Follower, Following, GrokMessage, Like, Mute, Tweet,
 };
+use crate::{format_bytes_i64, format_number};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, params};
@@ -15,10 +16,6 @@ use std::path::Path;
 use tracing::info;
 
 const SCHEMA_VERSION: i32 = 1;
-const BYTES_PER_KB: u64 = 1024;
-const BYTES_PER_MB: u64 = 1024 * 1024;
-const BYTES_PER_GB: u64 = 1024 * 1024 * 1024;
-
 const fn epoch_utc() -> DateTime<Utc> {
     DateTime::<Utc>::from_timestamp(0, 0).unwrap()
 }
@@ -304,9 +301,11 @@ impl Storage {
             [],
             |row| {
                 let generation_date_str: String = row.get(4)?;
-                let generation_date = chrono::DateTime::parse_from_rfc3339(&generation_date_str)
-                    .map(|dt| dt.with_timezone(&Utc))
-                    .unwrap_or_else(|_| Utc::now());
+                let generation_date =
+                    chrono::DateTime::parse_from_rfc3339(&generation_date_str).map_or_else(
+                        |_| Utc::now(),
+                        |dt| dt.with_timezone(&Utc),
+                    );
 
                 Ok(ArchiveInfo {
                     account_id: row.get(0)?,
@@ -1685,31 +1684,11 @@ fn format_table_stats(stats: &[TableStat]) -> String {
         .map(|stat| {
             let size = stat
                 .bytes
-                .map_or_else(|| "size unavailable".to_string(), format_bytes);
-            format!("{}: {} rows ({size})", stat.name, stat.rows)
+                .map_or_else(|| "size unavailable".to_string(), format_bytes_i64);
+            format!("{}: {} rows ({size})", stat.name, format_number(stat.rows))
         })
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-fn format_bytes(bytes: i64) -> String {
-    let bytes = u64::try_from(bytes.max(0)).unwrap_or(0);
-
-    if bytes < BYTES_PER_KB {
-        format!("{bytes} B")
-    } else if bytes < BYTES_PER_MB {
-        format_bytes_with_unit(bytes, BYTES_PER_KB, "KB")
-    } else if bytes < BYTES_PER_GB {
-        format_bytes_with_unit(bytes, BYTES_PER_MB, "MB")
-    } else {
-        format_bytes_with_unit(bytes, BYTES_PER_GB, "GB")
-    }
-}
-
-fn format_bytes_with_unit(bytes: u64, unit: u64, suffix: &str) -> String {
-    let whole = bytes / unit;
-    let tenths = (bytes % unit) * 10 / unit;
-    format!("{whole}.{tenths} {suffix}")
 }
 
 fn limit_to_i64(limit: usize) -> i64 {

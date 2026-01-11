@@ -5,8 +5,8 @@
 //! - Engagement metrics (likes, retweets distribution)
 //! - Content analysis (media ratios, hashtags, mentions)
 
-use crate::Result;
 use crate::storage::Storage;
+use crate::{Result, format_number_u64};
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::Serialize;
 
@@ -849,7 +849,7 @@ pub fn format_top_tags(tags: &[TagCount], prefix: &str) -> String {
 
     tags.iter()
         .take(6)
-        .map(|t| format!("{}{} ({})", prefix, t.tag, t.count))
+        .map(|t| format!("{}{} ({})", prefix, t.tag, format_number_u64(t.count)))
         .collect::<Vec<_>>()
         .join("  ")
 }

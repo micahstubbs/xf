@@ -3,7 +3,7 @@
 //! Main entry point for the xf command-line tool.
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, Datelike, Utc};
+use chrono::{DateTime, Datelike, NaiveDate, TimeZone, Utc};
 use clap::{CommandFactory, Parser};
 use clap_complete::generate;
 use colored::{Colorize, control};
@@ -26,9 +26,9 @@ use xf::stats_analytics::{self, ContentStats, EngagementStats, TemporalStats};
 use xf::{
     ArchiveParser, ArchiveStats, CONTENT_DIVIDER_WIDTH, Cli, Commands, DataType, ExportFormat,
     ExportTarget, HEADER_DIVIDER_WIDTH, ListTarget, OutputFormat, SearchEngine, SearchResult,
-    SearchResultType, SortOrder, Storage, TweetUrl, csv_escape_text, find_closest_match,
-    format_error, format_number, format_optional_date, format_relative_date, VALID_CONFIG_KEYS,
-    VALID_OUTPUT_FIELDS,
+    SearchResultType, SortOrder, Storage, TweetUrl, VALID_CONFIG_KEYS, VALID_OUTPUT_FIELDS,
+    csv_escape_text, find_closest_match, format_error, format_number, format_number_u64,
+    format_number_usize, format_optional_date, format_relative_date, format_short_id,
 };
 
 fn main() -> Result<()> {
@@ -225,14 +225,22 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
                 let tweets = parser.parse_tweets()?;
                 storage.store_tweets(&tweets)?;
                 search_engine.index_tweets(&mut writer, &tweets)?;
-                pb.println(format!("  {} {} tweets", "✓".green(), tweets.len()));
+                pb.println(format!(
+                    "  {} {} tweets",
+                    "✓".green(),
+                    format_number_usize(tweets.len())
+                ));
             }
             DataType::Like => {
                 pb.set_message("Indexing likes...");
                 let likes = parser.parse_likes()?;
                 storage.store_likes(&likes)?;
                 search_engine.index_likes(&mut writer, &likes)?;
-                pb.println(format!("  {} {} likes", "✓".green(), likes.len()));
+                pb.println(format!(
+                    "  {} {} likes",
+                    "✓".green(),
+                    format_number_usize(likes.len())
+                ));
             }
             DataType::Dm => {
                 pb.set_message("Indexing DMs...");
@@ -243,8 +251,8 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
                 pb.println(format!(
                     "  {} {} DM conversations ({} messages)",
                     "✓".green(),
-                    convos.len(),
-                    msg_count
+                    format_number_usize(convos.len()),
+                    format_number_usize(msg_count)
                 ));
             }
             DataType::Grok => {
@@ -255,32 +263,48 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
                 pb.println(format!(
                     "  {} {} Grok messages",
                     "✓".green(),
-                    messages.len()
+                    format_number_usize(messages.len())
                 ));
             }
             DataType::Follower => {
                 pb.set_message("Indexing followers...");
                 let followers = parser.parse_followers()?;
                 storage.store_followers(&followers)?;
-                pb.println(format!("  {} {} followers", "✓".green(), followers.len()));
+                pb.println(format!(
+                    "  {} {} followers",
+                    "✓".green(),
+                    format_number_usize(followers.len())
+                ));
             }
             DataType::Following => {
                 pb.set_message("Indexing following...");
                 let following = parser.parse_following()?;
                 storage.store_following(&following)?;
-                pb.println(format!("  {} {} following", "✓".green(), following.len()));
+                pb.println(format!(
+                    "  {} {} following",
+                    "✓".green(),
+                    format_number_usize(following.len())
+                ));
             }
             DataType::Block => {
                 pb.set_message("Indexing blocks...");
                 let blocks = parser.parse_blocks()?;
                 storage.store_blocks(&blocks)?;
-                pb.println(format!("  {} {} blocks", "✓".green(), blocks.len()));
+                pb.println(format!(
+                    "  {} {} blocks",
+                    "✓".green(),
+                    format_number_usize(blocks.len())
+                ));
             }
             DataType::Mute => {
                 pb.set_message("Indexing mutes...");
                 let mutes = parser.parse_mutes()?;
                 storage.store_mutes(&mutes)?;
-                pb.println(format!("  {} {} mutes", "✓".green(), mutes.len()));
+                pb.println(format!(
+                    "  {} {} mutes",
+                    "✓".green(),
+                    format_number_usize(mutes.len())
+                ));
             }
             DataType::All => {
                 // Already handled by DataType::all()
@@ -299,7 +323,7 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
     println!("{}", "Indexing complete!".bold().green());
     println!(
         "  Total documents indexed: {}",
-        search_engine.doc_count().to_string().cyan()
+        format_number_u64(search_engine.doc_count()).cyan()
     );
     println!();
     println!("Run {} to search your archive.", "xf search <query>".bold());
@@ -332,7 +356,10 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
             "{}",
             format_error(
                 "Search index missing",
-                &format!("Database exists but search index not found at '{}'.", index_path.display()),
+                &format!(
+                    "Database exists but search index not found at '{}'.",
+                    index_path.display()
+                ),
                 &["Run 'xf index <archive_path>' to rebuild the search index"],
             )
         );
@@ -530,7 +557,7 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
 
             println!(
                 "Found {} results for \"{}\" in {}\n",
-                results.len().to_string().cyan(),
+                format_number_usize(results.len()).cyan(),
                 args.query.bold(),
                 timing_str.dimmed()
             );
@@ -654,13 +681,13 @@ fn print_dm_context_text(contexts: &[DmConversationContext]) {
         println!("{}", "─".repeat(CONTENT_DIVIDER_WIDTH));
 
         for message in &context.messages {
-            let timestamp = message.created_at.format("%Y-%m-%d %H:%M").to_string();
+            let timestamp = format_relative_date(message.created_at);
             println!(
                 "{} {} {} {}",
                 timestamp.dimmed(),
-                message.sender_id.green(),
+                format_short_id(&message.sender_id).green(),
                 "→".dimmed(),
-                message.recipient_id.blue()
+                format_short_id(&message.recipient_id).blue()
             );
 
             let lines = textwrap::wrap(&message.text, 78);
@@ -690,7 +717,7 @@ fn print_result(num: usize, result: &SearchResult) {
         "{}. {} {}",
         num.to_string().bold(),
         type_badge,
-        truncate(&result.id, 12).dimmed()
+        format_short_id(&result.id).dimmed()
     );
 
     // Use highlighted text if available, otherwise use plain text
@@ -880,11 +907,7 @@ fn validate_output_fields(fields: &[String]) -> Result<()> {
             let suggestion_refs: Vec<&str> = suggestions.iter().map(String::as_str).collect();
             anyhow::bail!(
                 "{}",
-                format_error(
-                    &format!("Unknown field: '{field}'"),
-                    "",
-                    &suggestion_refs,
-                )
+                format_error(&format!("Unknown field: '{field}'"), "", &suggestion_refs,)
             );
         }
     }
@@ -1052,7 +1075,11 @@ fn cmd_stats(cli: &Cli, args: &cli::StatsArgs) -> Result<()> {
                 "Tweets:",
                 format_number(stats.tweets_count)
             );
-            println!("  {:<20} {:>10}", "Likes:", format_number(stats.likes_count));
+            println!(
+                "  {:<20} {:>10}",
+                "Likes:",
+                format_number(stats.likes_count)
+            );
             println!(
                 "  {:<20} {:>10}",
                 "DM Conversations:",
@@ -1083,7 +1110,11 @@ fn cmd_stats(cli: &Cli, args: &cli::StatsArgs) -> Result<()> {
                 "Blocks:",
                 format_number(stats.blocks_count)
             );
-            println!("  {:<20} {:>10}", "Mutes:", format_number(stats.mutes_count));
+            println!(
+                "  {:<20} {:>10}",
+                "Mutes:",
+                format_number(stats.mutes_count)
+            );
             println!("{}", "─".repeat(CONTENT_DIVIDER_WIDTH));
 
             if let (Some(first), Some(last)) = (stats.first_tweet_date, stats.last_tweet_date) {
@@ -1101,7 +1132,7 @@ fn cmd_stats(cli: &Cli, args: &cli::StatsArgs) -> Result<()> {
                             "  {:04}-{:02}: {}",
                             entry.year,
                             entry.month,
-                            format_number(i64::try_from(entry.count).unwrap_or(i64::MAX))
+                            format_number_usize(entry.count)
                         );
                     }
                 }
@@ -1113,11 +1144,7 @@ fn cmd_stats(cli: &Cli, args: &cli::StatsArgs) -> Result<()> {
                     println!("{}", "Top Hashtags".bold().cyan());
                     println!("{}", "─".repeat(CONTENT_DIVIDER_WIDTH));
                     for item in items {
-                        println!(
-                            "  {:<20} {}",
-                            item.value,
-                            format_number(i64::try_from(item.count).unwrap_or(i64::MAX))
-                        );
+                        println!("  {:<20} {}", item.value, format_number_usize(item.count));
                     }
                 }
             }
@@ -1128,11 +1155,7 @@ fn cmd_stats(cli: &Cli, args: &cli::StatsArgs) -> Result<()> {
                     println!("{}", "Top Mentions".bold().cyan());
                     println!("{}", "─".repeat(CONTENT_DIVIDER_WIDTH));
                     for item in items {
-                        println!(
-                            "  {:<20} {}",
-                            item.value,
-                            format_number(i64::try_from(item.count).unwrap_or(i64::MAX))
-                        );
+                        println!("  {:<20} {}", item.value, format_number_usize(item.count));
                     }
                 }
             }
@@ -1140,7 +1163,7 @@ fn cmd_stats(cli: &Cli, args: &cli::StatsArgs) -> Result<()> {
             #[allow(clippy::cast_possible_wrap)]
             if let Some(ref temporal) = temporal {
                 println!();
-                println!("{}", "📅 Temporal Patterns".bold().cyan());
+                println!("{}", "Temporal Patterns".bold().cyan());
                 println!("{}", "─".repeat(CONTENT_DIVIDER_WIDTH));
 
                 // Activity sparkline
@@ -1151,12 +1174,12 @@ fn cmd_stats(cli: &Cli, args: &cli::StatsArgs) -> Result<()> {
                 println!(
                     "  {:<25} {:>10}",
                     "Active days:",
-                    format_count(temporal.active_days_count as i64)
+                    format_number_u64(temporal.active_days_count)
                 );
                 println!(
                     "  {:<25} {:>10}",
                     "Total days in range:",
-                    format_count(temporal.total_days_in_range as i64)
+                    format_number_u64(temporal.total_days_in_range)
                 );
                 println!(
                     "  {:<25} {:>10.1}",
@@ -1168,8 +1191,8 @@ fn cmd_stats(cli: &Cli, args: &cli::StatsArgs) -> Result<()> {
                     println!(
                         "  {:<25} {} ({})",
                         "Most active day:",
-                        day.format("%Y-%m-%d").to_string().green(),
-                        format_count(temporal.most_active_day_count as i64)
+                        format_naive_date(day).green(),
+                        format_number_u64(temporal.most_active_day_count)
                     );
                 }
 
@@ -1179,7 +1202,7 @@ fn cmd_stats(cli: &Cli, args: &cli::StatsArgs) -> Result<()> {
                     "  {:<25} {} ({})",
                     "Most active hour:",
                     hour_label.green(),
-                    format_count(temporal.most_active_hour_count as i64)
+                    format_number_u64(temporal.most_active_hour_count)
                 );
 
                 // Longest gap
@@ -1189,12 +1212,12 @@ fn cmd_stats(cli: &Cli, args: &cli::StatsArgs) -> Result<()> {
                     {
                         format!(
                             "{} days ({} to {})",
-                            temporal.longest_gap_days,
-                            start.format("%Y-%m-%d"),
-                            end.format("%Y-%m-%d")
+                            format_number(temporal.longest_gap_days),
+                            format_naive_date(start),
+                            format_naive_date(end)
                         )
                     } else {
-                        format!("{} days", temporal.longest_gap_days)
+                        format!("{} days", format_number(temporal.longest_gap_days))
                     };
                     println!("  {:<25} {}", "Longest gap:", gap_info.yellow());
                 }
@@ -1219,18 +1242,19 @@ fn cmd_stats(cli: &Cli, args: &cli::StatsArgs) -> Result<()> {
             #[allow(clippy::cast_possible_wrap)]
             if let Some(ref engagement) = engagement {
                 println!();
-                println!("{}", "📈 Engagement Analytics".bold().cyan());
+                println!("{}", "Engagement Analytics".bold().cyan());
                 println!("{}", "─".repeat(CONTENT_DIVIDER_WIDTH));
 
                 // Summary metrics
                 println!(
                     "  Total Likes: {} | Total Retweets: {}",
-                    format_count(engagement.total_likes as i64).green(),
-                    format_count(engagement.total_retweets as i64).green()
+                    format_number_u64(engagement.total_likes).green(),
+                    format_number_u64(engagement.total_retweets).green()
                 );
                 println!(
                     "  Average per Tweet: {:.1} | Median: {}",
-                    engagement.avg_engagement, engagement.median_engagement
+                    engagement.avg_engagement,
+                    format_number_u64(engagement.median_engagement)
                 );
 
                 // Trend sparkline
@@ -1259,11 +1283,11 @@ fn cmd_stats(cli: &Cli, args: &cli::StatsArgs) -> Result<()> {
                         println!(
                             "  {}. [{} {} {}] \"{}\" ({})",
                             i + 1,
-                            format!("{}", tweet.likes).green(),
+                            format_number_u64(tweet.likes).green(),
                             "♥".red(),
-                            format!("{}", tweet.retweets).cyan(),
+                            format_number_u64(tweet.retweets).cyan(),
                             tweet.text_preview.dimmed(),
-                            tweet.created_at.format("%b %d, %Y")
+                            format_relative_date(tweet.created_at)
                         );
                     }
                 }
@@ -1272,7 +1296,7 @@ fn cmd_stats(cli: &Cli, args: &cli::StatsArgs) -> Result<()> {
             #[allow(clippy::cast_possible_wrap)]
             if let Some(ref content) = content {
                 println!();
-                println!("{}", "📝 Content Analysis".bold().cyan());
+                println!("{}", "Content Analysis".bold().cyan());
                 println!("{}", "─".repeat(CONTENT_DIVIDER_WIDTH));
 
                 // Content type ratios
@@ -1288,12 +1312,12 @@ fn cmd_stats(cli: &Cli, args: &cli::StatsArgs) -> Result<()> {
                 println!(
                     "  {:<25} {:>10}",
                     "Self-threads:",
-                    format_count(content.thread_count as i64)
+                    format_number_u64(content.thread_count)
                 );
                 println!(
                     "  {:<25} {:>10}",
                     "Standalone tweets:",
-                    format_count(content.standalone_count as i64)
+                    format_number_u64(content.standalone_count)
                 );
 
                 // Tweet length
@@ -1315,7 +1339,7 @@ fn cmd_stats(cli: &Cli, args: &cli::StatsArgs) -> Result<()> {
                     println!();
                     println!("  {}:", "Top hashtags".dimmed());
                     for tag in content.top_hashtags.iter().take(6) {
-                        println!("    #{:<20} {}", tag.tag, format_count(tag.count as i64));
+                        println!("    #{:<20} {}", tag.tag, format_number_u64(tag.count));
                     }
                 }
 
@@ -1327,7 +1351,7 @@ fn cmd_stats(cli: &Cli, args: &cli::StatsArgs) -> Result<()> {
                         println!(
                             "    @{:<20} {}",
                             mention.tag,
-                            format_count(mention.count as i64)
+                            format_number_u64(mention.count)
                         );
                     }
                 }
@@ -1387,18 +1411,13 @@ fn build_monthly_counts_from_daily(
         .collect()
 }
 
-fn format_count(n: i64) -> String {
-    if n >= 1_000_000 {
-        let whole = n / 1_000_000;
-        let tenths = (n % 1_000_000) / 100_000;
-        format!("{whole}.{tenths}M")
-    } else if n >= 1_000 {
-        let whole = n / 1_000;
-        let tenths = (n % 1_000) / 100;
-        format!("{whole}.{tenths}K")
-    } else {
-        n.to_string()
-    }
+fn format_naive_date(date: NaiveDate) -> String {
+    date.and_hms_opt(0, 0, 0)
+        .map(|dt| Utc.from_utc_datetime(&dt))
+        .map_or_else(
+            || date.format("%b %d, %Y").to_string(),
+            format_relative_date,
+        )
 }
 
 fn cmd_tweet(cli: &Cli, args: &cli::TweetArgs) -> Result<()> {
@@ -1428,13 +1447,13 @@ fn cmd_tweet(cli: &Cli, args: &cli::TweetArgs) -> Result<()> {
                 println!(
                     "  ID: {}  Date: {}",
                     t.id.dimmed(),
-                    t.created_at.format("%Y-%m-%d %H:%M").to_string().dimmed()
+                    format_relative_date(t.created_at).dimmed()
                 );
                 if args.engagement {
                     println!(
                         "  {} likes  {} retweets",
-                        t.favorite_count.to_string().cyan(),
-                        t.retweet_count.to_string().cyan()
+                        format_number(t.favorite_count).cyan(),
+                        format_number(t.retweet_count).cyan()
                     );
                 }
                 if !t.hashtags.is_empty() {
@@ -1486,7 +1505,7 @@ fn cmd_list(cli: &Cli, args: &cli::ListArgs) -> Result<()> {
         println!(
             "{} {} files:\n",
             "Showing".dimmed(),
-            files.len().to_string().cyan()
+            format_number_usize(files.len()).cyan()
         );
         for file in &files {
             println!("{}", file.cyan());
@@ -1515,12 +1534,17 @@ fn cmd_list(cli: &Cli, args: &cli::ListArgs) -> Result<()> {
             println!(
                 "{} {} tweets:\n",
                 "Showing".dimmed(),
-                tweets.len().to_string().cyan()
+                format_number_usize(tweets.len()).cyan()
             );
             for tweet in &tweets {
-                let date = tweet.created_at.format("%Y-%m-%d %H:%M").to_string();
+                let date = format_relative_date(tweet.created_at);
                 let text = truncate_text(&tweet.full_text, 80);
-                println!("{} {} {}", date.dimmed(), tweet.id.cyan(), text);
+                println!(
+                    "{} {} {}",
+                    date.dimmed(),
+                    format_short_id(&tweet.id).cyan(),
+                    text
+                );
             }
         }
         ListTarget::Likes => {
@@ -1528,14 +1552,14 @@ fn cmd_list(cli: &Cli, args: &cli::ListArgs) -> Result<()> {
             println!(
                 "{} {} likes:\n",
                 "Showing".dimmed(),
-                likes.len().to_string().cyan()
+                format_number_usize(likes.len()).cyan()
             );
             for like in &likes {
                 let text = like
                     .full_text
                     .as_ref()
                     .map_or_else(|| "[No text]".to_string(), |t| truncate_text(t, 80));
-                println!("{} {}", like.tweet_id.cyan(), text);
+                println!("{} {}", format_short_id(&like.tweet_id).cyan(), text);
             }
         }
         ListTarget::Dms => {
@@ -1543,17 +1567,17 @@ fn cmd_list(cli: &Cli, args: &cli::ListArgs) -> Result<()> {
             println!(
                 "{} {} DM messages:\n",
                 "Showing".dimmed(),
-                dms.len().to_string().cyan()
+                format_number_usize(dms.len()).cyan()
             );
             for dm in &dms {
-                let date = dm.created_at.format("%Y-%m-%d %H:%M").to_string();
+                let date = format_relative_date(dm.created_at);
                 let text = truncate_text(&dm.text, 60);
                 println!(
                     "{} {} {} {} {}",
                     date.dimmed(),
-                    dm.sender_id.green(),
+                    format_short_id(&dm.sender_id).green(),
                     "→".dimmed(),
-                    dm.recipient_id.blue(),
+                    format_short_id(&dm.recipient_id).blue(),
                     text
                 );
             }
@@ -1563,20 +1587,25 @@ fn cmd_list(cli: &Cli, args: &cli::ListArgs) -> Result<()> {
             println!(
                 "{} {} conversations:\n",
                 "Showing".dimmed(),
-                conversations.len().to_string().cyan()
+                format_number_usize(conversations.len()).cyan()
             );
             for convo in &conversations {
                 let participants = if convo.participant_ids.is_empty() {
                     "[unknown]".to_string()
                 } else {
-                    convo.participant_ids.join(", ")
+                    convo
+                        .participant_ids
+                        .iter()
+                        .map(|id| format_short_id(id))
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 };
                 let first = format_optional_date(convo.first_message_at);
                 let last = format_optional_date(convo.last_message_at);
                 println!(
                     "{} {} msgs  {} → {}  {}",
-                    convo.conversation_id.cyan(),
-                    convo.message_count.to_string().cyan(),
+                    format_short_id(&convo.conversation_id).cyan(),
+                    format_number(convo.message_count).cyan(),
                     first.dimmed(),
                     last.dimmed(),
                     participants.blue()
@@ -1588,11 +1617,15 @@ fn cmd_list(cli: &Cli, args: &cli::ListArgs) -> Result<()> {
             println!(
                 "{} {} followers:\n",
                 "Showing".dimmed(),
-                followers.len().to_string().cyan()
+                format_number_usize(followers.len()).cyan()
             );
             for follower in &followers {
                 let link = follower.user_link.as_deref().unwrap_or("[no link]");
-                println!("{} {}", follower.account_id.cyan(), link.dimmed());
+                println!(
+                    "{} {}",
+                    format_short_id(&follower.account_id).cyan(),
+                    link.dimmed()
+                );
             }
         }
         ListTarget::Following => {
@@ -1600,11 +1633,15 @@ fn cmd_list(cli: &Cli, args: &cli::ListArgs) -> Result<()> {
             println!(
                 "{} {} following:\n",
                 "Showing".dimmed(),
-                following.len().to_string().cyan()
+                format_number_usize(following.len()).cyan()
             );
             for f in &following {
                 let link = f.user_link.as_deref().unwrap_or("[no link]");
-                println!("{} {}", f.account_id.cyan(), link.dimmed());
+                println!(
+                    "{} {}",
+                    format_short_id(&f.account_id).cyan(),
+                    link.dimmed()
+                );
             }
         }
         ListTarget::Blocks => {
@@ -1612,11 +1649,15 @@ fn cmd_list(cli: &Cli, args: &cli::ListArgs) -> Result<()> {
             println!(
                 "{} {} blocks:\n",
                 "Showing".dimmed(),
-                blocks.len().to_string().cyan()
+                format_number_usize(blocks.len()).cyan()
             );
             for block in &blocks {
                 let link = block.user_link.as_deref().unwrap_or("[no link]");
-                println!("{} {}", block.account_id.cyan(), link.dimmed());
+                println!(
+                    "{} {}",
+                    format_short_id(&block.account_id).cyan(),
+                    link.dimmed()
+                );
             }
         }
         ListTarget::Mutes => {
@@ -1624,11 +1665,15 @@ fn cmd_list(cli: &Cli, args: &cli::ListArgs) -> Result<()> {
             println!(
                 "{} {} mutes:\n",
                 "Showing".dimmed(),
-                mutes.len().to_string().cyan()
+                format_number_usize(mutes.len()).cyan()
             );
             for mute in &mutes {
                 let link = mute.user_link.as_deref().unwrap_or("[no link]");
-                println!("{} {}", mute.account_id.cyan(), link.dimmed());
+                println!(
+                    "{} {}",
+                    format_short_id(&mute.account_id).cyan(),
+                    link.dimmed()
+                );
             }
         }
     }
@@ -1652,7 +1697,7 @@ fn truncate_text(text: &str, max_len: usize) -> String {
     }
 }
 
-
+#[allow(clippy::too_many_lines)]
 fn cmd_export(cli: &Cli, args: &cli::ExportArgs) -> Result<()> {
     let db_path = get_db_path(cli);
 
@@ -1817,19 +1862,22 @@ fn csv_escape(value: &serde_json::Value) -> String {
         serde_json::Value::Number(n) => n.to_string(),
         serde_json::Value::String(s) => {
             // Quote if contains comma, quote, newline, or carriage return per RFC 4180
-            if s.contains(',') || s.contains('"') || s.contains('\n') || s.contains('\r') {
-                format!("\"{}\"", s.replace('"', "\"\""))
+            let sanitized = csv_escape_text(s);
+            if sanitized.contains(',') || sanitized.contains('"') {
+                format!("\"{sanitized}\"")
             } else {
-                s.clone()
+                sanitized
             }
         }
         serde_json::Value::Array(arr) => {
             let inner = serde_json::to_string(arr).unwrap_or_default();
-            format!("\"{}\"", inner.replace('"', "\"\""))
+            let sanitized = csv_escape_text(&inner);
+            format!("\"{sanitized}\"")
         }
         serde_json::Value::Object(obj) => {
             let inner = serde_json::to_string(obj).unwrap_or_default();
-            format!("\"{}\"", inner.replace('"', "\"\""))
+            let sanitized = csv_escape_text(&inner);
+            format!("\"{sanitized}\"")
         }
     }
 }
@@ -1885,14 +1933,19 @@ fn cmd_tweet_thread(cli: &Cli, storage: &Storage, args: &cli::TweetArgs) -> Resu
             println!("{}", "Thread".bold().cyan());
             println!("{}", "─".repeat(CONTENT_DIVIDER_WIDTH));
             for tweet in &thread {
-                let date = tweet.created_at.format("%Y-%m-%d %H:%M").to_string();
+                let date = format_relative_date(tweet.created_at);
                 let text = truncate_text(&tweet.full_text, 100);
-                println!("{} {} {}", date.dimmed(), tweet.id.cyan(), text);
+                println!(
+                    "{} {} {}",
+                    date.dimmed(),
+                    format_short_id(&tweet.id).cyan(),
+                    text
+                );
                 if args.engagement {
                     println!(
                         "  {} likes  {} retweets",
-                        tweet.favorite_count.to_string().cyan(),
-                        tweet.retweet_count.to_string().cyan()
+                        format_number(tweet.favorite_count).cyan(),
+                        format_number(tweet.retweet_count).cyan()
                     );
                 }
             }
@@ -2270,7 +2323,7 @@ fn cmd_doctor(cli: &Cli, args: &cli::DoctorArgs) -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&output)?);
         }
         _ => {
-            // Text output with colors and emojis
+            // Text output with colors
             println!("{}", "═".repeat(HEADER_DIVIDER_WIDTH).bright_blue());
             println!(
                 "{}",
@@ -2287,10 +2340,10 @@ fn cmd_doctor(cli: &Cli, args: &cli::DoctorArgs) -> Result<()> {
                 if current_category != Some(check.category) {
                     current_category = Some(check.category);
                     let category_name = match check.category {
-                        CheckCategory::Archive => "📁 Archive",
-                        CheckCategory::Database => "🗄️  Database",
-                        CheckCategory::Index => "🔍 Index",
-                        CheckCategory::Performance => "⚡ Performance",
+                        CheckCategory::Archive => "Archive",
+                        CheckCategory::Database => "Database",
+                        CheckCategory::Index => "Index",
+                        CheckCategory::Performance => "Performance",
                     };
                     println!();
                     println!("{}", category_name.bold().cyan());
@@ -2324,7 +2377,7 @@ fn cmd_doctor(cli: &Cli, args: &cli::DoctorArgs) -> Result<()> {
             // Suggestions
             if !suggestions.is_empty() {
                 println!();
-                println!("{}", "💡 Suggestions:".bold());
+                println!("{}", "Suggestions:".bold());
                 for suggestion in &suggestions {
                     println!("  • {suggestion}");
                 }
@@ -2366,7 +2419,10 @@ fn cmd_shell(cli: &Cli, args: &cli::ShellArgs) -> Result<()> {
             "{}",
             format_error(
                 "Search index missing",
-                &format!("Database exists but search index not found at '{}'.", index_path.display()),
+                &format!(
+                    "Database exists but search index not found at '{}'.",
+                    index_path.display()
+                ),
                 &["Run 'xf index <archive_path>' to rebuild the search index"],
             )
         );
@@ -2389,72 +2445,4 @@ fn cmd_shell(cli: &Cli, args: &cli::ShellArgs) -> Result<()> {
     };
 
     repl::run(storage, search, config)
-}
-
-#[cfg(test)]
-mod tests {
-    use xf::{csv_escape_text, format_relative_date_with_base};
-    use chrono::{Duration, TimeZone, Utc};
-
-    #[test]
-    fn format_relative_date_with_base_thresholds() {
-        let base = Utc
-            .with_ymd_and_hms(2025, 1, 10, 12, 0, 0)
-            .single()
-            .unwrap();
-
-        assert_eq!(
-            format_relative_date_with_base(base - Duration::seconds(30), base),
-            "just now"
-        );
-        assert_eq!(
-            format_relative_date_with_base(base - Duration::minutes(5), base),
-            "5m ago"
-        );
-        assert_eq!(
-            format_relative_date_with_base(base - Duration::hours(3), base),
-            "3h ago"
-        );
-        assert_eq!(
-            format_relative_date_with_base(base - Duration::days(2), base),
-            "2d ago"
-        );
-
-        // Same calendar year: shows "Mon DD" without year
-        let same_year = Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).single().unwrap();
-        assert_eq!(
-            format_relative_date_with_base(same_year, base),
-            "Jan 01" // Same year (2025), no year suffix
-        );
-
-        // Different calendar year (even if less than 365 days): shows year
-        let different_year = Utc
-            .with_ymd_and_hms(2024, 12, 11, 0, 0, 0)
-            .single()
-            .unwrap();
-        assert_eq!(
-            format_relative_date_with_base(different_year, base),
-            "Dec 11, 2024" // Different year, must show year
-        );
-
-        // Over a year ago: shows year
-        let over_year = base - Duration::days(400);
-        assert_eq!(
-            format_relative_date_with_base(over_year, base),
-            over_year.format("%b %d, %Y").to_string()
-        );
-
-        let future = base + Duration::days(2);
-        assert_eq!(
-            format_relative_date_with_base(future, base),
-            future.format("%b %d, %Y").to_string()
-        );
-    }
-
-    #[test]
-    fn csv_escape_text_sanitizes_newlines_and_quotes() {
-        let input = "Hello\r\n\"world\", ok";
-        let escaped = csv_escape_text(input);
-        assert_eq!(escaped, "Hello  \"\"world\"\", ok");
-    }
 }

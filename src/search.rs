@@ -3,6 +3,7 @@
 //! Provides ultra-fast search with BM25 ranking, prefix matching, and phrase queries.
 
 use crate::doctor::{CheckCategory, CheckStatus, HealthCheck};
+use crate::format_bytes;
 use crate::model::{DmConversation, GrokMessage, Like, SearchResult, SearchResultType, Tweet};
 use crate::storage::Storage;
 use anyhow::{Context, Result};
@@ -26,6 +27,8 @@ const FIELD_TEXT_PREFIX: &str = "text_prefix";
 const FIELD_TYPE: &str = "type";
 const FIELD_CREATED_AT: &str = "created_at";
 const FIELD_METADATA: &str = "metadata";
+
+const LARGE_INDEX_BYTES: u64 = 500 * 1024 * 1024;
 
 const fn epoch_utc() -> DateTime<Utc> {
     DateTime::<Utc>::from_timestamp(0, 0).unwrap()
@@ -684,7 +687,7 @@ impl SearchEngine {
 
         match directory_size_bytes(index_path) {
             Ok(size_bytes) => {
-                let is_large = size_bytes > 500 * BYTES_PER_MB;
+                let is_large = size_bytes > LARGE_INDEX_BYTES;
                 let status = if is_large {
                     CheckStatus::Warning
                 } else {
@@ -734,10 +737,6 @@ impl SearchEngine {
     }
 }
 
-const BYTES_PER_KB: u64 = 1024;
-const BYTES_PER_MB: u64 = 1024 * 1024;
-const BYTES_PER_GB: u64 = 1024 * 1024 * 1024;
-
 fn directory_size_bytes(path: &Path) -> std::io::Result<u64> {
     let mut total = 0u64;
     let mut stack = vec![path.to_path_buf()];
@@ -755,24 +754,6 @@ fn directory_size_bytes(path: &Path) -> std::io::Result<u64> {
     }
 
     Ok(total)
-}
-
-fn format_bytes(bytes: u64) -> String {
-    if bytes < BYTES_PER_KB {
-        format!("{bytes} B")
-    } else if bytes < BYTES_PER_MB {
-        format_bytes_with_unit(bytes, BYTES_PER_KB, "KB")
-    } else if bytes < BYTES_PER_GB {
-        format_bytes_with_unit(bytes, BYTES_PER_MB, "MB")
-    } else {
-        format_bytes_with_unit(bytes, BYTES_PER_GB, "GB")
-    }
-}
-
-fn format_bytes_with_unit(bytes: u64, unit: u64, suffix: &str) -> String {
-    let whole = bytes / unit;
-    let tenths = (bytes % unit) * 10 / unit;
-    format!("{whole}.{tenths} {suffix}")
 }
 
 /// Generate prefix terms for edge n-gram style matching.

@@ -16,7 +16,10 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use tracing::{debug, info, trace, warn};
 
-use crate::{CONTENT_DIVIDER_WIDTH, SearchEngine, SearchResult, Storage, format_number};
+use crate::{
+    CONTENT_DIVIDER_WIDTH, SearchEngine, SearchResult, Storage, csv_escape_text, format_number,
+    format_number_usize, format_relative_date, format_short_id,
+};
 
 /// Configuration for the REPL session.
 #[derive(Debug, Clone)]
@@ -431,7 +434,10 @@ impl ReplSession {
         let base = self.prompt_str.trim_end_matches("> ").trim_end_matches('>');
         match &self.prompt_context {
             PromptContext::Normal => self.prompt_str.clone(),
-            PromptContext::WithResults(n) => format!("{base} [{n}]> "),
+            PromptContext::WithResults(n) => {
+                let count = format_number_usize(*n);
+                format!("{base} [{count}]> ")
+            }
             PromptContext::InConversation(id) => {
                 let snippet = id.get(..8.min(id.len())).unwrap_or(id);
                 format!("{base} [dm:{snippet}]> ")
@@ -593,7 +599,11 @@ impl ReplSession {
         self.last_selected = None; // Reset: new search invalidates previous selection
         self.prompt_context = PromptContext::WithResults(count);
 
-        println!("{} {}", count.to_string().cyan(), "results".dimmed());
+        println!(
+            "{} {}",
+            format_number_usize(count).cyan(),
+            "results".dimmed()
+        );
         print_results(&self.last_results, 0, self.page_size);
         Ok(())
     }
@@ -602,18 +612,35 @@ impl ReplSession {
         let stats = self.storage.get_stats()?;
         println!("{}", "Archive Statistics".bold().cyan());
         println!("{}", "─".repeat(CONTENT_DIVIDER_WIDTH));
-        println!("  {:<20} {}", "Tweets:", stats.tweets_count);
-        println!("  {:<20} {}", "Likes:", stats.likes_count);
-        println!("  {:<20} {}", "DM Messages:", stats.dms_count);
+        println!("  {:<20} {}", "Tweets:", format_number(stats.tweets_count));
+        println!("  {:<20} {}", "Likes:", format_number(stats.likes_count));
         println!(
             "  {:<20} {}",
-            "DM Conversations:", stats.dm_conversations_count
+            "DM Messages:",
+            format_number(stats.dms_count)
         );
-        println!("  {:<20} {}", "Grok Messages:", stats.grok_messages_count);
-        println!("  {:<20} {}", "Followers:", stats.followers_count);
-        println!("  {:<20} {}", "Following:", stats.following_count);
-        println!("  {:<20} {}", "Blocks:", stats.blocks_count);
-        println!("  {:<20} {}", "Mutes:", stats.mutes_count);
+        println!(
+            "  {:<20} {}",
+            "DM Conversations:",
+            format_number(stats.dm_conversations_count)
+        );
+        println!(
+            "  {:<20} {}",
+            "Grok Messages:",
+            format_number(stats.grok_messages_count)
+        );
+        println!(
+            "  {:<20} {}",
+            "Followers:",
+            format_number(stats.followers_count)
+        );
+        println!(
+            "  {:<20} {}",
+            "Following:",
+            format_number(stats.following_count)
+        );
+        println!("  {:<20} {}", "Blocks:", format_number(stats.blocks_count));
+        println!("  {:<20} {}", "Mutes:", format_number(stats.mutes_count));
         Ok(())
     }
 
@@ -623,25 +650,37 @@ impl ReplSession {
         match target {
             ListTarget::Tweets => {
                 let tweets = self.storage.get_all_tweets(None)?;
-                println!("{} {}", tweets.len().to_string().cyan(), "tweets".dimmed());
+                println!(
+                    "{} {}",
+                    format_number_usize(tweets.len()).cyan(),
+                    "tweets".dimmed()
+                );
                 for tweet in tweets.iter().take(self.page_size) {
                     let text = truncate_text(&tweet.full_text, 60);
                     println!(
                         "  {} {}",
-                        tweet.created_at.format("%Y-%m-%d").to_string().dimmed(),
+                        format_relative_date(tweet.created_at).dimmed(),
                         text
                     );
                 }
                 if tweets.len() > self.page_size {
                     println!(
                         "{}",
-                        format!("… {} more", tweets.len() - self.page_size).dimmed()
+                        format!(
+                            "… {} more",
+                            format_number_usize(tweets.len() - self.page_size)
+                        )
+                        .dimmed()
                     );
                 }
             }
             ListTarget::Likes => {
                 let likes = self.storage.get_all_likes(None)?;
-                println!("{} {}", likes.len().to_string().cyan(), "likes".dimmed());
+                println!(
+                    "{} {}",
+                    format_number_usize(likes.len()).cyan(),
+                    "likes".dimmed()
+                );
                 for like in likes.iter().take(self.page_size) {
                     let text = like.full_text.as_deref().unwrap_or("[no text]");
                     let text = truncate_text(text, 60);
@@ -650,7 +689,11 @@ impl ReplSession {
                 if likes.len() > self.page_size {
                     println!(
                         "{}",
-                        format!("… {} more", likes.len() - self.page_size).dimmed()
+                        format!(
+                            "… {} more",
+                            format_number_usize(likes.len() - self.page_size)
+                        )
+                        .dimmed()
                     );
                 }
             }
@@ -658,21 +701,22 @@ impl ReplSession {
                 let dms = self.storage.get_all_dms(None)?;
                 println!(
                     "{} {}",
-                    dms.len().to_string().cyan(),
+                    format_number_usize(dms.len()).cyan(),
                     "DM messages".dimmed()
                 );
                 for dm in dms.iter().take(self.page_size) {
                     let text = truncate_text(&dm.text, 60);
                     println!(
                         "  {} {}",
-                        dm.created_at.format("%Y-%m-%d").to_string().dimmed(),
+                        format_relative_date(dm.created_at).dimmed(),
                         text
                     );
                 }
                 if dms.len() > self.page_size {
                     println!(
                         "{}",
-                        format!("… {} more", dms.len() - self.page_size).dimmed()
+                        format!("… {} more", format_number_usize(dms.len() - self.page_size))
+                            .dimmed()
                     );
                 }
             }
@@ -680,7 +724,7 @@ impl ReplSession {
                 let stats = self.storage.get_stats()?;
                 println!(
                     "{} {}",
-                    stats.dm_conversations_count.to_string().cyan(),
+                    format_number(stats.dm_conversations_count).cyan(),
                     "DM conversations".dimmed()
                 );
             }
@@ -688,16 +732,20 @@ impl ReplSession {
                 let followers = self.storage.get_all_followers(None)?;
                 println!(
                     "{} {}",
-                    followers.len().to_string().cyan(),
+                    format_number_usize(followers.len()).cyan(),
                     "followers".dimmed()
                 );
                 for f in followers.iter().take(self.page_size) {
-                    println!("  {}", f.account_id);
+                    println!("  {}", format_short_id(&f.account_id));
                 }
                 if followers.len() > self.page_size {
                     println!(
                         "{}",
-                        format!("… {} more", followers.len() - self.page_size).dimmed()
+                        format!(
+                            "… {} more",
+                            format_number_usize(followers.len() - self.page_size)
+                        )
+                        .dimmed()
                     );
                 }
             }
@@ -705,16 +753,20 @@ impl ReplSession {
                 let following = self.storage.get_all_following(None)?;
                 println!(
                     "{} {}",
-                    following.len().to_string().cyan(),
+                    format_number_usize(following.len()).cyan(),
                     "following".dimmed()
                 );
                 for f in following.iter().take(self.page_size) {
-                    println!("  {}", f.account_id);
+                    println!("  {}", format_short_id(&f.account_id));
                 }
                 if following.len() > self.page_size {
                     println!(
                         "{}",
-                        format!("… {} more", following.len() - self.page_size).dimmed()
+                        format!(
+                            "… {} more",
+                            format_number_usize(following.len() - self.page_size)
+                        )
+                        .dimmed()
                     );
                 }
             }
@@ -722,16 +774,20 @@ impl ReplSession {
                 let blocks = self.storage.get_all_blocks(None)?;
                 println!(
                     "{} {}",
-                    blocks.len().to_string().cyan(),
+                    format_number_usize(blocks.len()).cyan(),
                     "blocked accounts".dimmed()
                 );
                 for b in blocks.iter().take(self.page_size) {
-                    println!("  {}", b.account_id);
+                    println!("  {}", format_short_id(&b.account_id));
                 }
                 if blocks.len() > self.page_size {
                     println!(
                         "{}",
-                        format!("… {} more", blocks.len() - self.page_size).dimmed()
+                        format!(
+                            "… {} more",
+                            format_number_usize(blocks.len() - self.page_size)
+                        )
+                        .dimmed()
                     );
                 }
             }
@@ -739,16 +795,20 @@ impl ReplSession {
                 let mutes = self.storage.get_all_mutes(None)?;
                 println!(
                     "{} {}",
-                    mutes.len().to_string().cyan(),
+                    format_number_usize(mutes.len()).cyan(),
                     "muted accounts".dimmed()
                 );
                 for m in mutes.iter().take(self.page_size) {
-                    println!("  {}", m.account_id);
+                    println!("  {}", format_short_id(&m.account_id));
                 }
                 if mutes.len() > self.page_size {
                     println!(
                         "{}",
-                        format!("… {} more", mutes.len() - self.page_size).dimmed()
+                        format!(
+                            "… {} more",
+                            format_number_usize(mutes.len() - self.page_size)
+                        )
+                        .dimmed()
                     );
                 }
             }
@@ -782,7 +842,7 @@ impl ReplSession {
 
         println!(
             "{} {} (filtered by '{}')",
-            count.to_string().cyan(),
+            format_number_usize(count).cyan(),
             "results".dimmed(),
             filter.yellow()
         );
@@ -809,13 +869,15 @@ impl ReplSession {
         debug!(offset = new_offset, total, "Showing more results");
 
         print_results(&self.last_results, self.current_offset, self.page_size);
+        let start = self.current_offset + 1;
+        let end = (self.current_offset + self.page_size).min(total);
         println!(
             "{}",
             format!(
                 "Showing {}-{} of {}",
-                self.current_offset + 1,
-                (self.current_offset + self.page_size).min(total),
-                total
+                format_number_usize(start),
+                format_number_usize(end),
+                format_number_usize(total)
             )
             .dimmed()
         );
@@ -850,7 +912,7 @@ impl ReplSession {
         println!(
             "{}: {}",
             "Date".cyan(),
-            result.created_at.format("%Y-%m-%d %H:%M:%S UTC")
+            format_relative_date(result.created_at)
         );
         println!("{}: {:.2}", "Score".cyan(), result.score);
         println!();
@@ -881,7 +943,7 @@ impl ReplSession {
                 for r in &self.last_results {
                     let created = r.created_at.to_rfc3339();
                     // Escape quotes and replace newlines/carriage returns for valid CSV
-                    let text_escaped = escape_csv_text(&r.text);
+                    let text_escaped = csv_escape_text(&r.text);
                     println!(
                         "{},{},{:.2},{},\"{}\"",
                         r.id, r.result_type, r.score, created, text_escaped
@@ -892,14 +954,14 @@ impl ReplSession {
 
         println!(
             "{}",
-            format!("Exported {} results", self.last_results.len()).dimmed()
+            format!(
+                "Exported {} results",
+                format_number_usize(self.last_results.len())
+            )
+            .dimmed()
         );
         Ok(())
     }
-}
-
-fn escape_csv_text(text: &str) -> String {
-    text.replace('"', "\"\"").replace(['\n', '\r'], " ")
 }
 
 fn parse_command(input: &str) -> Result<Command> {
@@ -1010,7 +1072,11 @@ fn print_results(results: &[SearchResult], offset: usize, page_size: usize) {
     if remaining > 0 {
         println!(
             "{}",
-            format!("… {remaining} more results available (type 'more')").dimmed()
+            format!(
+                "… {} more results available (type 'more')",
+                format_number_usize(remaining)
+            )
+            .dimmed()
         );
     }
 }
@@ -1042,15 +1108,23 @@ fn print_startup_banner(storage: &Storage) {
         .map_or("unknown", |info| info.username.as_str());
 
     println!();
-    println!("{}", "╭────────────────────────────────────────────────────────────╮".dimmed());
     println!(
-        "{}  {} {}{}",
+        "{}",
+        "╭────────────────────────────────────────────────────────────╮".dimmed()
+    );
+    let header_padding = " ".repeat(60 - 12 - VERSION.len() - 1);
+    println!(
+        "{}  {} {}{}{}",
         "│".dimmed(),
         "xf shell".cyan().bold(),
         format!("v{VERSION}").dimmed(),
-        " ".repeat(60 - 12 - VERSION.len() - 1).to_string() + &"│".dimmed().to_string()
+        header_padding,
+        "│".dimmed()
     );
-    println!("{}", "│                                                            │".dimmed());
+    println!(
+        "{}",
+        "│                                                            │".dimmed()
+    );
 
     // Archive info
     let archive_line = format!("  Archive: @{username}");
@@ -1081,14 +1155,20 @@ fn print_startup_banner(storage: &Storage) {
         );
     }
 
-    println!("{}", "│                                                            │".dimmed());
+    println!(
+        "{}",
+        "│                                                            │".dimmed()
+    );
     println!(
         "{}  {}{}",
         "│".dimmed(),
         "Type 'help' for commands, 'quit' to exit".dimmed(),
         "      │".dimmed()
     );
-    println!("{}", "╰────────────────────────────────────────────────────────────╯".dimmed());
+    println!(
+        "{}",
+        "╰────────────────────────────────────────────────────────────╯".dimmed()
+    );
     println!();
 }
 
@@ -1189,13 +1269,6 @@ mod tests {
     use super::*;
 
     // ======================== Command Parsing Tests ========================
-
-    #[test]
-    fn test_escape_csv_text_sanitizes_newlines_and_quotes() {
-        let input = "Hello\r\n\"world\", ok";
-        let escaped = escape_csv_text(input);
-        assert_eq!(escaped, "Hello  \"\"world\"\", ok");
-    }
 
     #[test]
     fn test_parse_search_command() {
