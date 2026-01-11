@@ -19,7 +19,7 @@ use tracing_subscriber::EnvFilter;
 use xf::cli;
 use xf::config::Config;
 use xf::search;
-use xf::stats_analytics::{self, TemporalStats};
+use xf::stats_analytics::{self, EngagementStats, TemporalStats};
 use xf::{
     ArchiveParser, ArchiveStats, Cli, Commands, DataType, ExportFormat, ExportTarget, ListTarget,
     OutputFormat, SearchEngine, SearchResult, SearchResultType, SortOrder, Storage, Tweet,
@@ -836,7 +836,14 @@ fn cmd_stats(cli: &Cli, args: &cli::StatsArgs) -> Result<()> {
         None
     };
 
-    let needs_extended = needs_tweets || args.temporal;
+    // Engagement analytics
+    let engagement = if args.engagement {
+        Some(EngagementStats::compute(&storage, args.top)?)
+    } else {
+        None
+    };
+
+    let needs_extended = needs_tweets || args.temporal || args.engagement;
 
     match cli.format {
         OutputFormat::Json | OutputFormat::JsonPretty => {
@@ -847,6 +854,7 @@ fn cmd_stats(cli: &Cli, args: &cli::StatsArgs) -> Result<()> {
                     top_hashtags,
                     top_mentions,
                     temporal,
+                    engagement,
                 };
                 let json = if matches!(cli.format, OutputFormat::JsonPretty) {
                     serde_json::to_string_pretty(&extended)?
@@ -1040,6 +1048,59 @@ fn cmd_stats(cli: &Cli, args: &cli::StatsArgs) -> Result<()> {
                     println!("  {line}");
                 }
             }
+
+            #[allow(clippy::cast_possible_wrap)]
+            if let Some(ref engagement) = engagement {
+                println!();
+                println!("{}", "Engagement Analytics".bold().cyan());
+                println!("{}", "─".repeat(60));
+
+                // Summary metrics
+                println!(
+                    "  Total Likes: {} | Total Retweets: {}",
+                    format_count(engagement.total_likes as i64).green(),
+                    format_count(engagement.total_retweets as i64).green()
+                );
+                println!(
+                    "  Average per Tweet: {:.1} | Median: {}",
+                    engagement.avg_engagement, engagement.median_engagement
+                );
+
+                // Trend sparkline
+                if !engagement.monthly_trend.is_empty() {
+                    println!();
+                    println!("  {} (monthly avg):", "Engagement trend".dimmed());
+                    let trend_sparkline =
+                        stats_analytics::sparkline_from_monthly(&engagement.monthly_trend, 24);
+                    println!("  {trend_sparkline}");
+                }
+
+                // Likes histogram
+                println!();
+                println!("  {}:", "Likes distribution".dimmed());
+                let histogram =
+                    stats_analytics::format_likes_histogram(&engagement.likes_histogram);
+                for line in histogram.lines() {
+                    println!("  {line}");
+                }
+
+                // Top performing tweets
+                if !engagement.top_tweets.is_empty() {
+                    println!();
+                    println!("  {}:", "Top performing tweets".dimmed());
+                    for (i, tweet) in engagement.top_tweets.iter().enumerate() {
+                        println!(
+                            "  {}. [{} {} {}] \"{}\" ({})",
+                            i + 1,
+                            format!("{}", tweet.likes).green(),
+                            "♥".red(),
+                            format!("{}", tweet.retweets).cyan(),
+                            tweet.text_preview.dimmed(),
+                            tweet.created_at.format("%b %d, %Y")
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -1057,6 +1118,8 @@ struct StatsExtended {
     top_mentions: Option<Vec<CountItem>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     temporal: Option<TemporalStats>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    engagement: Option<EngagementStats>,
 }
 
 #[derive(Serialize)]

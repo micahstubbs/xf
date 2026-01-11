@@ -174,6 +174,10 @@ pub struct StatsArgs {
     #[arg(long)]
     pub temporal: bool,
 
+    /// Show engagement analytics (likes distribution, top tweets)
+    #[arg(long)]
+    pub engagement: bool,
+
     /// Number of top items to show
     #[arg(long, short = 'n', default_value = "10")]
     pub top: usize,

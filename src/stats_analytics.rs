@@ -7,7 +7,7 @@
 
 use crate::Result;
 use crate::storage::Storage;
-use chrono::NaiveDate;
+use chrono::{DateTime, NaiveDate, Utc};
 use serde::Serialize;
 
 /// Temporal statistics showing activity patterns over time.
@@ -229,6 +229,344 @@ impl TemporalStats {
 
         (max_gap, gap_start, gap_end)
     }
+}
+
+// ============================================================================
+// Engagement Analytics
+// ============================================================================
+
+/// Engagement metrics for the archive showing how tweets performed.
+#[derive(Debug, Clone, Serialize)]
+pub struct EngagementStats {
+    /// Distribution of likes across tweets
+    pub likes_histogram: Vec<LikesBucket>,
+    /// Top N tweets by total engagement (likes + retweets)
+    pub top_tweets: Vec<TopTweet>,
+    /// Average engagement per tweet
+    pub avg_engagement: f64,
+    /// Median engagement
+    pub median_engagement: u64,
+    /// Total likes received across all tweets
+    pub total_likes: u64,
+    /// Total retweets received
+    pub total_retweets: u64,
+    /// Engagement trend over time (monthly averages)
+    pub monthly_trend: Vec<MonthlyEngagement>,
+}
+
+/// A bucket in the likes histogram.
+#[derive(Debug, Clone, Serialize)]
+pub struct LikesBucket {
+    /// Label for this bucket (e.g., "0", "1-5", "6-10")
+    pub label: String,
+    /// Minimum value in range (inclusive)
+    pub min: u64,
+    /// Maximum value in range (inclusive)
+    pub max: u64,
+    /// Number of tweets in this bucket
+    pub count: u64,
+    /// Percentage of total tweets
+    pub percentage: f64,
+}
+
+/// A top-performing tweet by engagement.
+#[derive(Debug, Clone, Serialize)]
+pub struct TopTweet {
+    /// Tweet ID
+    pub id: String,
+    /// First 50 characters of tweet text
+    pub text_preview: String,
+    /// When the tweet was created
+    pub created_at: DateTime<Utc>,
+    /// Number of likes
+    pub likes: u64,
+    /// Number of retweets
+    pub retweets: u64,
+    /// Total engagement (likes + retweets)
+    pub total_engagement: u64,
+}
+
+/// Monthly engagement average.
+#[derive(Debug, Clone, Serialize)]
+pub struct MonthlyEngagement {
+    /// Month in YYYY-MM format
+    pub month: String,
+    /// Average engagement for this month
+    pub avg_engagement: f64,
+}
+
+impl EngagementStats {
+    /// Compute engagement statistics from the storage.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if database queries fail.
+    #[allow(clippy::cast_precision_loss, clippy::cast_sign_loss)]
+    pub fn compute(storage: &Storage, top_n: usize) -> Result<Self> {
+        let likes_histogram = Self::query_likes_histogram(storage)?;
+        let top_tweets = Self::query_top_tweets(storage, top_n)?;
+        let (total_likes, total_retweets, avg_engagement, median_engagement) =
+            Self::query_engagement_totals(storage)?;
+        let monthly_trend = Self::query_monthly_trend(storage)?;
+
+        Ok(Self {
+            likes_histogram,
+            top_tweets,
+            avg_engagement,
+            median_engagement,
+            total_likes,
+            total_retweets,
+            monthly_trend,
+        })
+    }
+
+    /// Query likes histogram with predefined buckets.
+    #[allow(
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation
+    )]
+    fn query_likes_histogram(storage: &Storage) -> Result<Vec<LikesBucket>> {
+        // Get total tweet count first
+        let total_query = "SELECT COUNT(*) FROM tweets";
+        let conn = storage.connection();
+        let total_count: i64 = conn.query_row(total_query, [], |row| row.get(0))?;
+        let total_count = total_count as u64;
+
+        // Define buckets with SQL CASE logic
+        let query = r"
+            SELECT
+                CASE
+                    WHEN favorite_count = 0 THEN 0
+                    WHEN favorite_count BETWEEN 1 AND 5 THEN 1
+                    WHEN favorite_count BETWEEN 6 AND 10 THEN 2
+                    WHEN favorite_count BETWEEN 11 AND 25 THEN 3
+                    WHEN favorite_count BETWEEN 26 AND 50 THEN 4
+                    WHEN favorite_count BETWEEN 51 AND 100 THEN 5
+                    WHEN favorite_count BETWEEN 101 AND 500 THEN 6
+                    ELSE 7
+                END as bucket,
+                COUNT(*) as count
+            FROM tweets
+            WHERE favorite_count IS NOT NULL
+            GROUP BY bucket
+            ORDER BY bucket
+        ";
+
+        let mut stmt = conn.prepare(query)?;
+        let rows = stmt.query_map([], |row| {
+            let bucket: i64 = row.get(0)?;
+            let count: i64 = row.get(1)?;
+            Ok((bucket as usize, count as u64))
+        })?;
+
+        // Define bucket ranges and labels
+        let bucket_defs = [
+            ("0", 0u64, 0u64),
+            ("1-5", 1, 5),
+            ("6-10", 6, 10),
+            ("11-25", 11, 25),
+            ("26-50", 26, 50),
+            ("51-100", 51, 100),
+            ("101-500", 101, 500),
+            ("500+", 501, u64::MAX),
+        ];
+
+        let mut buckets: Vec<LikesBucket> = bucket_defs
+            .iter()
+            .map(|(label, min, max)| LikesBucket {
+                label: (*label).to_string(),
+                min: *min,
+                max: *max,
+                count: 0,
+                percentage: 0.0,
+            })
+            .collect();
+
+        for row in rows {
+            let (bucket_idx, count) = row?;
+            if bucket_idx < buckets.len() {
+                buckets[bucket_idx].count = count;
+                buckets[bucket_idx].percentage = if total_count > 0 {
+                    (count as f64 / total_count as f64) * 100.0
+                } else {
+                    0.0
+                };
+            }
+        }
+
+        Ok(buckets)
+    }
+
+    /// Query top N tweets by total engagement.
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_wrap)]
+    fn query_top_tweets(storage: &Storage, limit: usize) -> Result<Vec<TopTweet>> {
+        let query = r"
+            SELECT id, full_text, created_at, favorite_count, retweet_count,
+                   (COALESCE(favorite_count, 0) + COALESCE(retweet_count, 0)) as total_engagement
+            FROM tweets
+            WHERE favorite_count IS NOT NULL OR retweet_count IS NOT NULL
+            ORDER BY total_engagement DESC
+            LIMIT ?
+        ";
+
+        let conn = storage.connection();
+        let mut stmt = conn.prepare(query)?;
+        let limit_i64 = i64::try_from(limit).unwrap_or(i64::MAX);
+        let rows = stmt.query_map([limit_i64], |row| {
+            let id: String = row.get(0)?;
+            let full_text: String = row.get(1)?;
+            let created_at_str: String = row.get(2)?;
+            let likes: i64 = row.get::<_, Option<i64>>(3)?.unwrap_or(0);
+            let retweets: i64 = row.get::<_, Option<i64>>(4)?.unwrap_or(0);
+            let total: i64 = row.get(5)?;
+            Ok((id, full_text, created_at_str, likes, retweets, total))
+        })?;
+
+        let mut top_tweets = Vec::new();
+        for row in rows {
+            let (id, full_text, created_at_str, likes, retweets, total) = row?;
+
+            // Parse date - try ISO format first, then X format
+            let created_at = DateTime::parse_from_rfc3339(&created_at_str)
+                .map(|dt| dt.with_timezone(&Utc))
+                .or_else(|_| {
+                    DateTime::parse_from_str(&created_at_str, "%a %b %d %H:%M:%S %z %Y")
+                        .map(|dt| dt.with_timezone(&Utc))
+                })
+                .unwrap_or_else(|_| Utc::now());
+
+            // Truncate text to ~50 chars at word boundary
+            let text_preview = truncate_text(&full_text, 50);
+
+            top_tweets.push(TopTweet {
+                id,
+                text_preview,
+                created_at,
+                likes: likes as u64,
+                retweets: retweets as u64,
+                total_engagement: total as u64,
+            });
+        }
+
+        Ok(top_tweets)
+    }
+
+    /// Query total engagement metrics.
+    #[allow(clippy::cast_sign_loss, clippy::cast_precision_loss)]
+    fn query_engagement_totals(storage: &Storage) -> Result<(u64, u64, f64, u64)> {
+        let query = r"
+            SELECT
+                COALESCE(SUM(favorite_count), 0) as total_likes,
+                COALESCE(SUM(retweet_count), 0) as total_retweets,
+                COALESCE(AVG(favorite_count + retweet_count), 0) as avg_engagement
+            FROM tweets
+        ";
+
+        let conn = storage.connection();
+        let (total_likes, total_retweets, avg_engagement): (i64, i64, f64) =
+            conn.query_row(query, [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+
+        // Query median (approximate using percentile)
+        let median_query = r"
+            SELECT favorite_count + retweet_count as engagement
+            FROM tweets
+            WHERE favorite_count IS NOT NULL
+            ORDER BY engagement
+            LIMIT 1 OFFSET (SELECT COUNT(*) / 2 FROM tweets)
+        ";
+
+        let median: i64 = conn
+            .query_row(median_query, [], |row| row.get(0))
+            .unwrap_or(0);
+
+        Ok((
+            total_likes as u64,
+            total_retweets as u64,
+            avg_engagement,
+            median as u64,
+        ))
+    }
+
+    /// Query monthly engagement trend.
+    #[allow(clippy::cast_sign_loss)]
+    fn query_monthly_trend(storage: &Storage) -> Result<Vec<MonthlyEngagement>> {
+        let query = r"
+            SELECT strftime('%Y-%m', created_at) as month,
+                   AVG(COALESCE(favorite_count, 0) + COALESCE(retweet_count, 0)) as avg_engagement
+            FROM tweets
+            WHERE created_at IS NOT NULL
+            GROUP BY month
+            ORDER BY month
+        ";
+
+        let conn = storage.connection();
+        let mut stmt = conn.prepare(query)?;
+        let rows = stmt.query_map([], |row| {
+            let month: String = row.get(0)?;
+            let avg: f64 = row.get(1)?;
+            Ok(MonthlyEngagement {
+                month,
+                avg_engagement: avg,
+            })
+        })?;
+
+        let mut trend = Vec::new();
+        for row in rows {
+            trend.push(row?);
+        }
+
+        Ok(trend)
+    }
+}
+
+/// Truncate text to approximately `max_len` characters at a word boundary.
+#[must_use]
+fn truncate_text(text: &str, max_len: usize) -> String {
+    if text.len() <= max_len {
+        return text.to_string();
+    }
+
+    // Find a good break point
+    let truncated = &text[..max_len];
+    truncated.rfind(' ').map_or_else(
+        || format!("{truncated}..."),
+        |last_space| format!("{}...", &text[..last_space]),
+    )
+}
+
+/// Format likes histogram as a horizontal bar chart.
+#[must_use]
+#[allow(clippy::cast_precision_loss)]
+pub fn format_likes_histogram(histogram: &[LikesBucket]) -> String {
+    let max_count = histogram.iter().map(|b| b.count).max().unwrap_or(1);
+
+    histogram
+        .iter()
+        .map(|bucket| {
+            let bar_len = if max_count > 0 {
+                let scaled = bucket.count.saturating_mul(20) / max_count;
+                usize::try_from(scaled).unwrap_or(usize::MAX)
+            } else {
+                0
+            };
+            format!(
+                "{:>7} {} {:>5.1}%",
+                bucket.label,
+                "█".repeat(bar_len),
+                bucket.percentage
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Generate a sparkline from monthly engagement data.
+#[must_use]
+pub fn sparkline_from_monthly(monthly: &[MonthlyEngagement], width: usize) -> String {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let values: Vec<u64> = monthly.iter().map(|m| m.avg_engagement as u64).collect();
+    sparkline(&values, width)
 }
 
 /// Generate an ASCII sparkline from a slice of values.
