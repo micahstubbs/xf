@@ -292,6 +292,40 @@ impl Storage {
         Ok(())
     }
 
+    /// Retrieve stored archive info.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database query fails.
+    pub fn get_archive_info(&self) -> Result<Option<ArchiveInfo>> {
+        let result = self.conn.query_row(
+            "SELECT account_id, username, display_name, archive_size_bytes, generation_date, is_partial
+             FROM archive_info WHERE id = 1",
+            [],
+            |row| {
+                let generation_date_str: String = row.get(4)?;
+                let generation_date = chrono::DateTime::parse_from_rfc3339(&generation_date_str)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now());
+
+                Ok(ArchiveInfo {
+                    account_id: row.get(0)?,
+                    username: row.get(1)?,
+                    display_name: row.get(2)?,
+                    archive_size_bytes: row.get(3)?,
+                    generation_date,
+                    is_partial: row.get::<_, i32>(5)? != 0,
+                })
+            },
+        );
+
+        match result {
+            Ok(info) => Ok(Some(info)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     /// Store tweets in a transaction.
     ///
     /// # Errors

@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use tracing::{debug, info, trace, warn};
 
-use crate::{CONTENT_DIVIDER_WIDTH, SearchEngine, SearchResult, Storage};
+use crate::{CONTENT_DIVIDER_WIDTH, SearchEngine, SearchResult, Storage, format_number};
 
 /// Configuration for the REPL session.
 #[derive(Debug, Clone)]
@@ -378,11 +378,7 @@ pub fn run(storage: Storage, search: SearchEngine, repl_config: ReplConfig) -> R
     }
 
     info!("Starting xf REPL session");
-    println!(
-        "{}",
-        "xf interactive mode. Type 'help' for commands, 'quit' to exit.".cyan()
-    );
-    println!();
+    print_startup_banner(&session.storage);
 
     loop {
         let prompt = session.format_prompt();
@@ -425,7 +421,7 @@ pub fn run(storage: Storage, search: SearchEngine, repl_config: ReplConfig) -> R
         rl.save_history(path)?;
     }
     info!("Ended xf REPL session");
-    println!("Goodbye!");
+    println!("{}", "Session ended.".dimmed());
     Ok(())
 }
 
@@ -1031,6 +1027,69 @@ fn truncate_text(text: &str, max_len: usize) -> String {
         let truncated: String = text.chars().take(max_len - 3).collect();
         format!("{truncated}...")
     }
+}
+
+/// Print the startup banner with archive statistics.
+fn print_startup_banner(storage: &Storage) {
+    const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+    // Get archive stats
+    let stats = storage.get_stats();
+    let archive_info = storage.get_archive_info().ok().flatten();
+
+    let username = archive_info
+        .as_ref()
+        .map_or("unknown", |info| info.username.as_str());
+
+    println!();
+    println!("{}", "╭────────────────────────────────────────────────────────────╮".dimmed());
+    println!(
+        "{}  {} {}{}",
+        "│".dimmed(),
+        "xf shell".cyan().bold(),
+        format!("v{VERSION}").dimmed(),
+        " ".repeat(60 - 12 - VERSION.len() - 1).to_string() + &"│".dimmed().to_string()
+    );
+    println!("{}", "│                                                            │".dimmed());
+
+    // Archive info
+    let archive_line = format!("  Archive: @{username}");
+    let padding = 60 - archive_line.len();
+    println!(
+        "{}{}{}{}",
+        "│".dimmed(),
+        archive_line,
+        " ".repeat(padding.saturating_sub(1)),
+        "│".dimmed()
+    );
+
+    // Stats line
+    if let Ok(ref s) = stats {
+        let stats_line = format!(
+            "  Tweets: {} • DMs: {} • Likes: {}",
+            format_number(s.tweets_count),
+            format_number(s.dms_count),
+            format_number(s.likes_count)
+        );
+        let padding = 60 - stats_line.len();
+        println!(
+            "{}{}{}{}",
+            "│".dimmed(),
+            stats_line,
+            " ".repeat(padding.saturating_sub(1)),
+            "│".dimmed()
+        );
+    }
+
+    println!("{}", "│                                                            │".dimmed());
+    println!(
+        "{}  {}{}",
+        "│".dimmed(),
+        "Type 'help' for commands, 'quit' to exit".dimmed(),
+        "      │".dimmed()
+    );
+    println!("{}", "╰────────────────────────────────────────────────────────────╯".dimmed());
+    println!();
 }
 
 fn print_help(command: Option<&str>) {

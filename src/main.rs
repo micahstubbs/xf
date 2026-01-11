@@ -26,8 +26,9 @@ use xf::stats_analytics::{self, ContentStats, EngagementStats, TemporalStats};
 use xf::{
     ArchiveParser, ArchiveStats, CONTENT_DIVIDER_WIDTH, Cli, Commands, DataType, ExportFormat,
     ExportTarget, HEADER_DIVIDER_WIDTH, ListTarget, OutputFormat, SearchEngine, SearchResult,
-    SearchResultType, SortOrder, Storage, TweetUrl, find_closest_match, format_error,
-    VALID_CONFIG_KEYS, VALID_OUTPUT_FIELDS,
+    SearchResultType, SortOrder, Storage, TweetUrl, csv_escape_text, find_closest_match,
+    format_error, format_number, format_optional_date, format_relative_date, VALID_CONFIG_KEYS,
+    VALID_OUTPUT_FIELDS,
 };
 
 fn main() -> Result<()> {
@@ -1044,69 +1045,63 @@ fn cmd_stats(cli: &Cli, args: &cli::StatsArgs) -> Result<()> {
                 println!();
             }
 
-            println!("{}", "📊 Overview".bold().cyan());
+            println!("{}", "Overview".bold().cyan());
             println!("{}", "─".repeat(CONTENT_DIVIDER_WIDTH));
             println!(
                 "  {:<20} {:>10}",
                 "Tweets:",
-                format_count(stats.tweets_count)
+                format_number(stats.tweets_count)
             );
-            println!("  {:<20} {:>10}", "Likes:", format_count(stats.likes_count));
+            println!("  {:<20} {:>10}", "Likes:", format_number(stats.likes_count));
             println!(
                 "  {:<20} {:>10}",
                 "DM Conversations:",
-                format_count(stats.dm_conversations_count)
+                format_number(stats.dm_conversations_count)
             );
             println!(
                 "  {:<20} {:>10}",
                 "DM Messages:",
-                format_count(stats.dms_count)
+                format_number(stats.dms_count)
             );
             println!(
                 "  {:<20} {:>10}",
                 "Grok Messages:",
-                format_count(stats.grok_messages_count)
+                format_number(stats.grok_messages_count)
             );
             println!(
                 "  {:<20} {:>10}",
                 "Followers:",
-                format_count(stats.followers_count)
+                format_number(stats.followers_count)
             );
             println!(
                 "  {:<20} {:>10}",
                 "Following:",
-                format_count(stats.following_count)
+                format_number(stats.following_count)
             );
             println!(
                 "  {:<20} {:>10}",
                 "Blocks:",
-                format_count(stats.blocks_count)
+                format_number(stats.blocks_count)
             );
-            println!("  {:<20} {:>10}", "Mutes:", format_count(stats.mutes_count));
+            println!("  {:<20} {:>10}", "Mutes:", format_number(stats.mutes_count));
             println!("{}", "─".repeat(CONTENT_DIVIDER_WIDTH));
 
             if let (Some(first), Some(last)) = (stats.first_tweet_date, stats.last_tweet_date) {
-                println!(
-                    "  First tweet: {}",
-                    first.format("%Y-%m-%d").to_string().green()
-                );
-                println!(
-                    "  Last tweet:  {}",
-                    last.format("%Y-%m-%d").to_string().green()
-                );
+                println!("  First tweet: {}", format_relative_date(first).green());
+                println!("  Last tweet:  {}", format_relative_date(last).green());
             }
 
             if let Some(detailed) = detailed {
                 if !detailed.is_empty() {
                     println!();
-                    println!("{}", "📅 Tweets by Month".bold().cyan());
+                    println!("{}", "Tweets by Month".bold().cyan());
                     println!("{}", "─".repeat(CONTENT_DIVIDER_WIDTH));
                     for entry in detailed {
                         println!(
                             "  {:04}-{:02}: {}",
                             entry.year,
                             entry.month,
-                            format_count(i64::try_from(entry.count).unwrap_or(i64::MAX))
+                            format_number(i64::try_from(entry.count).unwrap_or(i64::MAX))
                         );
                     }
                 }
@@ -1115,13 +1110,13 @@ fn cmd_stats(cli: &Cli, args: &cli::StatsArgs) -> Result<()> {
             if let Some(items) = top_hashtags {
                 if !items.is_empty() {
                     println!();
-                    println!("{}", "#️⃣ Top Hashtags".bold().cyan());
+                    println!("{}", "Top Hashtags".bold().cyan());
                     println!("{}", "─".repeat(CONTENT_DIVIDER_WIDTH));
                     for item in items {
                         println!(
                             "  {:<20} {}",
                             item.value,
-                            format_count(i64::try_from(item.count).unwrap_or(i64::MAX))
+                            format_number(i64::try_from(item.count).unwrap_or(i64::MAX))
                         );
                     }
                 }
@@ -1130,13 +1125,13 @@ fn cmd_stats(cli: &Cli, args: &cli::StatsArgs) -> Result<()> {
             if let Some(items) = top_mentions {
                 if !items.is_empty() {
                     println!();
-                    println!("{}", "👤 Top Mentions".bold().cyan());
+                    println!("{}", "Top Mentions".bold().cyan());
                     println!("{}", "─".repeat(CONTENT_DIVIDER_WIDTH));
                     for item in items {
                         println!(
                             "  {:<20} {}",
                             item.value,
-                            format_count(i64::try_from(item.count).unwrap_or(i64::MAX))
+                            format_number(i64::try_from(item.count).unwrap_or(i64::MAX))
                         );
                     }
                 }
@@ -1406,49 +1401,6 @@ fn format_count(n: i64) -> String {
     }
 }
 
-/// Format a datetime as a human-friendly relative string.
-///
-/// Uses smart thresholds for readability:
-/// - < 1 minute: "just now"
-/// - < 1 hour: "Nm ago"
-/// - < 24 hours: "Nh ago"
-/// - < 7 days: "Nd ago"
-/// - Same calendar year: "Mon D"
-/// - Different year: "Mon D, YYYY"
-fn format_relative_date(dt: DateTime<Utc>) -> String {
-    format_relative_date_with_base(dt, Utc::now())
-}
-
-fn format_relative_date_with_base(dt: DateTime<Utc>, now: DateTime<Utc>) -> String {
-    let duration = now.signed_duration_since(dt);
-
-    // Handle future dates (shouldn't happen, but be safe)
-    if duration.num_seconds() < 0 {
-        return dt.format("%b %d, %Y").to_string();
-    }
-
-    let seconds = duration.num_seconds();
-    let minutes = duration.num_minutes();
-    let hours = duration.num_hours();
-    let days = duration.num_days();
-
-    if seconds < 60 {
-        "just now".to_string()
-    } else if minutes < 60 {
-        format!("{minutes}m ago")
-    } else if hours < 24 {
-        format!("{hours}h ago")
-    } else if days < 7 {
-        format!("{days}d ago")
-    } else if dt.year() == now.year() {
-        // Same calendar year: "Jan 15"
-        dt.format("%b %d").to_string()
-    } else {
-        // Different year: "Jan 15, 2023"
-        dt.format("%b %d, %Y").to_string()
-    }
-}
-
 fn cmd_tweet(cli: &Cli, args: &cli::TweetArgs) -> Result<()> {
     let db_path = get_db_path(cli);
     let storage = Storage::open(&db_path)?;
@@ -1700,12 +1652,6 @@ fn truncate_text(text: &str, max_len: usize) -> String {
     }
 }
 
-fn format_optional_date(value: Option<DateTime<Utc>>) -> String {
-    value.map_or_else(
-        || "unknown".to_string(),
-        |dt| dt.format("%Y-%m-%d %H:%M").to_string(),
-    )
-}
 
 fn cmd_export(cli: &Cli, args: &cli::ExportArgs) -> Result<()> {
     let db_path = get_db_path(cli);
@@ -1861,10 +1807,6 @@ fn format_export<T: serde::Serialize>(data: &[T], format: &ExportFormat) -> Resu
             }
         }
     }
-}
-
-fn csv_escape_text(text: &str) -> String {
-    text.replace('"', "\"\"").replace(['\n', '\r'], " ")
 }
 
 /// Escape a JSON value for CSV output
@@ -2451,7 +2393,7 @@ fn cmd_shell(cli: &Cli, args: &cli::ShellArgs) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{csv_escape_text, format_relative_date_with_base};
+    use xf::{csv_escape_text, format_relative_date_with_base};
     use chrono::{Duration, TimeZone, Utc};
 
     #[test]
