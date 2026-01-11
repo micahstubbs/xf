@@ -262,6 +262,34 @@ fn test_cli_help() {
 }
 
 #[test]
+fn test_search_help_examples_and_types() {
+    test_log!("Starting test_search_help_examples_and_types");
+    let start = Instant::now();
+
+    let mut cmd = xf_cmd();
+    cmd.arg("search")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Examples:"))
+        .stdout(predicate::str::contains("xf search \"hello world\""))
+        .stdout(predicate::str::contains("Formats:"))
+        .stdout(predicate::str::contains("tweet"))
+        .stdout(predicate::str::contains("like"))
+        .stdout(predicate::str::contains("dm"))
+        .stdout(predicate::str::contains("grok"))
+        .stdout(predicate::str::contains("follower").not())
+        .stdout(predicate::str::contains("following").not())
+        .stdout(predicate::str::contains("block").not())
+        .stdout(predicate::str::contains("mute").not());
+
+    test_log!(
+        "test_search_help_examples_and_types completed in {:?}",
+        start.elapsed()
+    );
+}
+
+#[test]
 fn test_cli_version() {
     test_log!("Starting test_cli_version");
     let start = Instant::now();

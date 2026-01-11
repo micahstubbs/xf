@@ -26,9 +26,10 @@ use xf::stats_analytics::{self, ContentStats, EngagementStats, TemporalStats};
 use xf::{
     ArchiveParser, ArchiveStats, CONTENT_DIVIDER_WIDTH, Cli, Commands, DataType, ExportFormat,
     ExportTarget, HEADER_DIVIDER_WIDTH, ListTarget, OutputFormat, SearchEngine, SearchResult,
-    SearchResultType, SortOrder, Storage, TweetUrl, VALID_CONFIG_KEYS, VALID_OUTPUT_FIELDS,
-    csv_escape_text, find_closest_match, format_error, format_number, format_number_u64,
-    format_number_usize, format_optional_date, format_relative_date, format_short_id,
+    SearchResultType, SearchType, SortOrder, Storage, TweetUrl, VALID_CONFIG_KEYS,
+    VALID_OUTPUT_FIELDS, csv_escape_text, find_closest_match, format_error, format_number,
+    format_number_u64, format_number_usize, format_optional_date, format_relative_date,
+    format_short_id,
 };
 
 fn main() -> Result<()> {
@@ -387,7 +388,7 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
             anyhow::bail!("--context only supports text or json output.");
         }
         if let Some(types) = &args.types {
-            if types.len() != 1 || !types.contains(&DataType::Dm) {
+            if types.len() != 1 || !types.contains(&SearchType::Dm) {
                 anyhow::bail!("--context only supports --types dm.");
             }
         }
@@ -414,17 +415,22 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
     let doc_types: Option<Vec<search::DocType>> = if args.context {
         Some(vec![search::DocType::DirectMessage])
     } else {
-        args.types.as_ref().map(|types| {
-            types
-                .iter()
-                .filter_map(|t| match t {
-                    DataType::Tweet => Some(search::DocType::Tweet),
-                    DataType::Like => Some(search::DocType::Like),
-                    DataType::Dm => Some(search::DocType::DirectMessage),
-                    DataType::Grok => Some(search::DocType::GrokMessage),
-                    _ => None,
-                })
-                .collect()
+        args.types.as_ref().and_then(|types| {
+            if types.iter().any(|t| matches!(t, SearchType::All)) {
+                return None;
+            }
+            Some(
+                types
+                    .iter()
+                    .filter_map(|t| match t {
+                        SearchType::Tweet => Some(search::DocType::Tweet),
+                        SearchType::Like => Some(search::DocType::Like),
+                        SearchType::Dm => Some(search::DocType::DirectMessage),
+                        SearchType::Grok => Some(search::DocType::GrokMessage),
+                        SearchType::All => None,
+                    })
+                    .collect(),
+            )
         })
     };
 

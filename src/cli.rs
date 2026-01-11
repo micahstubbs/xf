@@ -32,6 +32,13 @@ Quick start:
   2. Run: xf index /path/to/your-archive
   3. Search: xf search "your query"
 "#)]
+#[command(after_help = r#"Common tasks:
+  xf search "query"               # Search tweets, likes, DMs, grok chats
+  xf search "query" --types dm    # Search DMs only
+  xf tweet <id> --thread          # View a tweet thread
+  xf export tweets --format csv   # Export tweets to CSV
+  xf doctor                       # Check archive/index health
+"#)]
 pub struct Cli {
     /// Path to the database file
     #[arg(long, env = "XF_DB", global = true)]
@@ -120,13 +127,20 @@ pub struct IndexArgs {
 }
 
 #[derive(Args, Debug)]
+#[command(after_help = r#"Examples:
+  xf search "hello world"              # Basic full-text search
+  xf search "rust" --types tweet       # Search only tweets
+  xf search "meeting" --types dm       # Search DMs
+  xf search "2024" --since "last week" # Recent content
+  xf search "bug" --limit 50           # More results
+"#)]
 pub struct SearchArgs {
     /// Search query
     pub query: String,
 
-    /// Filter by data type (tweet, like, dm, grok)
+    /// Filter by data type (tweet, like, dm, grok, all)
     #[arg(long, short = 't', value_delimiter = ',')]
-    pub types: Option<Vec<DataType>>,
+    pub types: Option<Vec<SearchType>>,
 
     /// Maximum number of results
     #[arg(long, short = 'n', default_value = "20")]
@@ -140,12 +154,18 @@ pub struct SearchArgs {
     #[arg(long, short = 's', default_value = "relevance")]
     pub sort: SortOrder,
 
-    /// Show only tweets from this date onwards (e.g., 2023-01-01, "last month")
-    #[arg(long)]
+    /// Show only tweets from this date onwards
+    #[arg(
+        long,
+        long_help = "Show only tweets from this date onwards.\n\nFormats: 2024-01-15, 2024-01, \"last week\", \"3 days ago\", \"yesterday\"\nExample: --since \"last month\""
+    )]
     pub since: Option<String>,
 
-    /// Show only tweets until this date (e.g., 2023-12-31, "yesterday")
-    #[arg(long)]
+    /// Show only tweets until this date
+    #[arg(
+        long,
+        long_help = "Show only tweets until this date.\n\nFormats: 2024-01-15, 2024-01, \"last week\", \"3 days ago\", \"yesterday\"\nExample: --until \"yesterday\""
+    )]
     pub until: Option<String>,
 
     /// Search only in replies
@@ -305,6 +325,22 @@ pub enum DataType {
     Block,
     Mute,
     All,
+}
+
+#[derive(ValueEnum, Clone, Debug, PartialEq, Eq)]
+pub enum SearchType {
+    Tweet,
+    Like,
+    Dm,
+    Grok,
+    All,
+}
+
+impl SearchType {
+    #[must_use]
+    pub fn all_content() -> Vec<Self> {
+        vec![Self::Tweet, Self::Like, Self::Dm, Self::Grok]
+    }
 }
 
 impl DataType {
