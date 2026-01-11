@@ -4,11 +4,16 @@
 
 use anyhow::{Context, Result};
 use colored::Colorize;
+use rustyline::completion::{Completer, Pair};
 use rustyline::error::ReadlineError;
+use rustyline::highlight::Highlighter;
+use rustyline::hint::Hinter;
 use rustyline::history::DefaultHistory;
-use rustyline::{CompletionType, Config, EditMode, Editor};
+use rustyline::validate::Validator;
+use rustyline::{CompletionType, Config, EditMode, Editor, Helper};
+use std::borrow::Cow;
 use std::path::PathBuf;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace, warn};
 
 use crate::{SearchEngine, SearchResult, Storage};
 
@@ -92,6 +97,227 @@ enum ExportFormat {
     Csv,
 }
 
+// =============================================================================
+// Tab Completion
+// =============================================================================
+
+/// Commands available in the REPL for completion.
+const COMMANDS: &[&str] = &[
+    "search", "s", "list", "l", "refine", "r", "more", "m", "show", "export", "e", "stats", "help",
+    "h", "?", "quit", "exit", "q",
+];
+
+/// List targets for completion.
+const LIST_TARGETS: &[&str] = &[
+    "tweets",
+    "likes",
+    "favorites",
+    "dms",
+    "dm",
+    "messages",
+    "conversations",
+    "convos",
+    "followers",
+    "following",
+    "blocks",
+    "blocked",
+    "mutes",
+    "muted",
+];
+
+/// Export formats for completion.
+const EXPORT_FORMATS: &[&str] = &["json", "csv"];
+
+/// Tab completion helper for xf REPL.
+#[derive(Default)]
+struct XfCompleter;
+
+impl XfCompleter {
+    /// Determine completion context from the input line and cursor position.
+    fn get_completions(&self, line: &str, pos: usize) -> Vec<Pair> {
+        let line_to_cursor = &line[..pos];
+        trace!(line = %line_to_cursor, pos, "Computing completions");
+
+        // Check if cursor is inside quotes - don't complete
+        if self.is_inside_quotes(line_to_cursor) {
+            trace!("Inside quotes, no completions");
+            return Vec::new();
+        }
+
+        let parts: Vec<&str> = line_to_cursor.split_whitespace().collect();
+
+        if parts.is_empty() || (parts.len() == 1 && !line_to_cursor.ends_with(' ')) {
+            // Complete command
+            let prefix = parts.first().copied().unwrap_or("");
+            return self.complete_command(prefix);
+        }
+
+        let command = parts[0].to_lowercase();
+
+        // If we just finished typing a command (ends with space), suggest next token
+        if line_to_cursor.ends_with(' ') {
+            return self.complete_after_command(&command, &parts[1..]);
+        }
+
+        // Complete partial token
+        let partial = parts.last().copied().unwrap_or("");
+        self.complete_partial(&command, partial, &parts[1..parts.len().saturating_sub(1)])
+    }
+
+    /// Check if cursor position is inside a quoted string.
+    #[allow(clippy::unused_self)]
+    fn is_inside_quotes(&self, text: &str) -> bool {
+        let mut in_single = false;
+        let mut in_double = false;
+        let mut prev_char = ' ';
+
+        for c in text.chars() {
+            if c == '\'' && prev_char != '\\' && !in_double {
+                in_single = !in_single;
+            } else if c == '"' && prev_char != '\\' && !in_single {
+                in_double = !in_double;
+            }
+            prev_char = c;
+        }
+
+        in_single || in_double
+    }
+
+    /// Complete a command name.
+    #[allow(clippy::unused_self)]
+    fn complete_command(&self, prefix: &str) -> Vec<Pair> {
+        let prefix_lower = prefix.to_lowercase();
+        let mut completions: Vec<Pair> = COMMANDS
+            .iter()
+            .filter(|cmd| cmd.starts_with(&prefix_lower))
+            .map(|cmd| Pair {
+                display: (*cmd).to_string(),
+                replacement: (*cmd).to_string(),
+            })
+            .collect();
+
+        completions.sort_by(|a, b| a.display.cmp(&b.display));
+        completions.dedup_by(|a, b| a.display == b.display);
+
+        debug!(count = completions.len(), "Command completions");
+        completions
+    }
+
+    /// Complete after a command has been typed.
+    fn complete_after_command(&self, command: &str, args: &[&str]) -> Vec<Pair> {
+        match command {
+            "list" | "l" if args.is_empty() => self.complete_list_targets(""),
+            "export" | "e" if args.is_empty() => self.complete_export_formats(""),
+            "help" | "h" | "?" if args.is_empty() => self.complete_help_topics(""),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Complete a partial token based on command context.
+    fn complete_partial(&self, command: &str, partial: &str, _prior_args: &[&str]) -> Vec<Pair> {
+        match command {
+            "list" | "l" => self.complete_list_targets(partial),
+            "export" | "e" => self.complete_export_formats(partial),
+            "help" | "h" | "?" => self.complete_help_topics(partial),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Complete list targets.
+    #[allow(clippy::unused_self)]
+    fn complete_list_targets(&self, prefix: &str) -> Vec<Pair> {
+        let prefix_lower = prefix.to_lowercase();
+        let mut completions: Vec<Pair> = LIST_TARGETS
+            .iter()
+            .filter(|t| t.starts_with(&prefix_lower))
+            .map(|t| Pair {
+                display: (*t).to_string(),
+                replacement: (*t).to_string(),
+            })
+            .collect();
+
+        completions.sort_by(|a, b| a.display.cmp(&b.display));
+        completions.dedup_by(|a, b| a.display == b.display);
+        completions
+    }
+
+    /// Complete export formats.
+    #[allow(clippy::unused_self)]
+    fn complete_export_formats(&self, prefix: &str) -> Vec<Pair> {
+        let prefix_lower = prefix.to_lowercase();
+        EXPORT_FORMATS
+            .iter()
+            .filter(|f| f.starts_with(&prefix_lower))
+            .map(|f| Pair {
+                display: (*f).to_string(),
+                replacement: (*f).to_string(),
+            })
+            .collect()
+    }
+
+    /// Complete help topics (command names).
+    #[allow(clippy::unused_self)]
+    fn complete_help_topics(&self, prefix: &str) -> Vec<Pair> {
+        let prefix_lower = prefix.to_lowercase();
+        // Only primary commands, not aliases
+        let topics = [
+            "search", "list", "refine", "more", "show", "export", "stats", "quit",
+        ];
+        topics
+            .iter()
+            .filter(|t| t.starts_with(&prefix_lower))
+            .map(|t| Pair {
+                display: (*t).to_string(),
+                replacement: (*t).to_string(),
+            })
+            .collect()
+    }
+}
+
+impl Completer for XfCompleter {
+    type Candidate = Pair;
+
+    fn complete(
+        &self,
+        line: &str,
+        pos: usize,
+        _ctx: &rustyline::Context<'_>,
+    ) -> std::result::Result<(usize, Vec<Pair>), ReadlineError> {
+        let completions = self.get_completions(line, pos);
+
+        // Find the start of the word being completed
+        let line_to_cursor = &line[..pos];
+        let word_start = line_to_cursor
+            .rfind(|c: char| c.is_whitespace())
+            .map_or(0, |i| i + 1);
+
+        Ok((word_start, completions))
+    }
+}
+
+impl Hinter for XfCompleter {
+    type Hint = String;
+
+    fn hint(&self, _line: &str, _pos: usize, _ctx: &rustyline::Context<'_>) -> Option<String> {
+        // No hints for now - could add command suggestions later
+        None
+    }
+}
+
+impl Highlighter for XfCompleter {
+    fn highlight<'l>(&self, line: &'l str, _pos: usize) -> Cow<'l, str> {
+        Cow::Borrowed(line)
+    }
+
+    fn highlight_char(&self, _line: &str, _pos: usize) -> bool {
+        false
+    }
+}
+
+impl Validator for XfCompleter {}
+
+impl Helper for XfCompleter {}
+
 /// Run the REPL session.
 ///
 /// # Errors
@@ -105,21 +331,18 @@ pub fn run(storage: Storage, search: SearchEngine, repl_config: ReplConfig) -> R
         .edit_mode(EditMode::Emacs)
         .build();
 
-    let mut rl: Editor<(), DefaultHistory> = Editor::with_config(rl_config)?;
+    let mut rl: Editor<XfCompleter, DefaultHistory> = Editor::with_config(rl_config)?;
+    rl.set_helper(Some(XfCompleter));
 
     // Determine history path
     let history_path = if repl_config.no_history {
         None
     } else {
-        Some(
-            repl_config
-                .history_file
-                .unwrap_or_else(|| {
-                    dirs::home_dir()
-                        .unwrap_or_else(|| PathBuf::from("."))
-                        .join(".xf_history")
-                }),
-        )
+        Some(repl_config.history_file.unwrap_or_else(|| {
+            dirs::home_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".xf_history")
+        }))
     };
 
     debug!(
@@ -1059,9 +1282,7 @@ mod tests {
 
     /// Helper to test prompt base extraction logic (same as `format_prompt` uses).
     fn extract_prompt_base(prompt_str: &str) -> &str {
-        prompt_str
-            .trim_end_matches("> ")
-            .trim_end_matches('>')
+        prompt_str.trim_end_matches("> ").trim_end_matches('>')
     }
 
     #[test]
@@ -1155,5 +1376,151 @@ mod tests {
     fn test_whitespace_only_fails() {
         let result = parse_command("   ");
         assert!(result.is_err());
+    }
+
+    // ======================== Tab Completion Tests ========================
+
+    #[test]
+    fn test_complete_command_empty() {
+        let completer = XfCompleter;
+        let completions = completer.get_completions("", 0);
+        // Should return all commands
+        assert!(!completions.is_empty());
+        assert!(completions.iter().any(|p| p.display == "search"));
+        assert!(completions.iter().any(|p| p.display == "list"));
+        assert!(completions.iter().any(|p| p.display == "quit"));
+    }
+
+    #[test]
+    fn test_complete_command_partial() {
+        let completer = XfCompleter;
+        let completions = completer.get_completions("se", 2);
+        assert!(completions.iter().any(|p| p.display == "search"));
+        // Should not include unrelated commands
+        assert!(!completions.iter().any(|p| p.display == "quit"));
+    }
+
+    #[test]
+    fn test_complete_command_s_aliases() {
+        let completer = XfCompleter;
+        let completions = completer.get_completions("s", 1);
+        // s, search, show, stats should all match
+        assert!(completions.iter().any(|p| p.display == "s"));
+        assert!(completions.iter().any(|p| p.display == "search"));
+        assert!(completions.iter().any(|p| p.display == "show"));
+        assert!(completions.iter().any(|p| p.display == "stats"));
+    }
+
+    #[test]
+    fn test_complete_list_target_empty() {
+        let completer = XfCompleter;
+        let completions = completer.get_completions("list ", 5);
+        // Should return all list targets
+        assert!(completions.iter().any(|p| p.display == "tweets"));
+        assert!(completions.iter().any(|p| p.display == "likes"));
+        assert!(completions.iter().any(|p| p.display == "dms"));
+    }
+
+    #[test]
+    fn test_complete_list_target_partial() {
+        let completer = XfCompleter;
+        let completions = completer.get_completions("list tw", 7);
+        assert!(completions.iter().any(|p| p.display == "tweets"));
+        assert!(!completions.iter().any(|p| p.display == "likes"));
+    }
+
+    #[test]
+    fn test_complete_list_alias() {
+        let completer = XfCompleter;
+        let completions = completer.get_completions("l ", 2);
+        // l is alias for list, should complete targets
+        assert!(completions.iter().any(|p| p.display == "tweets"));
+    }
+
+    #[test]
+    fn test_complete_export_format_empty() {
+        let completer = XfCompleter;
+        let completions = completer.get_completions("export ", 7);
+        assert!(completions.iter().any(|p| p.display == "json"));
+        assert!(completions.iter().any(|p| p.display == "csv"));
+    }
+
+    #[test]
+    fn test_complete_export_format_partial() {
+        let completer = XfCompleter;
+        let completions = completer.get_completions("export j", 8);
+        assert!(completions.iter().any(|p| p.display == "json"));
+        assert!(!completions.iter().any(|p| p.display == "csv"));
+    }
+
+    #[test]
+    fn test_complete_help_topics() {
+        let completer = XfCompleter;
+        let completions = completer.get_completions("help ", 5);
+        assert!(completions.iter().any(|p| p.display == "search"));
+        assert!(completions.iter().any(|p| p.display == "list"));
+    }
+
+    #[test]
+    fn test_complete_no_completions_after_search() {
+        let completer = XfCompleter;
+        // After "search " we don't complete anything (query is free-form)
+        let completions = completer.get_completions("search ", 7);
+        assert!(completions.is_empty());
+    }
+
+    #[test]
+    fn test_complete_no_completions_inside_quotes() {
+        let completer = XfCompleter;
+        // Inside quotes should not complete
+        let completions = completer.get_completions("search \"se", 10);
+        assert!(completions.is_empty());
+    }
+
+    #[test]
+    fn test_complete_no_completions_inside_single_quotes() {
+        let completer = XfCompleter;
+        let completions = completer.get_completions("search 'se", 10);
+        assert!(completions.is_empty());
+    }
+
+    #[test]
+    fn test_is_inside_quotes_false() {
+        let completer = XfCompleter;
+        assert!(!completer.is_inside_quotes("search query"));
+        assert!(!completer.is_inside_quotes("\"complete\""));
+        assert!(!completer.is_inside_quotes("'complete'"));
+    }
+
+    #[test]
+    fn test_is_inside_quotes_true() {
+        let completer = XfCompleter;
+        assert!(completer.is_inside_quotes("search \"query"));
+        assert!(completer.is_inside_quotes("search 'query"));
+    }
+
+    #[test]
+    fn test_completion_deterministic_order() {
+        let completer = XfCompleter;
+        let completions1 = completer.get_completions("", 0);
+        let completions2 = completer.get_completions("", 0);
+        assert_eq!(completions1.len(), completions2.len());
+        for (a, b) in completions1.iter().zip(completions2.iter()) {
+            assert_eq!(a.display, b.display);
+        }
+    }
+
+    #[test]
+    fn test_completion_no_duplicates() {
+        let completer = XfCompleter;
+        let completions = completer.get_completions("", 0);
+        let mut seen = std::collections::HashSet::new();
+        for c in &completions {
+            assert!(
+                seen.insert(&c.display),
+                "Duplicate completion: {}",
+                c.display
+            );
+        }
     }
 }

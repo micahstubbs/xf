@@ -18,9 +18,9 @@ use tracing::{Level, info, warn};
 use tracing_subscriber::EnvFilter;
 
 use xf::cli;
-use xf::repl;
 use xf::config::Config;
 use xf::date_parser;
+use xf::repl;
 use xf::search;
 use xf::stats_analytics::{self, ContentStats, EngagementStats, TemporalStats};
 use xf::{
