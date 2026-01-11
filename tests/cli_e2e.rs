@@ -69,6 +69,7 @@ fn create_test_archive(
         fs::write(data_dir.join("direct-messages.js"), content)
             .expect("Failed to write direct-messages.js");
     }
+    fs::write(data_dir.join("manifest.js"), SAMPLE_MANIFEST).expect("Failed to write manifest.js");
 
     let archive_path = temp_dir.path().to_path_buf();
     (temp_dir, archive_path)
@@ -160,6 +161,19 @@ const SAMPLE_TWEETS: &str = r#"window.YTD.tweets.part0 = [
         }
     }
 ]"#;
+
+const SAMPLE_MANIFEST: &str = r#"window.YTD.manifest.part0 = {
+    "userInfo": {
+        "accountId": "999999999",
+        "userName": "test_user",
+        "displayName": "Test User"
+    },
+    "archiveInfo": {
+        "sizeBytes": "1234",
+        "generationDate": "2025-01-01T00:00:00Z",
+        "isPartialArchive": false
+    }
+}"#;
 
 const SAMPLE_LIKES: &str = r#"window.YTD.like.part0 = [
     {
@@ -996,8 +1010,14 @@ fn test_doctor_json_output() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     // Validate JSON structure
-    let json: serde_json::Value = serde_json::from_str(&stdout)
-        .unwrap_or_else(|e| panic!("Output should be valid JSON. Error: {e}, Output: {stdout}"));
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap_or_else(|e| {
+        test_log!("Doctor JSON parse failed: {e}. Output: {stdout}");
+        serde_json::Value::Null
+    });
+    assert!(
+        json.is_object(),
+        "Output should be valid JSON object. Output: {stdout}"
+    );
 
     // Check expected fields in JSON output
     assert!(json.get("checks").is_some(), "Should have 'checks' field");

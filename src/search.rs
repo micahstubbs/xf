@@ -82,7 +82,7 @@ fn build_schema() -> Schema {
     // Prefix text field - for edge n-gram style prefix matching
     let prefix_options = TextOptions::default().set_indexing_options(
         TextFieldIndexing::default()
-            .set_tokenizer("raw")
+            .set_tokenizer("default")
             .set_index_option(IndexRecordOption::Basic),
     );
     schema_builder.add_text_field(FIELD_TEXT_PREFIX, prefix_options);
@@ -374,11 +374,11 @@ impl SearchEngine {
             return Ok(Vec::new());
         }
         let searcher = self.reader.searcher();
-        let (id_field, text_field, _, type_field, created_at_field, metadata_field) =
+        let (id_field, text_field, prefix_field, type_field, created_at_field, metadata_field) =
             self.get_fields();
 
         // Build query
-        let query_parser = QueryParser::for_index(&self.index, vec![text_field]);
+        let query_parser = QueryParser::for_index(&self.index, vec![text_field, prefix_field]);
         let base_query = query_parser
             .parse_query(query_str)
             .map_err(|e| anyhow::anyhow!("Invalid search query: {e}"))?;
@@ -945,6 +945,29 @@ mod tests {
         let results = engine.search("rust", None, 10).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id, "1");
+    }
+
+    #[test]
+    fn test_search_engine_prefix_matching() {
+        let engine = SearchEngine::open_memory().unwrap();
+        let mut writer = engine.writer(15_000_000).unwrap();
+
+        let tweets = vec![create_test_tweet("1", "Hello world example")];
+        engine.index_tweets(&mut writer, &tweets).unwrap();
+        writer.commit().unwrap();
+        engine.reload().unwrap();
+
+        // Prefix matches should work on the edge n-gram field.
+        let results = engine.search("he", None, 10).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "1");
+
+        let results = engine.search("wor", None, 10).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "1");
+
+        let results = engine.search("xq", None, 10).unwrap();
+        assert!(results.is_empty());
     }
 
     #[test]

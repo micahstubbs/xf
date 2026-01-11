@@ -59,6 +59,17 @@ impl ArchiveParser {
         self.parse_js_file(&content)
     }
 
+    /// Read and parse a required JS data file.
+    fn read_required_data_file(&self, filename: &str) -> Result<Value> {
+        let path = self.archive_path.join("data").join(filename);
+        if !path.exists() {
+            anyhow::bail!("Required archive file missing: {}", path.display());
+        }
+        let content = std::fs::read_to_string(&path)
+            .with_context(|| format!("Failed to read {}", path.display()))?;
+        self.parse_js_file(&content)
+    }
+
     /// Parse X's date format: "Fri Jan 09 15:12:21 +0000 2026"
     fn parse_x_date(date_str: &str) -> Option<DateTime<Utc>> {
         // X format: "Fri Jan 09 15:12:21 +0000 2026"
@@ -80,7 +91,10 @@ impl ArchiveParser {
     ///
     /// Returns an error if the manifest file cannot be read or parsed.
     pub fn parse_manifest(&self) -> Result<ArchiveInfo> {
-        let data = self.read_data_file("manifest.js")?;
+        let data = self.read_required_data_file("manifest.js")?;
+        if !data.is_object() {
+            anyhow::bail!("Invalid manifest format: expected JSON object");
+        }
 
         let user_info = &data["userInfo"];
         let archive_info = &data["archiveInfo"];
@@ -620,6 +634,17 @@ mod tests {
 
         let content = r"window.YTD.tweets.part0 = {invalid json";
         let result = parser.parse_js_file(content);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_manifest_missing_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let data_dir = temp_dir.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+
+        let parser = ArchiveParser::new(temp_dir.path());
+        let result = parser.parse_manifest();
         assert!(result.is_err());
     }
 
