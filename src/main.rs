@@ -1071,55 +1071,63 @@ fn cmd_stats(cli: &Cli, args: &cli::StatsArgs) -> Result<()> {
             println!("{}", "Overview".bold().cyan());
             println!("{}", "─".repeat(CONTENT_DIVIDER_WIDTH));
             println!(
-                "  {:<20} {:>10}",
-                "Tweets:",
-                format_number(stats.tweets_count)
+                "  {:<20} {}",
+                "Tweets:".dimmed(),
+                format!("{:>10}", format_number(stats.tweets_count)).bold()
             );
             println!(
-                "  {:<20} {:>10}",
-                "Likes:",
-                format_number(stats.likes_count)
+                "  {:<20} {}",
+                "Likes:".dimmed(),
+                format!("{:>10}", format_number(stats.likes_count)).bold()
             );
             println!(
-                "  {:<20} {:>10}",
-                "DM Conversations:",
-                format_number(stats.dm_conversations_count)
+                "  {:<20} {}",
+                "DM Conversations:".dimmed(),
+                format!("{:>10}", format_number(stats.dm_conversations_count)).bold()
             );
             println!(
-                "  {:<20} {:>10}",
-                "DM Messages:",
-                format_number(stats.dms_count)
+                "  {:<20} {}",
+                "DM Messages:".dimmed(),
+                format!("{:>10}", format_number(stats.dms_count)).bold()
             );
             println!(
-                "  {:<20} {:>10}",
-                "Grok Messages:",
-                format_number(stats.grok_messages_count)
+                "  {:<20} {}",
+                "Grok Messages:".dimmed(),
+                format!("{:>10}", format_number(stats.grok_messages_count)).bold()
             );
             println!(
-                "  {:<20} {:>10}",
-                "Followers:",
-                format_number(stats.followers_count)
+                "  {:<20} {}",
+                "Followers:".dimmed(),
+                format!("{:>10}", format_number(stats.followers_count)).bold()
             );
             println!(
-                "  {:<20} {:>10}",
-                "Following:",
-                format_number(stats.following_count)
+                "  {:<20} {}",
+                "Following:".dimmed(),
+                format!("{:>10}", format_number(stats.following_count)).bold()
             );
             println!(
-                "  {:<20} {:>10}",
-                "Blocks:",
-                format_number(stats.blocks_count)
+                "  {:<20} {}",
+                "Blocks:".dimmed(),
+                format!("{:>10}", format_number(stats.blocks_count)).bold()
             );
             println!(
-                "  {:<20} {:>10}",
-                "Mutes:",
-                format_number(stats.mutes_count)
+                "  {:<20} {}",
+                "Mutes:".dimmed(),
+                format!("{:>10}", format_number(stats.mutes_count)).bold()
             );
             println!("{}", "─".repeat(CONTENT_DIVIDER_WIDTH));
 
             if let (Some(first), Some(last)) = (stats.first_tweet_date, stats.last_tweet_date) {
-                println!("  First tweet: {}", format_relative_date(first).green());
-                println!("  Last tweet:  {}", format_relative_date(last).green());
+                println!(
+                    "  {} {}",
+                    "First tweet:".dimmed(),
+                    format_relative_date(first).bold()
+                );
+                println!(
+                    "  {} {}",
+                    "Last tweet:".dimmed(),
+                    format_relative_date(last).bold()
+                );
             }
 
             if let Some(detailed) = detailed {
@@ -1132,7 +1140,7 @@ fn cmd_stats(cli: &Cli, args: &cli::StatsArgs) -> Result<()> {
                             "  {:04}-{:02}: {}",
                             entry.year,
                             entry.month,
-                            format_number_usize(entry.count)
+                            format_number_usize(entry.count).bold()
                         );
                     }
                 }
@@ -1144,7 +1152,11 @@ fn cmd_stats(cli: &Cli, args: &cli::StatsArgs) -> Result<()> {
                     println!("{}", "Top Hashtags".bold().cyan());
                     println!("{}", "─".repeat(CONTENT_DIVIDER_WIDTH));
                     for item in items {
-                        println!("  {:<20} {}", item.value, format_number_usize(item.count));
+                        println!(
+                            "  {:<20} {}",
+                            item.value,
+                            format_number_usize(item.count).bold()
+                        );
                     }
                 }
             }
@@ -1155,7 +1167,11 @@ fn cmd_stats(cli: &Cli, args: &cli::StatsArgs) -> Result<()> {
                     println!("{}", "Top Mentions".bold().cyan());
                     println!("{}", "─".repeat(CONTENT_DIVIDER_WIDTH));
                     for item in items {
-                        println!("  {:<20} {}", item.value, format_number_usize(item.count));
+                        println!(
+                            "  {:<20} {}",
+                            item.value,
+                            format_number_usize(item.count).bold()
+                        );
                     }
                 }
             }
@@ -1172,27 +1188,28 @@ fn cmd_stats(cli: &Cli, args: &cli::StatsArgs) -> Result<()> {
 
                 // Key metrics
                 println!(
-                    "  {:<25} {:>10}",
-                    "Active days:",
-                    format_number_u64(temporal.active_days_count)
+                    "  {:<25} {}",
+                    "Active days:".dimmed(),
+                    format!("{:>10}", format_number_u64(temporal.active_days_count)).bold()
                 );
                 println!(
-                    "  {:<25} {:>10}",
-                    "Total days in range:",
-                    format_number_u64(temporal.total_days_in_range)
+                    "  {:<25} {}",
+                    "Total days in range:".dimmed(),
+                    format!("{:>10}", format_number_u64(temporal.total_days_in_range)).bold()
                 );
                 println!(
-                    "  {:<25} {:>10.1}",
-                    "Avg tweets/active day:", temporal.avg_tweets_per_active_day
+                    "  {:<25} {}",
+                    "Avg tweets/active day:".dimmed(),
+                    format!("{:>10.1}", temporal.avg_tweets_per_active_day).bold()
                 );
 
                 // Most active day
                 if let Some(day) = temporal.most_active_day {
                     println!(
                         "  {:<25} {} ({})",
-                        "Most active day:",
-                        format_naive_date(day).green(),
-                        format_number_u64(temporal.most_active_day_count)
+                        "Most active day:".dimmed(),
+                        format_naive_date(day).bold(),
+                        format_number_u64(temporal.most_active_day_count).bold()
                     );
                 }
 
@@ -1200,9 +1217,9 @@ fn cmd_stats(cli: &Cli, args: &cli::StatsArgs) -> Result<()> {
                 let hour_label = format!("{:02}:00", temporal.most_active_hour);
                 println!(
                     "  {:<25} {} ({})",
-                    "Most active hour:",
-                    hour_label.green(),
-                    format_number_u64(temporal.most_active_hour_count)
+                    "Most active hour:".dimmed(),
+                    hour_label.bold(),
+                    format_number_u64(temporal.most_active_hour_count).bold()
                 );
 
                 // Longest gap
@@ -1219,7 +1236,7 @@ fn cmd_stats(cli: &Cli, args: &cli::StatsArgs) -> Result<()> {
                     } else {
                         format!("{} days", format_number(temporal.longest_gap_days))
                     };
-                    println!("  {:<25} {}", "Longest gap:", gap_info.yellow());
+                    println!("  {:<25} {}", "Longest gap:".dimmed(), gap_info.yellow());
                 }
 
                 // Hourly distribution
@@ -1248,13 +1265,13 @@ fn cmd_stats(cli: &Cli, args: &cli::StatsArgs) -> Result<()> {
                 // Summary metrics
                 println!(
                     "  Total Likes: {} | Total Retweets: {}",
-                    format_number_u64(engagement.total_likes).green(),
-                    format_number_u64(engagement.total_retweets).green()
+                    format_number_u64(engagement.total_likes).bold(),
+                    format_number_u64(engagement.total_retweets).bold()
                 );
                 println!(
-                    "  Average per Tweet: {:.1} | Median: {}",
-                    engagement.avg_engagement,
-                    format_number_u64(engagement.median_engagement)
+                    "  Average per Tweet: {} | Median: {}",
+                    format!("{:.1}", engagement.avg_engagement).bold(),
+                    format_number_u64(engagement.median_engagement).bold()
                 );
 
                 // Trend sparkline
@@ -1283,9 +1300,9 @@ fn cmd_stats(cli: &Cli, args: &cli::StatsArgs) -> Result<()> {
                         println!(
                             "  {}. [{} {} {}] \"{}\" ({})",
                             i + 1,
-                            format_number_u64(tweet.likes).green(),
-                            "♥".red(),
-                            format_number_u64(tweet.retweets).cyan(),
+                            format_number_u64(tweet.likes).bold(),
+                            "♥".dimmed(),
+                            format_number_u64(tweet.retweets).bold(),
                             tweet.text_preview.dimmed(),
                             format_relative_date(tweet.created_at)
                         );
@@ -1301,30 +1318,37 @@ fn cmd_stats(cli: &Cli, args: &cli::StatsArgs) -> Result<()> {
 
                 // Content type ratios
                 println!(
-                    "  {:<25} {:>6.1}%",
-                    "Tweets with media:", content.media_ratio
+                    "  {:<25} {}",
+                    "Tweets with media:".dimmed(),
+                    format!("{:>6.1}%", content.media_ratio).bold()
                 );
                 println!(
-                    "  {:<25} {:>6.1}%",
-                    "Tweets with links:", content.link_ratio
-                );
-                println!("  {:<25} {:>6.1}%", "Replies:", content.reply_ratio);
-                println!(
-                    "  {:<25} {:>10}",
-                    "Self-threads:",
-                    format_number_u64(content.thread_count)
+                    "  {:<25} {}",
+                    "Tweets with links:".dimmed(),
+                    format!("{:>6.1}%", content.link_ratio).bold()
                 );
                 println!(
-                    "  {:<25} {:>10}",
-                    "Standalone tweets:",
-                    format_number_u64(content.standalone_count)
+                    "  {:<25} {}",
+                    "Replies:".dimmed(),
+                    format!("{:>6.1}%", content.reply_ratio).bold()
+                );
+                println!(
+                    "  {:<25} {}",
+                    "Self-threads:".dimmed(),
+                    format!("{:>10}", format_number_u64(content.thread_count)).bold()
+                );
+                println!(
+                    "  {:<25} {}",
+                    "Standalone tweets:".dimmed(),
+                    format!("{:>10}", format_number_u64(content.standalone_count)).bold()
                 );
 
                 // Tweet length
                 println!();
                 println!(
-                    "  {:<25} {:.1} chars",
-                    "Average tweet length:", content.avg_tweet_length
+                    "  {:<25} {}",
+                    "Average tweet length:".dimmed(),
+                    format!("{:.1} chars", content.avg_tweet_length).bold()
                 );
                 println!();
                 println!("  {}:", "Length distribution".dimmed());
@@ -1339,7 +1363,11 @@ fn cmd_stats(cli: &Cli, args: &cli::StatsArgs) -> Result<()> {
                     println!();
                     println!("  {}:", "Top hashtags".dimmed());
                     for tag in content.top_hashtags.iter().take(6) {
-                        println!("    #{:<20} {}", tag.tag, format_number_u64(tag.count));
+                        println!(
+                            "    #{:<20} {}",
+                            tag.tag,
+                            format_number_u64(tag.count).bold()
+                        );
                     }
                 }
 
@@ -1351,7 +1379,7 @@ fn cmd_stats(cli: &Cli, args: &cli::StatsArgs) -> Result<()> {
                         println!(
                             "    @{:<20} {}",
                             mention.tag,
-                            format_number_u64(mention.count)
+                            format_number_u64(mention.count).bold()
                         );
                     }
                 }
@@ -1460,7 +1488,7 @@ fn cmd_tweet(cli: &Cli, args: &cli::TweetArgs) -> Result<()> {
                     println!("  Hashtags: {}", t.hashtags.join(", ").blue());
                 }
                 if let Some(reply_to) = &t.in_reply_to_screen_name {
-                    println!("  Reply to: @{}", reply_to.green());
+                    println!("  {} @{}", "Reply to:".dimmed(), reply_to.bold());
                 }
             }
         },
@@ -1804,7 +1832,7 @@ fn cmd_export(cli: &Cli, args: &cli::ExportArgs) -> Result<()> {
         println!(
             "{} Exported to {}",
             "✓".green(),
-            path.display().to_string().cyan()
+            path.display().to_string().bold()
         );
     } else {
         println!("{output}");
