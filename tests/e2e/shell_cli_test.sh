@@ -194,7 +194,7 @@ fi
 pass "shell help command works"
 
 # Test 5: Interactive shell with search command
-run_cmd_stdin "shell_search" "rust\nquit" "$XF_BIN" shell --db "$DB_PATH" --index "$INDEX_PATH" --no-history
+run_cmd_stdin "shell_search" "search rust\nquit" "$XF_BIN" shell --db "$DB_PATH" --index "$INDEX_PATH" --no-history
 if [ $LAST_STATUS -ne 0 ]; then
   fail "shell with search command failed"
 fi
@@ -215,7 +215,7 @@ fi
 pass "shell custom page-size works"
 
 # Test 8: Custom history file option
-run_cmd_stdin "shell_history_file" "rust\nquit" "$XF_BIN" shell --db "$DB_PATH" --index "$INDEX_PATH" --history-file "$HISTORY_PATH"
+run_cmd_stdin "shell_history_file" "search rust\nquit" "$XF_BIN" shell --db "$DB_PATH" --index "$INDEX_PATH" --history-file "$HISTORY_PATH"
 if [ $LAST_STATUS -ne 0 ]; then
   fail "shell with custom history-file failed"
 fi
