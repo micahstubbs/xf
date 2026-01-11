@@ -32,6 +32,7 @@ X lets you download all your data, but actually *finding* anything in that archi
 - **Instant Search**: Sub-millisecond query latency via Tantivy
 - **Full-Text Search**: BM25 ranking with phrase queries, wildcards, and boolean operators
 - **Search Everything**: Tweets, likes, DMs, and Grok conversations
+- **DM Context**: View full conversation context with search matches highlighted
 - **Rich CLI**: Colorized output, progress bars, multiple output formats
 - **SQLite Storage**: Metadata queries and statistics
 - **Privacy-First**: All data stays local on your machine
@@ -237,6 +238,10 @@ xf search "query" --limit 20 --offset 40
 xf search "query" --format json
 xf search "query" --format csv
 xf search "query" --format compact
+
+# DM context: show full conversation with matches highlighted
+xf search "meeting" --types dm --context
+xf search "meeting" --types dm --context --format json
 ```
 
 **Query syntax:**

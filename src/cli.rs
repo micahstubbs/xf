@@ -152,7 +152,10 @@ pub struct SearchArgs {
     #[arg(long)]
     pub no_replies: bool,
 
-    /// Include surrounding context (for DMs)
+    /// Show full conversation context for DM searches.
+    ///
+    /// Requires --types dm. Displays all messages in matching conversations
+    /// with search hits highlighted. Works with text and JSON formats.
     #[arg(long, short = 'c')]
     pub context: bool,
 
