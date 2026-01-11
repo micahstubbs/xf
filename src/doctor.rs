@@ -298,17 +298,22 @@ pub fn check_duplicate_ids(archive_path: &Path) -> crate::Result<HealthCheck> {
             start.elapsed().as_millis()
         );
     }
+    Ok(check_duplicate_ids_in_tweets(&tweets))
+}
 
+/// Check for duplicate tweet IDs in a pre-parsed tweet collection.
+#[must_use]
+pub fn check_duplicate_ids_in_tweets(tweets: &[crate::Tweet]) -> HealthCheck {
     let mut seen_ids: HashSet<String> = HashSet::new();
     let mut duplicates: Vec<String> = Vec::new();
 
-    for tweet in &tweets {
+    for tweet in tweets {
         if !seen_ids.insert(tweet.id.clone()) {
             duplicates.push(tweet.id.clone());
         }
     }
 
-    Ok(HealthCheck {
+    HealthCheck {
         category: CheckCategory::Archive,
         name: "Duplicate Tweet IDs".into(),
         status: if duplicates.is_empty() {
@@ -330,14 +335,13 @@ pub fn check_duplicate_ids(archive_path: &Path) -> crate::Result<HealthCheck> {
                 if duplicates.len() > 3 { "..." } else { "" }
             ))
         },
-    })
+    }
 }
 
 /// Check timestamp consistency in tweets.
 ///
 /// # Errors
 /// Returns error if parsing fails.
-#[allow(clippy::cast_sign_loss)]
 pub fn check_timestamp_consistency(archive_path: &Path) -> crate::Result<HealthCheck> {
     let parser = ArchiveParser::new(archive_path);
     let start = Instant::now();
@@ -349,12 +353,17 @@ pub fn check_timestamp_consistency(archive_path: &Path) -> crate::Result<HealthC
             start.elapsed().as_millis()
         );
     }
+    Ok(check_timestamp_consistency_in_tweets(&tweets))
+}
 
+/// Check timestamp consistency in a pre-parsed tweet collection.
+#[must_use]
+pub fn check_timestamp_consistency_in_tweets(tweets: &[crate::Tweet]) -> HealthCheck {
     let mut issues: Vec<String> = Vec::new();
     let now = Utc::now();
     let twitter_launch_year = 2006;
 
-    for tweet in &tweets {
+    for tweet in tweets {
         // Check for future dates
         if tweet.created_at > now {
             issues.push(format!("{}: future date", tweet.id));
@@ -365,7 +374,7 @@ pub fn check_timestamp_consistency(archive_path: &Path) -> crate::Result<HealthC
         }
     }
 
-    Ok(HealthCheck {
+    HealthCheck {
         category: CheckCategory::Archive,
         name: "Timestamp Validity".into(),
         status: if issues.is_empty() {
@@ -387,7 +396,7 @@ pub fn check_timestamp_consistency(archive_path: &Path) -> crate::Result<HealthC
                 if issues.len() > 3 { "..." } else { "" }
             ))
         },
-    })
+    }
 }
 
 /// Run all archive validation checks.
@@ -403,15 +412,29 @@ pub fn validate_archive(archive_path: &Path) -> crate::Result<Vec<HealthCheck>> 
     // JSON structure validation
     all_checks.extend(check_json_structure(archive_path)?);
 
-    // Duplicate ID check (only if tweets exist)
+    // Duplicate ID and timestamp checks (only if tweets exist)
+    // Parse tweets ONCE and run both checks on the same data
     let tweets_path = archive_path.join("data/tweets.js");
-    if tweets_path.exists()
+    let has_tweets = tweets_path.exists()
         || glob(&archive_path.join("data/tweets-part*.js").to_string_lossy())
             .map(|mut g| g.next().is_some())
-            .unwrap_or(false)
-    {
-        all_checks.push(check_duplicate_ids(archive_path)?);
-        all_checks.push(check_timestamp_consistency(archive_path)?);
+            .unwrap_or(false);
+
+    if has_tweets {
+        let parser = ArchiveParser::new(archive_path);
+        let start = Instant::now();
+        let tweets = parser.parse_tweets()?;
+        if tweets.len() >= 100_000 {
+            info!(
+                "Parsed {} tweets for validation checks in {}ms",
+                tweets.len(),
+                start.elapsed().as_millis()
+            );
+        }
+
+        // Run both checks on the same parsed tweets (no double-parsing)
+        all_checks.push(check_duplicate_ids_in_tweets(&tweets));
+        all_checks.push(check_timestamp_consistency_in_tweets(&tweets));
     }
 
     Ok(all_checks)
@@ -517,8 +540,7 @@ pub fn benchmark_index_load(index_path: &Path) -> HealthCheck {
         }
     }
 
-    let mut sorted = durations.clone();
-    let latency_stats = LatencyStats::from_durations(&mut sorted);
+    let latency_stats = LatencyStats::from_durations(&mut durations);
     let median = latency_stats.p50_ms;
 
     let (check_status, suggestion) = if median < thresholds::LOAD_ACCEPTABLE_MS {
