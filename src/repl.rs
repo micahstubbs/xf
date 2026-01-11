@@ -1019,8 +1019,11 @@ fn truncate_text(text: &str, max_len: usize) -> String {
     let char_count = text.chars().count();
     if char_count <= max_len {
         text
+    } else if max_len <= 3 {
+        // Can't fit any text + "...", just truncate without ellipsis
+        text.chars().take(max_len).collect()
     } else {
-        let truncated: String = text.chars().take(max_len.saturating_sub(3)).collect();
+        let truncated: String = text.chars().take(max_len - 3).collect();
         format!("{truncated}...")
     }
 }
@@ -1400,6 +1403,26 @@ mod tests {
         let text = "exactly ten";
         let result = truncate_text(text, 11);
         assert_eq!(result, text);
+    }
+
+    #[test]
+    fn test_truncate_text_very_small_max_len() {
+        // When max_len <= 3, we can't fit text + "...", so just truncate
+        let result = truncate_text("hello", 2);
+        assert_eq!(result, "he");
+        assert_eq!(result.len(), 2);
+
+        let result = truncate_text("hello", 3);
+        assert_eq!(result, "hel");
+        assert_eq!(result.len(), 3);
+    }
+
+    #[test]
+    fn test_truncate_text_boundary_max_len() {
+        // max_len = 4: just enough for 1 char + "..."
+        let result = truncate_text("hello", 4);
+        assert_eq!(result, "h...");
+        assert_eq!(result.len(), 4);
     }
 
     // ======================== ReplConfig Tests ========================

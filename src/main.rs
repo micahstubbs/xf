@@ -643,9 +643,17 @@ fn html_highlights_to_ansi(html: &str) -> String {
 fn truncate(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {
         s.to_string()
+    } else if max_len <= 3 {
+        // Can't fit any text + "...", just truncate without ellipsis
+        // Find a valid UTF-8 char boundary
+        let mut end = max_len;
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        s[..end].to_string()
     } else {
         // Find a valid UTF-8 char boundary to avoid panic on multi-byte chars
-        let mut end = max_len.saturating_sub(3);
+        let mut end = max_len - 3;
         while end > 0 && !s.is_char_boundary(end) {
             end -= 1;
         }
@@ -1530,8 +1538,11 @@ fn truncate_text(text: &str, max_len: usize) -> String {
     let char_count = text.chars().count();
     if char_count <= max_len {
         text
+    } else if max_len <= 3 {
+        // Can't fit any text + "...", just truncate without ellipsis
+        text.chars().take(max_len).collect()
     } else {
-        let truncated: String = text.chars().take(max_len.saturating_sub(3)).collect();
+        let truncated: String = text.chars().take(max_len - 3).collect();
         format!("{truncated}...")
     }
 }

@@ -866,8 +866,13 @@ fn truncate_text(text: &str, max_len: usize) -> String {
         return text;
     }
 
+    if max_len <= 3 {
+        // Can't fit any text + "...", just truncate without ellipsis
+        return text.chars().take(max_len).collect();
+    }
+
     // Take max_len - 3 characters to leave room for "..."
-    let truncated: String = text.chars().take(max_len.saturating_sub(3)).collect();
+    let truncated: String = text.chars().take(max_len - 3).collect();
 
     // Try to find a word boundary (space) to break at
     truncated.rfind(' ').map_or_else(
