@@ -22,8 +22,7 @@ use xf::search;
 use xf::stats_analytics::{self, ContentStats, EngagementStats, TemporalStats};
 use xf::{
     ArchiveParser, ArchiveStats, Cli, Commands, DataType, ExportFormat, ExportTarget, ListTarget,
-    OutputFormat, SearchEngine, SearchResult, SearchResultType, SortOrder, Storage, Tweet,
-    TweetUrl,
+    OutputFormat, SearchEngine, SearchResult, SearchResultType, SortOrder, Storage, TweetUrl,
 };
 
 fn main() -> Result<()> {
@@ -791,66 +790,80 @@ fn cmd_stats(cli: &Cli, args: &cli::StatsArgs) -> Result<()> {
 
     let storage = Storage::open(&db_path)?;
     let stats = storage.get_stats()?;
-    let needs_tweets = args.detailed || args.hashtags || args.mentions;
-    let tweets = if needs_tweets {
-        storage.get_all_tweets(None)?
-    } else {
-        Vec::new()
-    };
 
-    let detailed = if args.detailed {
-        Some(build_monthly_counts(&tweets))
-    } else {
-        None
-    };
+    // --detailed shows all analytics (temporal + engagement + content)
+    let show_temporal = args.temporal || args.detailed;
+    let show_engagement = args.engagement || args.detailed;
+    let show_content = args.content || args.detailed;
 
-    let top_hashtags = if args.hashtags {
-        Some(top_counts(
-            tweets
-                .iter()
-                .flat_map(|tweet| tweet.hashtags.iter().map(|tag| tag.to_lowercase())),
-            args.top,
-        ))
-    } else {
-        None
-    };
+    // Show progress for large archives when computing detailed analytics
+    if args.detailed && stats.tweets_count > 10_000 && !cli.quiet {
+        eprintln!("Computing detailed analytics...");
+    }
 
-    let top_mentions = if args.mentions {
-        Some(top_counts(
-            tweets.iter().flat_map(|tweet| {
-                tweet
-                    .user_mentions
-                    .iter()
-                    .map(|m| m.screen_name.to_lowercase())
-            }),
-            args.top,
-        ))
-    } else {
-        None
-    };
-
-    // Temporal analytics uses efficient SQL aggregations, not in-memory tweet iteration
-    let temporal = if args.temporal {
+    // Temporal analytics uses efficient SQL aggregations
+    let temporal = if show_temporal {
         Some(TemporalStats::compute(&storage)?)
     } else {
         None
     };
 
     // Engagement analytics
-    let engagement = if args.engagement {
+    let engagement = if show_engagement {
         Some(EngagementStats::compute(&storage, args.top)?)
     } else {
         None
     };
 
-    // Content analytics
-    let content = if args.content {
+    // Content analytics - also provides top_hashtags and top_mentions efficiently
+    let content = if show_content || args.hashtags || args.mentions {
         Some(ContentStats::compute(&storage, args.top)?)
     } else {
         None
     };
 
-    let needs_extended = needs_tweets || args.temporal || args.engagement || args.content;
+    // Extract top_hashtags/mentions from ContentStats if requested separately
+    #[allow(clippy::cast_possible_truncation)]
+    let top_hashtags = if args.hashtags && !show_content {
+        content.as_ref().map(|c| {
+            c.top_hashtags
+                .iter()
+                .map(|t| CountItem {
+                    value: t.tag.clone(),
+                    count: t.count as usize,
+                })
+                .collect::<Vec<_>>()
+        })
+    } else {
+        None
+    };
+
+    #[allow(clippy::cast_possible_truncation)]
+    let top_mentions = if args.mentions && !show_content {
+        content.as_ref().map(|c| {
+            c.top_mentions
+                .iter()
+                .map(|t| CountItem {
+                    value: t.tag.clone(),
+                    count: t.count as usize,
+                })
+                .collect::<Vec<_>>()
+        })
+    } else {
+        None
+    };
+
+    let needs_extended =
+        show_temporal || show_engagement || show_content || args.hashtags || args.mentions;
+
+    // For backward compatibility with JSON output, include monthly breakdown in detailed
+    let detailed = if args.detailed && temporal.is_some() {
+        temporal
+            .as_ref()
+            .map(|t| build_monthly_counts_from_daily(&t.daily_counts))
+    } else {
+        None
+    };
 
     match cli.format {
         OutputFormat::Json | OutputFormat::JsonPretty => {
@@ -880,7 +893,20 @@ fn cmd_stats(cli: &Cli, args: &cli::StatsArgs) -> Result<()> {
             }
         }
         _ => {
-            println!("{}", "Archive Statistics".bold().cyan());
+            // Show fancy banner for --detailed mode
+            if args.detailed {
+                println!("{}", "═".repeat(65).bright_blue());
+                println!(
+                    "{}",
+                    "              ARCHIVE ANALYTICS DASHBOARD              "
+                        .bold()
+                        .on_bright_blue()
+                );
+                println!("{}", "═".repeat(65).bright_blue());
+                println!();
+            }
+
+            println!("{}", "📊 Overview".bold().cyan());
             println!("{}", "─".repeat(40));
             println!(
                 "  {:<20} {:>10}",
@@ -935,7 +961,7 @@ fn cmd_stats(cli: &Cli, args: &cli::StatsArgs) -> Result<()> {
             if let Some(detailed) = detailed {
                 if !detailed.is_empty() {
                     println!();
-                    println!("{}", "Tweets by Month".bold().cyan());
+                    println!("{}", "📅 Tweets by Month".bold().cyan());
                     println!("{}", "─".repeat(40));
                     for entry in detailed {
                         println!(
@@ -951,7 +977,7 @@ fn cmd_stats(cli: &Cli, args: &cli::StatsArgs) -> Result<()> {
             if let Some(items) = top_hashtags {
                 if !items.is_empty() {
                     println!();
-                    println!("{}", "Top Hashtags".bold().cyan());
+                    println!("{}", "#️⃣ Top Hashtags".bold().cyan());
                     println!("{}", "─".repeat(40));
                     for item in items {
                         println!(
@@ -966,7 +992,7 @@ fn cmd_stats(cli: &Cli, args: &cli::StatsArgs) -> Result<()> {
             if let Some(items) = top_mentions {
                 if !items.is_empty() {
                     println!();
-                    println!("{}", "Top Mentions".bold().cyan());
+                    println!("{}", "👤 Top Mentions".bold().cyan());
                     println!("{}", "─".repeat(40));
                     for item in items {
                         println!(
@@ -981,7 +1007,7 @@ fn cmd_stats(cli: &Cli, args: &cli::StatsArgs) -> Result<()> {
             #[allow(clippy::cast_possible_wrap)]
             if let Some(ref temporal) = temporal {
                 println!();
-                println!("{}", "Temporal Analytics".bold().cyan());
+                println!("{}", "📅 Temporal Patterns".bold().cyan());
                 println!("{}", "─".repeat(60));
 
                 // Activity sparkline
@@ -1060,7 +1086,7 @@ fn cmd_stats(cli: &Cli, args: &cli::StatsArgs) -> Result<()> {
             #[allow(clippy::cast_possible_wrap)]
             if let Some(ref engagement) = engagement {
                 println!();
-                println!("{}", "Engagement Analytics".bold().cyan());
+                println!("{}", "📈 Engagement Analytics".bold().cyan());
                 println!("{}", "─".repeat(60));
 
                 // Summary metrics
@@ -1113,7 +1139,7 @@ fn cmd_stats(cli: &Cli, args: &cli::StatsArgs) -> Result<()> {
             #[allow(clippy::cast_possible_wrap)]
             if let Some(ref content) = content {
                 println!();
-                println!("{}", "Content Analysis".bold().cyan());
+                println!("{}", "📝 Content Analysis".bold().cyan());
                 println!("{}", "─".repeat(60));
 
                 // Content type ratios
@@ -1209,43 +1235,22 @@ struct CountItem {
     count: usize,
 }
 
-fn build_monthly_counts(tweets: &[Tweet]) -> Vec<StatsPeriod> {
+/// Build monthly counts from pre-computed daily counts (efficient SQL-based approach).
+#[allow(clippy::cast_possible_truncation)]
+fn build_monthly_counts_from_daily(
+    daily_counts: &[stats_analytics::DailyCount],
+) -> Vec<StatsPeriod> {
     use std::collections::BTreeMap;
 
     let mut counts: BTreeMap<(i32, u32), usize> = BTreeMap::new();
-    for tweet in tweets {
-        let date = tweet.created_at;
-        let key = (date.year(), date.month());
-        *counts.entry(key).or_insert(0) += 1;
+    for day in daily_counts {
+        let key = (day.date.year(), day.date.month());
+        *counts.entry(key).or_insert(0) += day.count as usize;
     }
 
     counts
         .into_iter()
         .map(|((year, month), count)| StatsPeriod { year, month, count })
-        .collect()
-}
-
-fn top_counts<I>(items: I, limit: usize) -> Vec<CountItem>
-where
-    I: Iterator<Item = String>,
-{
-    if limit == 0 {
-        return Vec::new();
-    }
-    let mut counts: HashMap<String, usize> = HashMap::new();
-    for item in items {
-        if item.is_empty() {
-            continue;
-        }
-        *counts.entry(item).or_insert(0) += 1;
-    }
-
-    let mut sorted: Vec<(String, usize)> = counts.into_iter().collect();
-    sorted.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-    sorted
-        .into_iter()
-        .take(limit)
-        .map(|(value, count)| CountItem { value, count })
         .collect()
 }
 

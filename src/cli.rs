@@ -158,15 +158,15 @@ pub struct SearchArgs {
 #[derive(Args, Debug)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct StatsArgs {
-    /// Show detailed breakdown by month/year
+    /// Show comprehensive analytics dashboard (temporal, engagement, content)
     #[arg(long, short = 'd')]
     pub detailed: bool,
 
-    /// Include top hashtags
+    /// Show top hashtags with counts
     #[arg(long)]
     pub hashtags: bool,
 
-    /// Include top mentions
+    /// Show top mentioned users with counts
     #[arg(long)]
     pub mentions: bool,
 
@@ -178,7 +178,7 @@ pub struct StatsArgs {
     #[arg(long)]
     pub engagement: bool,
 
-    /// Show content analysis (media/link ratios, length distribution, hashtags, mentions)
+    /// Show content analysis (media/link ratios, length distribution)
     #[arg(long)]
     pub content: bool,
 
