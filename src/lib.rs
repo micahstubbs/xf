@@ -167,6 +167,27 @@ pub fn format_optional_date(value: Option<DateTime<Utc>>) -> String {
     value.map_or_else(|| "unknown".to_string(), format_relative_date)
 }
 
+/// Format a duration into a short human-friendly string.
+#[must_use]
+pub fn format_duration(duration: std::time::Duration) -> String {
+    let secs = duration.as_secs();
+    if secs == 0 {
+        let ms = duration.as_secs_f64() * 1000.0;
+        return format!("{ms:.1}ms");
+    }
+    if secs < 60 {
+        return format!("{:.2}s", duration.as_secs_f64());
+    }
+    if secs < 3600 {
+        let minutes = secs / 60;
+        let seconds = secs % 60;
+        return format!("{minutes}m {seconds:02}s");
+    }
+    let hours = secs / 3600;
+    let minutes = (secs % 3600) / 60;
+    format!("{hours}h {minutes:02}m")
+}
+
 /// Escape text for CSV by sanitizing newlines and quotes.
 #[must_use]
 pub fn csv_escape_text(text: &str) -> String {
@@ -215,10 +236,11 @@ fn format_bytes_with_unit(bytes: u64, unit: u64, suffix: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        csv_escape_text, format_bytes_i64, format_number, format_relative_date_with_base,
-        format_short_id,
+        csv_escape_text, format_bytes_i64, format_duration, format_number,
+        format_relative_date_with_base, format_short_id,
     };
     use chrono::{Duration, TimeZone, Utc};
+    use std::time::Duration as StdDuration;
 
     #[test]
     fn format_number_adds_separators() {
@@ -277,6 +299,14 @@ mod tests {
         let input = "Hello\r\n\"world\", ok";
         let escaped = csv_escape_text(input);
         assert_eq!(escaped, "Hello  \"\"world\"\", ok");
+    }
+
+    #[test]
+    fn format_duration_thresholds() {
+        assert_eq!(format_duration(StdDuration::from_millis(120)), "120.0ms");
+        assert_eq!(format_duration(StdDuration::from_millis(1500)), "1.50s");
+        assert_eq!(format_duration(StdDuration::from_secs(75)), "1m 15s");
+        assert_eq!(format_duration(StdDuration::from_secs(7260)), "2h 01m");
     }
 
     #[test]

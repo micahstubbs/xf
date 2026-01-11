@@ -13,7 +13,7 @@ use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::io::{self, IsTerminal};
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tracing::{Level, info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -27,9 +27,9 @@ use xf::{
     ArchiveParser, ArchiveStats, CONTENT_DIVIDER_WIDTH, Cli, Commands, DataType, ExportFormat,
     ExportTarget, HEADER_DIVIDER_WIDTH, ListTarget, OutputFormat, SearchEngine, SearchResult,
     SearchResultType, SearchType, SortOrder, Storage, TweetUrl, VALID_CONFIG_KEYS,
-    VALID_OUTPUT_FIELDS, csv_escape_text, find_closest_match, format_error, format_number,
-    format_number_u64, format_number_usize, format_optional_date, format_relative_date,
-    format_short_id,
+    VALID_OUTPUT_FIELDS, csv_escape_text, find_closest_match, format_duration, format_error,
+    format_number, format_number_u64, format_number_usize, format_optional_date,
+    format_relative_date, format_short_id,
 };
 
 fn main() -> Result<()> {
@@ -172,6 +172,8 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
         info!("Cleared existing data");
     }
 
+    let index_start = Instant::now();
+
     println!("{}", "Indexing X data archive...".bold().cyan());
     println!("  Archive: {}", archive_path.display());
     println!("  Database: {}", db_path.display());
@@ -209,102 +211,136 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
         Clone::clone,
     );
 
-    // Progress bar
-    let pb = ProgressBar::new(data_types.len() as u64);
-    pb.set_style(
-        ProgressStyle::default_bar()
-            .template("{spinner:.green} [{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} {msg}")
-            .unwrap()
-            .progress_chars("##-"),
-    );
+    // Progress bar (hidden when stdout is non-tty)
+    let use_progress = std::io::stdout().is_terminal();
+    let pb = if use_progress {
+        let pb = ProgressBar::new(data_types.len() as u64);
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template(
+                    "{spinner:.cyan} [{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} ETA {eta_precise} {msg}",
+                )
+                .unwrap()
+                .progress_chars("█▓▒░"),
+        );
+        pb.enable_steady_tick(Duration::from_millis(120));
+        pb
+    } else {
+        ProgressBar::hidden()
+    };
+
+    let log_line = |line: String| {
+        if use_progress {
+            pb.println(line);
+        } else {
+            println!("{line}");
+        }
+    };
 
     // Index each data type
     for data_type in &data_types {
+        let item_start = Instant::now();
         match data_type {
             DataType::Tweet => {
-                pb.set_message("Indexing tweets...");
+                pb.set_message("tweets");
                 let tweets = parser.parse_tweets()?;
                 storage.store_tweets(&tweets)?;
                 search_engine.index_tweets(&mut writer, &tweets)?;
-                pb.println(format!(
-                    "  {} {} tweets",
+                let elapsed = format_duration(item_start.elapsed());
+                log_line(format!(
+                    "  {} {} tweets {}",
                     "✓".green(),
-                    format_number_usize(tweets.len())
+                    format_number_usize(tweets.len()).bold(),
+                    format!("({elapsed})").dimmed()
                 ));
             }
             DataType::Like => {
-                pb.set_message("Indexing likes...");
+                pb.set_message("likes");
                 let likes = parser.parse_likes()?;
                 storage.store_likes(&likes)?;
                 search_engine.index_likes(&mut writer, &likes)?;
-                pb.println(format!(
-                    "  {} {} likes",
+                let elapsed = format_duration(item_start.elapsed());
+                log_line(format!(
+                    "  {} {} likes {}",
                     "✓".green(),
-                    format_number_usize(likes.len())
+                    format_number_usize(likes.len()).bold(),
+                    format!("({elapsed})").dimmed()
                 ));
             }
             DataType::Dm => {
-                pb.set_message("Indexing DMs...");
+                pb.set_message("DMs");
                 let convos = parser.parse_direct_messages()?;
                 let msg_count: usize = convos.iter().map(|c| c.messages.len()).sum();
                 storage.store_dm_conversations(&convos)?;
                 search_engine.index_dms(&mut writer, &convos)?;
-                pb.println(format!(
-                    "  {} {} DM conversations ({} messages)",
+                let elapsed = format_duration(item_start.elapsed());
+                log_line(format!(
+                    "  {} {} DM conversations ({} messages) {}",
                     "✓".green(),
-                    format_number_usize(convos.len()),
-                    format_number_usize(msg_count)
+                    format_number_usize(convos.len()).bold(),
+                    format_number_usize(msg_count).bold(),
+                    format!("({elapsed})").dimmed()
                 ));
             }
             DataType::Grok => {
-                pb.set_message("Indexing Grok messages...");
+                pb.set_message("Grok");
                 let messages = parser.parse_grok_messages()?;
                 storage.store_grok_messages(&messages)?;
                 search_engine.index_grok_messages(&mut writer, &messages)?;
-                pb.println(format!(
-                    "  {} {} Grok messages",
+                let elapsed = format_duration(item_start.elapsed());
+                log_line(format!(
+                    "  {} {} Grok messages {}",
                     "✓".green(),
-                    format_number_usize(messages.len())
+                    format_number_usize(messages.len()).bold(),
+                    format!("({elapsed})").dimmed()
                 ));
             }
             DataType::Follower => {
-                pb.set_message("Indexing followers...");
+                pb.set_message("followers");
                 let followers = parser.parse_followers()?;
                 storage.store_followers(&followers)?;
-                pb.println(format!(
-                    "  {} {} followers",
+                let elapsed = format_duration(item_start.elapsed());
+                log_line(format!(
+                    "  {} {} followers {}",
                     "✓".green(),
-                    format_number_usize(followers.len())
+                    format_number_usize(followers.len()).bold(),
+                    format!("({elapsed})").dimmed()
                 ));
             }
             DataType::Following => {
-                pb.set_message("Indexing following...");
+                pb.set_message("following");
                 let following = parser.parse_following()?;
                 storage.store_following(&following)?;
-                pb.println(format!(
-                    "  {} {} following",
+                let elapsed = format_duration(item_start.elapsed());
+                log_line(format!(
+                    "  {} {} following {}",
                     "✓".green(),
-                    format_number_usize(following.len())
+                    format_number_usize(following.len()).bold(),
+                    format!("({elapsed})").dimmed()
                 ));
             }
             DataType::Block => {
-                pb.set_message("Indexing blocks...");
+                pb.set_message("blocks");
                 let blocks = parser.parse_blocks()?;
                 storage.store_blocks(&blocks)?;
-                pb.println(format!(
-                    "  {} {} blocks",
+                let elapsed = format_duration(item_start.elapsed());
+                log_line(format!(
+                    "  {} {} blocks {}",
                     "✓".green(),
-                    format_number_usize(blocks.len())
+                    format_number_usize(blocks.len()).bold(),
+                    format!("({elapsed})").dimmed()
                 ));
             }
             DataType::Mute => {
-                pb.set_message("Indexing mutes...");
+                pb.set_message("mutes");
                 let mutes = parser.parse_mutes()?;
                 storage.store_mutes(&mutes)?;
-                pb.println(format!(
-                    "  {} {} mutes",
+                let elapsed = format_duration(item_start.elapsed());
+                log_line(format!(
+                    "  {} {} mutes {}",
                     "✓".green(),
-                    format_number_usize(mutes.len())
+                    format_number_usize(mutes.len()).bold(),
+                    format!("({elapsed})").dimmed()
                 ));
             }
             DataType::All => {
@@ -320,8 +356,14 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
     writer.commit()?;
     search_engine.reload()?;
 
+    let total_elapsed = format_duration(index_start.elapsed());
+
     println!();
-    println!("{}", "Indexing complete!".bold().green());
+    println!(
+        "{} {}",
+        "✓".green(),
+        format!("Indexing complete in {total_elapsed}").bold()
+    );
     println!(
         "  Total documents indexed: {}",
         format_number_u64(search_engine.doc_count()).bold()
@@ -554,12 +596,7 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
             }
         }
         OutputFormat::Text => {
-            // Format timing: use ms for < 1s, otherwise show as seconds
-            let timing_str = if search_elapsed.as_secs_f64() < 1.0 {
-                format!("{:.1}ms", search_elapsed.as_secs_f64() * 1000.0)
-            } else {
-                format!("{:.2}s", search_elapsed.as_secs_f64())
-            };
+            let timing_str = format_duration(search_elapsed);
 
             println!(
                 "Found {} results for \"{}\" in {}\n",
@@ -751,7 +788,13 @@ fn print_result(num: usize, result: &SearchResult) {
 /// Convert HTML-style highlights (from Tantivy) to ANSI colored text
 fn html_highlights_to_ansi(html: &str) -> String {
     // Tantivy uses <b>...</b> for highlighting
-    // We'll convert these to ANSI bold + yellow
+    // We'll convert these to ANSI bold + yellow (or strip tags if color is disabled)
+    if !control::SHOULD_COLORIZE.should_colorize()
+        || no_color_env_set()
+        || !std::io::stdout().is_terminal()
+    {
+        return html.replace("<b>", "").replace("</b>", "");
+    }
     let mut result = html.to_string();
 
     // Replace opening tags with ANSI escape for bold yellow
