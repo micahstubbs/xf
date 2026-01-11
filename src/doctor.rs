@@ -760,9 +760,8 @@ mod tests {
 
     /// Create a broken archive with missing required structure.
     fn create_broken_archive() -> TempDir {
-        let dir = TempDir::new().unwrap();
         // No data directory at all
-        dir
+        TempDir::new().unwrap()
     }
 
     /// Create a minimal Tweet for testing.
@@ -956,6 +955,7 @@ mod tests {
     // ======================== Latency Stats Tests ========================
 
     #[test]
+    #[allow(clippy::float_cmp)] // Exact values expected in test
     fn test_latency_stats_from_durations() {
         let mut durations = vec![10.0, 20.0, 30.0, 40.0, 50.0];
         let stats = LatencyStats::from_durations(&mut durations);
@@ -967,6 +967,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::float_cmp)] // Exact values expected in test
     fn test_latency_stats_empty() {
         let mut durations: Vec<f64> = vec![];
         let stats = LatencyStats::from_durations(&mut durations);
