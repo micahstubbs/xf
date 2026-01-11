@@ -85,6 +85,9 @@ pub enum Commands {
 
     /// Generate shell completions
     Completions(CompletionsArgs),
+
+    /// Check archive, database, and index health
+    Doctor(DoctorArgs),
 }
 
 #[derive(Args, Debug)]
@@ -130,11 +133,11 @@ pub struct SearchArgs {
     #[arg(long, short = 's', default_value = "relevance")]
     pub sort: SortOrder,
 
-    /// Show only tweets from this date onwards (YYYY-MM-DD)
+    /// Show only tweets from this date onwards (e.g., 2023-01-01, "last month")
     #[arg(long)]
     pub since: Option<String>,
 
-    /// Show only tweets until this date (YYYY-MM-DD)
+    /// Show only tweets until this date (e.g., 2023-12-31, "yesterday")
     #[arg(long)]
     pub until: Option<String>,
 
@@ -249,6 +252,17 @@ pub struct ConfigArgs {
 pub struct CompletionsArgs {
     /// Shell to generate completions for
     pub shell: clap_complete::Shell,
+}
+
+#[derive(Args, Debug)]
+pub struct DoctorArgs {
+    /// Path to the X data archive directory (overrides config)
+    #[arg(long)]
+    pub archive: Option<PathBuf>,
+
+    /// Apply safe, idempotent repairs when issues are found
+    #[arg(long)]
+    pub fix: bool,
 }
 
 #[derive(ValueEnum, Clone, Debug, PartialEq, Eq)]
