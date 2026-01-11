@@ -1040,6 +1040,7 @@ mod tests {
             messages: vec![
                 DirectMessage {
                     id: "dm1".to_string(),
+                    conversation_id: "conv1".to_string(),
                     sender_id: "user1".to_string(),
                     recipient_id: "user2".to_string(),
                     text: "Hello from direct message".to_string(),
@@ -1049,6 +1050,7 @@ mod tests {
                 },
                 DirectMessage {
                     id: "dm2".to_string(),
+                    conversation_id: "conv1".to_string(),
                     sender_id: "user2".to_string(),
                     recipient_id: "user1".to_string(),
                     text: "Reply to direct message".to_string(),

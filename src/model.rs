@@ -80,6 +80,7 @@ pub struct DmConversationSummary {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DirectMessage {
     pub id: String,
+    pub conversation_id: String,
     pub sender_id: String,
     pub recipient_id: String,
     pub text: String,

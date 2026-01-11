@@ -263,6 +263,7 @@ impl ArchiveParser {
             .iter()
             .filter_map(|item| {
                 let conv = &item["dmConversation"];
+                let conversation_id = conv["conversationId"].as_str()?.to_string();
                 let messages: Vec<DirectMessage> = conv["messages"]
                     .as_array()
                     .unwrap_or(&vec![])
@@ -271,6 +272,7 @@ impl ArchiveParser {
                         let mc = &msg["messageCreate"];
                         Some(DirectMessage {
                             id: mc["id"].as_str()?.to_string(),
+                            conversation_id: conversation_id.clone(),
                             sender_id: mc["senderId"].as_str()?.to_string(),
                             recipient_id: mc["recipientId"].as_str()?.to_string(),
                             text: mc["text"].as_str()?.to_string(),
@@ -287,7 +289,7 @@ impl ArchiveParser {
                     .collect();
 
                 Some(DmConversation {
-                    conversation_id: conv["conversationId"].as_str()?.to_string(),
+                    conversation_id,
                     messages,
                 })
             })

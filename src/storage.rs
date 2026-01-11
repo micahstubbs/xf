@@ -1152,6 +1152,7 @@ impl Storage {
             .query_map(params![query, limit], |row| {
                 Ok(DirectMessage {
                     id: row.get(0)?,
+                    conversation_id: row.get(1)?,
                     sender_id: row.get(2)?,
                     recipient_id: row.get(3)?,
                     text: row.get(4)?,
@@ -1174,7 +1175,7 @@ impl Storage {
     pub fn get_conversation_messages(&self, conversation_id: &str) -> Result<Vec<DirectMessage>> {
         let mut stmt = self.conn.prepare(
             r"
-            SELECT id, sender_id, recipient_id, text, created_at, urls_json, media_urls_json
+            SELECT id, conversation_id, sender_id, recipient_id, text, created_at, urls_json, media_urls_json
             FROM direct_messages
             WHERE conversation_id = ?
             ORDER BY created_at ASC, id ASC
@@ -1185,12 +1186,13 @@ impl Storage {
             .query_map(params![conversation_id], |row| {
                 Ok(DirectMessage {
                     id: row.get(0)?,
-                    sender_id: row.get(1)?,
-                    recipient_id: row.get(2)?,
-                    text: row.get(3)?,
-                    created_at: parse_rfc3339_or_epoch(row.get::<_, Option<String>>(4)?),
-                    urls: serde_json::from_str(&row.get::<_, String>(5)?).unwrap_or_default(),
-                    media_urls: serde_json::from_str(&row.get::<_, String>(6)?).unwrap_or_default(),
+                    conversation_id: row.get(1)?,
+                    sender_id: row.get(2)?,
+                    recipient_id: row.get(3)?,
+                    text: row.get(4)?,
+                    created_at: parse_rfc3339_or_epoch(row.get::<_, Option<String>>(5)?),
+                    urls: serde_json::from_str(&row.get::<_, String>(6)?).unwrap_or_default(),
+                    media_urls: serde_json::from_str(&row.get::<_, String>(7)?).unwrap_or_default(),
                 })
             })?
             .filter_map(std::result::Result::ok)
@@ -1471,6 +1473,7 @@ impl Storage {
             .query_map([], |row| {
                 Ok(DirectMessage {
                     id: row.get(0)?,
+                    conversation_id: row.get(1)?,
                     sender_id: row.get(2)?,
                     recipient_id: row.get(3)?,
                     text: row.get(4)?,
@@ -1716,6 +1719,7 @@ mod tests {
     fn create_test_dm(id: &str, text: &str) -> DirectMessage {
         DirectMessage {
             id: id.to_string(),
+            conversation_id: "test_conv".to_string(),
             sender_id: "user1".to_string(),
             recipient_id: "user2".to_string(),
             text: text.to_string(),
@@ -1985,6 +1989,7 @@ mod tests {
             messages: vec![
                 DirectMessage {
                     id: "dm2".to_string(),
+                    conversation_id: "conv1".to_string(),
                     sender_id: "user2".to_string(),
                     recipient_id: "user1".to_string(),
                     text: "Second message".to_string(),
@@ -1994,6 +1999,7 @@ mod tests {
                 },
                 DirectMessage {
                     id: "dm1".to_string(),
+                    conversation_id: "conv1".to_string(),
                     sender_id: "user1".to_string(),
                     recipient_id: "user2".to_string(),
                     text: "First message".to_string(),
@@ -2026,6 +2032,7 @@ mod tests {
             messages: vec![
                 DirectMessage {
                     id: "dm1".to_string(),
+                    conversation_id: "conv_summary".to_string(),
                     sender_id: "user2".to_string(),
                     recipient_id: "user1".to_string(),
                     text: "Second message".to_string(),
@@ -2035,6 +2042,7 @@ mod tests {
                 },
                 DirectMessage {
                     id: "dm0".to_string(),
+                    conversation_id: "conv_summary".to_string(),
                     sender_id: "user1".to_string(),
                     recipient_id: "user2".to_string(),
                     text: "First message".to_string(),
@@ -2074,6 +2082,7 @@ mod tests {
             conversation_id: "single_conv".to_string(),
             messages: vec![DirectMessage {
                 id: "dm_only".to_string(),
+                conversation_id: "single_conv".to_string(),
                 sender_id: "alice".to_string(),
                 recipient_id: "bob".to_string(),
                 text: "Single message".to_string(),
@@ -2103,6 +2112,7 @@ mod tests {
             conversation_id: "rich_conv".to_string(),
             messages: vec![DirectMessage {
                 id: "dm_rich".to_string(),
+                conversation_id: "rich_conv".to_string(),
                 sender_id: "user1".to_string(),
                 recipient_id: "user2".to_string(),
                 text: "Check out this link!".to_string(),
@@ -2153,6 +2163,7 @@ mod tests {
             messages: vec![
                 DirectMessage {
                     id: "dm_z".to_string(),
+                    conversation_id: "tie_conv".to_string(),
                     sender_id: "user1".to_string(),
                     recipient_id: "user2".to_string(),
                     text: "Message Z".to_string(),
@@ -2162,6 +2173,7 @@ mod tests {
                 },
                 DirectMessage {
                     id: "dm_a".to_string(),
+                    conversation_id: "tie_conv".to_string(),
                     sender_id: "user2".to_string(),
                     recipient_id: "user1".to_string(),
                     text: "Message A".to_string(),
