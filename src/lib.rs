@@ -27,7 +27,10 @@ pub mod stats_analytics;
 pub mod storage;
 
 pub use cli::*;
-pub use error::{Result, ResultExt, XfError};
+pub use error::{
+    Result, ResultExt, XfError, find_closest_match, format_did_you_mean, format_error,
+    format_unknown_value_error, VALID_CONFIG_KEYS, VALID_DATA_TYPES, VALID_OUTPUT_FIELDS,
+};
 pub use model::*;
 pub use parser::ArchiveParser;
 pub use search::SearchEngine;

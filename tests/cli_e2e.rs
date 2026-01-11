@@ -790,7 +790,7 @@ fn test_search_missing_index() {
         .arg(&index_path)
         .assert()
         .failure()
-        .stderr(predicate::str::contains("No search index found"));
+        .stderr(predicate::str::contains("Search index missing"));
 
     test_log!(
         "test_search_missing_index completed in {:?}",
@@ -1142,10 +1142,7 @@ fn test_shell_requires_database() {
         .arg(&index_path)
         .assert()
         .failure()
-        .stderr(
-            predicate::str::contains("Database not found")
-                .or(predicate::str::contains("not found")),
-        );
+        .stderr(predicate::str::contains("No archive indexed yet"));
 
     test_log!(
         "test_shell_requires_database completed in {:?}",
@@ -1174,10 +1171,7 @@ fn test_shell_requires_index() {
         .arg(&index_path)
         .assert()
         .failure()
-        .stderr(
-            predicate::str::contains("Search index not found")
-                .or(predicate::str::contains("not found")),
-        );
+        .stderr(predicate::str::contains("Search index missing"));
 
     test_log!(
         "test_shell_requires_index completed in {:?}",

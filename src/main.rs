@@ -26,7 +26,8 @@ use xf::stats_analytics::{self, ContentStats, EngagementStats, TemporalStats};
 use xf::{
     ArchiveParser, ArchiveStats, CONTENT_DIVIDER_WIDTH, Cli, Commands, DataType, ExportFormat,
     ExportTarget, HEADER_DIVIDER_WIDTH, ListTarget, OutputFormat, SearchEngine, SearchResult,
-    SearchResultType, SortOrder, Storage, TweetUrl,
+    SearchResultType, SortOrder, Storage, TweetUrl, find_closest_match, format_error,
+    VALID_CONFIG_KEYS, VALID_OUTPUT_FIELDS,
 };
 
 fn main() -> Result<()> {
@@ -108,14 +109,35 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
 
     // Validate archive path
     if !archive_path.exists() {
-        anyhow::bail!("Archive path does not exist: {}", archive_path.display());
+        anyhow::bail!(
+            "{}",
+            format_error(
+                "Archive not found",
+                &format!("The path '{}' does not exist.", archive_path.display()),
+                &[
+                    "Check the path for typos",
+                    "Ensure the archive is extracted (not still a .zip file)",
+                    "Download your data from x.com/settings/download_your_data",
+                ],
+            )
+        );
     }
 
     let data_path = archive_path.join("data");
     if !data_path.exists() {
         anyhow::bail!(
-            "Invalid archive: no 'data' directory found at {}",
-            archive_path.display()
+            "{}",
+            format_error(
+                "Invalid archive structure",
+                &format!(
+                    "No 'data' directory found at '{}'.\n   This doesn't look like a valid X data archive.",
+                    archive_path.display()
+                ),
+                &[
+                    "Ensure you're pointing to the extracted archive root",
+                    "The archive should contain a 'data' folder with .js files",
+                ],
+            )
         );
     }
 
@@ -291,22 +313,42 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
 
     if !db_path.exists() {
         anyhow::bail!(
-            "No indexed archive found. Run 'xf index <archive_path>' first.\n\
-             Expected database at: {}",
-            db_path.display()
+            "{}",
+            format_error(
+                "No archive indexed yet",
+                "Before searching, you need to index your X data archive.",
+                &[
+                    "1. Download your data from x.com/settings/download_your_data",
+                    "2. Run: xf index ~/Downloads/twitter-archive",
+                    "Then try your search again!",
+                ],
+            )
         );
     }
 
     if !index_path.join("meta.json").exists() {
         anyhow::bail!(
-            "No search index found. Run 'xf index <archive_path>' first.\n\
-             Expected index at: {}",
-            index_path.display()
+            "{}",
+            format_error(
+                "Search index missing",
+                &format!("Database exists but search index not found at '{}'.", index_path.display()),
+                &["Run 'xf index <archive_path>' to rebuild the search index"],
+            )
         );
     }
 
     if args.replies_only && args.no_replies {
-        anyhow::bail!("Cannot use --replies-only and --no-replies together.");
+        anyhow::bail!(
+            "{}",
+            format_error(
+                "Conflicting options",
+                "--replies-only and --no-replies cannot be used together.\n   These flags are mutually exclusive.",
+                &[
+                    "--replies-only    Show only replies",
+                    "--no-replies      Exclude replies from results",
+                ],
+            )
+        );
     }
 
     if args.context {
@@ -823,18 +865,26 @@ fn apply_search_sort(results: &mut [SearchResult], sort: &SortOrder) {
 }
 
 fn validate_output_fields(fields: &[String]) -> Result<()> {
-    const ALLOWED: [&str; 7] = [
-        "result_type",
-        "id",
-        "text",
-        "created_at",
-        "score",
-        "highlights",
-        "metadata",
-    ];
     for field in fields {
-        if !ALLOWED.contains(&field.as_str()) {
-            anyhow::bail!("Unknown field for --fields: {field}");
+        if !VALID_OUTPUT_FIELDS.contains(&field.as_str()) {
+            let mut suggestions = Vec::new();
+
+            // Check for close matches (typos)
+            if let Some(closest) = find_closest_match(field, VALID_OUTPUT_FIELDS, None) {
+                suggestions.push(format!("Did you mean '{closest}'?"));
+            }
+
+            suggestions.push(format!("Valid fields: {}", VALID_OUTPUT_FIELDS.join(", ")));
+
+            let suggestion_refs: Vec<&str> = suggestions.iter().map(String::as_str).collect();
+            anyhow::bail!(
+                "{}",
+                format_error(
+                    &format!("Unknown field: '{field}'"),
+                    "",
+                    &suggestion_refs,
+                )
+            );
         }
     }
     Ok(())
@@ -866,7 +916,14 @@ fn cmd_stats(cli: &Cli, args: &cli::StatsArgs) -> Result<()> {
     let db_path = get_db_path(cli);
 
     if !db_path.exists() {
-        anyhow::bail!("No indexed archive found. Run 'xf index <archive_path>' first.");
+        anyhow::bail!(
+            "{}",
+            format_error(
+                "No archive indexed yet",
+                "You need to index your X data archive first.",
+                &["Run: xf index ~/Downloads/twitter-archive"],
+            )
+        );
     }
 
     let storage = Storage::open(&db_path)?;
@@ -1486,7 +1543,14 @@ fn cmd_list(cli: &Cli, args: &cli::ListArgs) -> Result<()> {
     }
 
     if !db_path.exists() {
-        anyhow::bail!("No indexed archive found. Run 'xf index <archive_path>' first.");
+        anyhow::bail!(
+            "{}",
+            format_error(
+                "No archive indexed yet",
+                "You need to index your X data archive first.",
+                &["Run: xf index ~/Downloads/twitter-archive"],
+            )
+        );
     }
 
     let storage = Storage::open(&db_path)?;
@@ -1647,7 +1711,14 @@ fn cmd_export(cli: &Cli, args: &cli::ExportArgs) -> Result<()> {
     let db_path = get_db_path(cli);
 
     if !db_path.exists() {
-        anyhow::bail!("No indexed archive found. Run 'xf index <archive_path>' first.");
+        anyhow::bail!(
+            "{}",
+            format_error(
+                "No archive indexed yet",
+                "You need to index your X data archive first.",
+                &["Run: xf index ~/Downloads/twitter-archive"],
+            )
+        );
     }
 
     let storage = Storage::open(&db_path)?;
@@ -1956,7 +2027,24 @@ fn apply_config_set(config: &mut Config, raw: &str) -> Result<()> {
             config.output.timings = parse_bool(value, key)?;
         }
         _ => {
-            anyhow::bail!("Unknown config key: {key}");
+            let mut suggestions = Vec::new();
+
+            // Check for close matches (typos)
+            if let Some(closest) = find_closest_match(key, VALID_CONFIG_KEYS, Some(3)) {
+                suggestions.push(format!("Did you mean '{closest}'?"));
+            }
+
+            suggestions.push("Run 'xf config --show' to see current configuration".to_string());
+
+            let suggestion_refs: Vec<&str> = suggestions.iter().map(String::as_str).collect();
+            anyhow::bail!(
+                "{}",
+                format_error(
+                    &format!("Unknown config key: '{key}'"),
+                    "",
+                    &suggestion_refs,
+                )
+            );
         }
     }
 
@@ -2317,16 +2405,28 @@ fn cmd_shell(cli: &Cli, args: &cli::ShellArgs) -> Result<()> {
     // Check that DB exists
     if !db_path.exists() {
         anyhow::bail!(
-            "Database not found at {}. Run 'xf index <archive>' first.",
-            db_path.display()
+            "{}",
+            format_error(
+                "No archive indexed yet",
+                "The interactive shell requires an indexed archive.",
+                &[
+                    "1. Download your data from x.com/settings/download_your_data",
+                    "2. Run: xf index ~/Downloads/twitter-archive",
+                    "3. Then run: xf shell",
+                ],
+            )
         );
     }
 
     // Check that index exists
     if !index_path.exists() {
         anyhow::bail!(
-            "Search index not found at {}. Run 'xf index <archive>' first.",
-            index_path.display()
+            "{}",
+            format_error(
+                "Search index missing",
+                &format!("Database exists but search index not found at '{}'.", index_path.display()),
+                &["Run 'xf index <archive_path>' to rebuild the search index"],
+            )
         );
     }
 
