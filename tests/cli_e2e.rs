@@ -539,6 +539,93 @@ fn test_search_type_filter_likes() {
     );
 }
 
+#[test]
+fn test_search_with_named_period_filters() {
+    test_log!("Starting test_search_with_named_period_filters");
+    let start = Instant::now();
+
+    let (_archive_temp, _output_dir, db_path, index_path) = create_indexed_archive();
+
+    test_log!("Searching with named period filters");
+
+    let mut cmd = xf_cmd();
+    cmd.arg("search")
+        .arg("rust")
+        .arg("--since")
+        .arg("Jan 2025")
+        .arg("--until")
+        .arg("Jan 2025")
+        .arg("--db")
+        .arg(&db_path)
+        .arg("--index")
+        .arg(&index_path)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Rust").or(predicate::str::contains("rust")));
+
+    test_log!(
+        "test_search_with_named_period_filters completed in {:?}",
+        start.elapsed()
+    );
+}
+
+#[test]
+fn test_search_verbose_date_parse_output() {
+    test_log!("Starting test_search_verbose_date_parse_output");
+    let start = Instant::now();
+
+    let (_archive_temp, _output_dir, db_path, index_path) = create_indexed_archive();
+
+    test_log!("Searching with verbose date parsing output");
+
+    let mut cmd = xf_cmd();
+    cmd.arg("search")
+        .arg("rust")
+        .arg("--since")
+        .arg("2025-01-09")
+        .arg("--verbose")
+        .arg("--db")
+        .arg(&db_path)
+        .arg("--index")
+        .arg(&index_path)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Parsed --since '2025-01-09' as"));
+
+    test_log!(
+        "test_search_verbose_date_parse_output completed in {:?}",
+        start.elapsed()
+    );
+}
+
+#[test]
+fn test_search_invalid_date_expression() {
+    test_log!("Starting test_search_invalid_date_expression");
+    let start = Instant::now();
+
+    let (_archive_temp, _output_dir, db_path, index_path) = create_indexed_archive();
+
+    test_log!("Searching with invalid date expression");
+
+    let mut cmd = xf_cmd();
+    cmd.arg("search")
+        .arg("rust")
+        .arg("--since")
+        .arg("notadate")
+        .arg("--db")
+        .arg(&db_path)
+        .arg("--index")
+        .arg(&index_path)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("could not be parsed"));
+
+    test_log!(
+        "test_search_invalid_date_expression completed in {:?}",
+        start.elapsed()
+    );
+}
+
 // =============================================================================
 // Stats Command Tests
 // =============================================================================
@@ -822,4 +909,174 @@ fn test_search_performance_basic() {
         "test_search_performance_basic completed in {:?}",
         start.elapsed()
     );
+}
+
+// =============================================================================
+// Doctor Command Tests (xf-11.4.6)
+// =============================================================================
+
+#[test]
+fn test_doctor_with_valid_archive() {
+    test_log!("Starting test_doctor_with_valid_archive");
+    let start = Instant::now();
+
+    let (_archive_temp, archive_path) = create_minimal_archive();
+    let output_dir = TempDir::new().expect("Failed to create output dir");
+    let db_path = output_dir.path().join("test.db");
+    let index_path = output_dir.path().join("test_index");
+
+    // First index the archive
+    let mut cmd = xf_cmd();
+    cmd.arg("index")
+        .arg(&archive_path)
+        .arg("--db")
+        .arg(&db_path)
+        .arg("--index")
+        .arg(&index_path)
+        .assert()
+        .success();
+
+    // Then run doctor with archive path
+    let mut cmd = xf_cmd();
+    cmd.arg("doctor")
+        .arg("--archive")
+        .arg(&archive_path)
+        .arg("--db")
+        .arg(&db_path)
+        .arg("--index")
+        .arg(&index_path)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Archive").or(predicate::str::contains("passed")));
+
+    test_log!(
+        "test_doctor_with_valid_archive completed in {:?}",
+        start.elapsed()
+    );
+}
+
+#[test]
+fn test_doctor_json_output() {
+    test_log!("Starting test_doctor_json_output");
+    let start = Instant::now();
+
+    let (_archive_temp, archive_path) = create_minimal_archive();
+    let output_dir = TempDir::new().expect("Failed to create output dir");
+    let db_path = output_dir.path().join("test.db");
+    let index_path = output_dir.path().join("test_index");
+
+    // First index the archive
+    let mut cmd = xf_cmd();
+    cmd.arg("index")
+        .arg(&archive_path)
+        .arg("--db")
+        .arg(&db_path)
+        .arg("--index")
+        .arg(&index_path)
+        .assert()
+        .success();
+
+    // Run doctor with JSON output (use --quiet to suppress info logs)
+    let mut cmd = xf_cmd();
+    let output = cmd
+        .arg("--quiet") // Suppress info logs that could pollute JSON output
+        .arg("doctor")
+        .arg("--archive")
+        .arg(&archive_path)
+        .arg("--db")
+        .arg(&db_path)
+        .arg("--index")
+        .arg(&index_path)
+        .arg("--format")
+        .arg("json")
+        .output()
+        .expect("Failed to run command");
+
+    assert!(output.status.success(), "Doctor command should succeed");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Validate JSON structure
+    let json: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("Output should be valid JSON. Error: {e}, Output: {stdout}"));
+
+    // Check expected fields in JSON output
+    assert!(json.get("checks").is_some(), "Should have 'checks' field");
+    assert!(json.get("summary").is_some(), "Should have 'summary' field");
+    assert!(
+        json.get("runtime_ms").is_some(),
+        "Should have 'runtime_ms' field"
+    );
+
+    test_log!("test_doctor_json_output completed in {:?}", start.elapsed());
+}
+
+#[test]
+fn test_doctor_without_archive() {
+    test_log!("Starting test_doctor_without_archive");
+    let start = Instant::now();
+
+    let output_dir = TempDir::new().expect("Failed to create output dir");
+    let db_path = output_dir.path().join("nonexistent.db");
+    let index_path = output_dir.path().join("nonexistent_index");
+
+    // Run doctor without archive or database - should warn but not crash
+    let mut cmd = xf_cmd();
+    cmd.arg("doctor")
+        .arg("--db")
+        .arg(&db_path)
+        .arg("--index")
+        .arg(&index_path)
+        .assert()
+        .success() // Should succeed even with warnings
+        .stdout(predicate::str::contains("warning").or(predicate::str::contains("Warning")));
+
+    test_log!(
+        "test_doctor_without_archive completed in {:?}",
+        start.elapsed()
+    );
+}
+
+#[test]
+fn test_doctor_performance_check() {
+    test_log!("Starting test_doctor_performance_check");
+    let start = Instant::now();
+
+    let (_archive_temp, archive_path) = create_minimal_archive();
+    let output_dir = TempDir::new().expect("Failed to create output dir");
+    let db_path = output_dir.path().join("test.db");
+    let index_path = output_dir.path().join("test_index");
+
+    // Index first
+    let mut cmd = xf_cmd();
+    cmd.arg("index")
+        .arg(&archive_path)
+        .arg("--db")
+        .arg(&db_path)
+        .arg("--index")
+        .arg(&index_path)
+        .assert()
+        .success();
+
+    // Run doctor and check performance benchmarks are included
+    let mut cmd = xf_cmd();
+    cmd.arg("doctor")
+        .arg("--archive")
+        .arg(&archive_path)
+        .arg("--db")
+        .arg(&db_path)
+        .arg("--index")
+        .arg(&index_path)
+        .assert()
+        .success()
+        // Should include performance checks
+        .stdout(predicate::str::contains("Performance").or(predicate::str::contains("Latency")));
+
+    // Doctor should complete reasonably fast
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed.as_secs() < 30,
+        "Doctor command took too long: {elapsed:?}"
+    );
+
+    test_log!("test_doctor_performance_check completed in {:?}", elapsed);
 }

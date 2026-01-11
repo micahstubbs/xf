@@ -732,3 +732,305 @@ pub fn run_performance_benchmarks(
 
     checks
 }
+
+// ============================================================================
+// Tests (xf-11.4.6)
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+    use tempfile::TempDir;
+
+    // ======================== Helper Functions ========================
+
+    /// Create a minimal valid archive structure for testing.
+    fn create_test_archive(tweets: &str) -> TempDir {
+        let dir = TempDir::new().unwrap();
+        let data_dir = dir.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+
+        // Write tweets.js with JS wrapper
+        let tweets_content = format!("window.YTD.tweets.part0 = {tweets}");
+        std::fs::write(data_dir.join("tweets.js"), tweets_content).unwrap();
+
+        dir
+    }
+
+    /// Create a broken archive with missing required structure.
+    fn create_broken_archive() -> TempDir {
+        let dir = TempDir::new().unwrap();
+        // No data directory at all
+        dir
+    }
+
+    /// Create a minimal Tweet for testing.
+    fn make_tweet(id: &str, text: &str, created_at: chrono::DateTime<Utc>) -> crate::Tweet {
+        crate::Tweet {
+            id: id.into(),
+            created_at,
+            full_text: text.into(),
+            source: None,
+            favorite_count: 0,
+            retweet_count: 0,
+            lang: None,
+            in_reply_to_status_id: None,
+            in_reply_to_user_id: None,
+            in_reply_to_screen_name: None,
+            is_retweet: false,
+            hashtags: Vec::new(),
+            user_mentions: Vec::new(),
+            urls: Vec::new(),
+            media: Vec::new(),
+        }
+    }
+
+    // ======================== File Presence Tests ========================
+
+    #[test]
+    fn test_check_required_files_valid() {
+        let archive = create_test_archive("[]");
+        let checks = check_required_files(archive.path()).unwrap();
+
+        // Should have at least one check
+        assert!(!checks.is_empty());
+
+        // No errors when tweets.js exists
+        let errors: Vec<_> = checks
+            .iter()
+            .filter(|c| c.status == CheckStatus::Error)
+            .collect();
+        assert!(errors.is_empty(), "Expected no errors, got: {errors:?}");
+    }
+
+    #[test]
+    fn test_check_required_files_missing_tweets() {
+        let archive = create_broken_archive();
+        std::fs::create_dir_all(archive.path().join("data")).unwrap();
+        // data/ exists but no tweets.js
+
+        let checks = check_required_files(archive.path()).unwrap();
+
+        // Should have error for missing tweets
+        let tweet_error = checks
+            .iter()
+            .find(|c| c.name == "Tweets data" && c.status == CheckStatus::Error);
+        assert!(
+            tweet_error.is_some(),
+            "Expected error for missing tweets data"
+        );
+    }
+
+    #[test]
+    fn test_check_required_files_with_parts() {
+        let dir = TempDir::new().unwrap();
+        let data_dir = dir.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+
+        // Create tweet parts instead of single file
+        std::fs::write(
+            data_dir.join("tweets-part1.js"),
+            "window.YTD.tweets.part1 = []",
+        )
+        .unwrap();
+        std::fs::write(
+            data_dir.join("tweets-part2.js"),
+            "window.YTD.tweets.part2 = []",
+        )
+        .unwrap();
+
+        let checks = check_required_files(dir.path()).unwrap();
+
+        // No error for tweets - parts count as valid
+        let tweet_error = checks
+            .iter()
+            .find(|c| c.name == "Tweets data" && c.status == CheckStatus::Error);
+        assert!(tweet_error.is_none(), "Should accept tweet parts");
+    }
+
+    // ======================== JSON Validation Tests ========================
+
+    #[test]
+    fn test_check_json_structure_valid() {
+        let tweets = r#"[{"tweet": {"id": "123", "full_text": "Hello"}}]"#;
+        let archive = create_test_archive(tweets);
+
+        let checks = check_json_structure(archive.path()).unwrap();
+
+        let parse_check = checks.iter().find(|c| c.name.contains("Parse: Tweets"));
+        assert!(parse_check.is_some(), "Should have tweets parse check");
+        assert_eq!(parse_check.unwrap().status, CheckStatus::Pass);
+    }
+
+    #[test]
+    fn test_check_json_structure_invalid() {
+        let archive = create_test_archive("not valid json at all");
+
+        let checks = check_json_structure(archive.path()).unwrap();
+
+        // Should have error for invalid JSON
+        let error = checks
+            .iter()
+            .find(|c| c.name.contains("Parse") && c.status == CheckStatus::Error);
+        assert!(error.is_some(), "Expected parse error for invalid JSON");
+    }
+
+    #[test]
+    fn test_check_json_structure_empty_array() {
+        let archive = create_test_archive("[]");
+
+        let checks = check_json_structure(archive.path()).unwrap();
+
+        // Empty array should still pass (0 items parsed)
+        let parse_check = checks.iter().find(|c| c.name.contains("Parse: Tweets"));
+        if let Some(check) = parse_check {
+            assert_eq!(check.status, CheckStatus::Pass);
+            assert!(check.message.contains("0 items"));
+        }
+    }
+
+    // ======================== Duplicate ID Tests ========================
+
+    #[test]
+    fn test_check_duplicate_ids_none() {
+        let tweets = vec![
+            make_tweet("1", "Tweet 1", Utc::now()),
+            make_tweet("2", "Tweet 2", Utc::now()),
+        ];
+
+        let check = check_duplicate_ids_in_tweets(&tweets);
+
+        assert_eq!(check.status, CheckStatus::Pass);
+        assert!(check.message.contains("2 unique"));
+    }
+
+    #[test]
+    fn test_check_duplicate_ids_found() {
+        let tweets = vec![
+            make_tweet("1", "Tweet 1", Utc::now()),
+            make_tweet("1", "Tweet 2 (duplicate ID)", Utc::now()),
+        ];
+
+        let check = check_duplicate_ids_in_tweets(&tweets);
+
+        assert_eq!(check.status, CheckStatus::Warning);
+        assert!(check.message.contains("duplicate"));
+        assert!(check.suggestion.is_some());
+    }
+
+    // ======================== Timestamp Tests ========================
+
+    #[test]
+    fn test_check_timestamp_consistency_valid() {
+        let valid_date = chrono::Utc.with_ymd_and_hms(2023, 6, 15, 12, 0, 0).unwrap();
+        let tweets = vec![make_tweet("1", "Tweet", valid_date)];
+
+        let check = check_timestamp_consistency_in_tweets(&tweets);
+
+        assert_eq!(check.status, CheckStatus::Pass);
+    }
+
+    #[test]
+    fn test_check_timestamp_consistency_future_date() {
+        let future = Utc::now() + chrono::Duration::days(365);
+        let tweets = vec![make_tweet("1", "Future tweet", future)];
+
+        let check = check_timestamp_consistency_in_tweets(&tweets);
+
+        assert_eq!(check.status, CheckStatus::Warning);
+        assert!(check.message.contains("issue"));
+    }
+
+    #[test]
+    fn test_check_timestamp_consistency_before_twitter() {
+        let old = chrono::Utc.with_ymd_and_hms(2000, 1, 1, 0, 0, 0).unwrap();
+        let tweets = vec![make_tweet("1", "Old tweet", old)];
+
+        let check = check_timestamp_consistency_in_tweets(&tweets);
+
+        assert_eq!(check.status, CheckStatus::Warning);
+        assert!(check.message.contains("issue"));
+    }
+
+    // ======================== Latency Stats Tests ========================
+
+    #[test]
+    fn test_latency_stats_from_durations() {
+        let mut durations = vec![10.0, 20.0, 30.0, 40.0, 50.0];
+        let stats = LatencyStats::from_durations(&mut durations);
+
+        assert_eq!(stats.min_ms, 10.0);
+        assert_eq!(stats.max_ms, 50.0);
+        assert!((stats.mean_ms - 30.0).abs() < 0.01);
+        assert_eq!(stats.iterations, 5);
+    }
+
+    #[test]
+    fn test_latency_stats_empty() {
+        let mut durations: Vec<f64> = vec![];
+        let stats = LatencyStats::from_durations(&mut durations);
+
+        assert_eq!(stats.min_ms, 0.0);
+        assert_eq!(stats.max_ms, 0.0);
+        assert_eq!(stats.mean_ms, 0.0);
+        assert_eq!(stats.iterations, 0);
+    }
+
+    #[test]
+    fn test_latency_stats_format_summary() {
+        let stats = LatencyStats {
+            min_ms: 1.0,
+            max_ms: 100.0,
+            mean_ms: 25.0,
+            p50_ms: 20.0,
+            p95_ms: 80.0,
+            p99_ms: 95.0,
+            iterations: 100,
+        };
+
+        let summary = stats.format_summary();
+        assert!(summary.contains("p50=20.0ms"));
+        assert!(summary.contains("p95=80.0ms"));
+        assert!(summary.contains("n=100"));
+    }
+
+    // ======================== Health Check Status Tests ========================
+
+    #[test]
+    fn test_check_status_is_ok() {
+        assert!(CheckStatus::Pass.is_ok());
+        assert!(!CheckStatus::Warning.is_ok());
+        assert!(!CheckStatus::Error.is_ok());
+    }
+
+    // ======================== Full Validation Tests ========================
+
+    #[test]
+    fn test_validate_archive_healthy() {
+        let tweets = r#"[{"tweet": {"id": "123", "full_text": "Hello", "created_at": "2023-01-01T12:00:00.000Z"}}]"#;
+        let archive = create_test_archive(tweets);
+
+        let checks = validate_archive(archive.path()).unwrap();
+
+        // Should have multiple checks
+        assert!(!checks.is_empty());
+
+        // Most should pass for a healthy archive
+        let pass_count = checks
+            .iter()
+            .filter(|c| c.status == CheckStatus::Pass)
+            .count();
+        assert!(pass_count > 0, "Healthy archive should have passing checks");
+    }
+
+    #[test]
+    fn test_validate_archive_empty() {
+        let archive = create_test_archive("[]");
+
+        let checks = validate_archive(archive.path()).unwrap();
+
+        // Empty but valid structure
+        assert!(!checks.is_empty());
+    }
+}

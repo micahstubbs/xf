@@ -1000,6 +1000,9 @@ pub fn format_hourly_sparkline(distribution: &[u64; 24]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::{ArchiveInfo, Tweet, TweetMedia, TweetUrl, UserMention};
+    use crate::storage::Storage;
+    use tracing::debug;
 
     #[test]
     fn test_sparkline_empty() {
@@ -1083,5 +1086,401 @@ mod tests {
         assert_eq!(gap, 15);
         assert_eq!(start, Some(NaiveDate::from_ymd_opt(2023, 1, 5).unwrap()));
         assert_eq!(end, Some(NaiveDate::from_ymd_opt(2023, 1, 20).unwrap()));
+    }
+
+    fn base_tweet(id: &str, created_at: &str, text: &str) -> Tweet {
+        let created_at = DateTime::parse_from_rfc3339(created_at)
+            .unwrap()
+            .with_timezone(&Utc);
+        Tweet {
+            id: id.to_string(),
+            created_at,
+            full_text: text.to_string(),
+            source: None,
+            favorite_count: 0,
+            retweet_count: 0,
+            lang: None,
+            in_reply_to_status_id: None,
+            in_reply_to_user_id: None,
+            in_reply_to_screen_name: None,
+            is_retweet: false,
+            hashtags: Vec::new(),
+            user_mentions: Vec::new(),
+            urls: Vec::new(),
+            media: Vec::new(),
+        }
+    }
+
+    fn storage_with_tweets(tweets: &[Tweet], account_id: &str) -> Storage {
+        let mut storage = Storage::open_memory().unwrap();
+        let info = ArchiveInfo {
+            account_id: account_id.to_string(),
+            username: "tester".to_string(),
+            display_name: None,
+            archive_size_bytes: 0,
+            generation_date: Utc::now(),
+            is_partial: false,
+        };
+        storage.store_archive_info(&info).unwrap();
+        storage.store_tweets(tweets).unwrap();
+        storage
+    }
+
+    fn assert_approx(actual: f64, expected: f64, epsilon: f64) {
+        let diff = (actual - expected).abs();
+        assert!(
+            diff <= epsilon,
+            "expected {expected:.3}, got {actual:.3} (diff {diff:.3})"
+        );
+    }
+
+    #[test]
+    fn test_temporal_hourly_distribution() {
+        debug!("test_temporal_hourly_distribution: setup");
+        let tweets = vec![
+            base_tweet("t1", "2023-01-01T09:00:00Z", "Morning"),
+            base_tweet("t2", "2023-01-01T09:30:00Z", "Also morning"),
+            base_tweet("t3", "2023-01-01T21:00:00Z", "Evening"),
+        ];
+        let storage = storage_with_tweets(&tweets, "user-1");
+        let stats = TemporalStats::compute(&storage).unwrap();
+        assert_eq!(stats.hourly_distribution[9], 2);
+        assert_eq!(stats.hourly_distribution[21], 1);
+        assert_eq!(stats.active_days_count, 1);
+        debug!("test_temporal_hourly_distribution: done");
+    }
+
+    #[test]
+    fn test_engagement_histogram_buckets() {
+        debug!("test_engagement_histogram_buckets: setup");
+        let mut tweets = Vec::new();
+        for (idx, favorites) in [0, 2, 7, 20, 30, 70, 200, 700].iter().enumerate() {
+            let mut tweet = base_tweet(&format!("t{idx}"), "2023-01-02T10:00:00Z", "Engagement");
+            tweet.favorite_count = *favorites;
+            tweets.push(tweet);
+        }
+        let storage = storage_with_tweets(&tweets, "user-1");
+        let stats = EngagementStats::compute(&storage, 5).unwrap();
+        let counts: Vec<u64> = stats.likes_histogram.iter().map(|b| b.count).collect();
+        assert_eq!(counts, vec![1, 1, 1, 1, 1, 1, 1, 1]);
+        assert_approx(stats.likes_histogram[0].percentage, 12.5, 0.01);
+        debug!("test_engagement_histogram_buckets: done");
+    }
+
+    #[test]
+    fn test_top_tweets_ordering() {
+        debug!("test_top_tweets_ordering: setup");
+        let mut tweets = Vec::new();
+        let mut a = base_tweet("a", "2023-01-03T00:00:00Z", "A");
+        a.favorite_count = 10;
+        a.retweet_count = 5; // total 15
+        tweets.push(a);
+        let mut b = base_tweet("b", "2023-01-04T00:00:00Z", "B");
+        b.favorite_count = 100;
+        b.retweet_count = 20; // total 120
+        tweets.push(b);
+        let mut c = base_tweet("c", "2023-01-05T00:00:00Z", "C");
+        c.favorite_count = 50;
+        c.retweet_count = 10; // total 60
+        tweets.push(c);
+        let storage = storage_with_tweets(&tweets, "user-1");
+        let stats = EngagementStats::compute(&storage, 3).unwrap();
+        assert_eq!(stats.top_tweets[0].total_engagement, 120);
+        assert_eq!(stats.top_tweets[1].total_engagement, 60);
+        debug!("test_top_tweets_ordering: done");
+    }
+
+    #[test]
+    fn test_content_hashtag_extraction() {
+        debug!("test_content_hashtag_extraction: setup");
+        let mut t1 = base_tweet("t1", "2023-02-01T00:00:00Z", "Hello");
+        t1.hashtags = vec!["Rust".to_string(), "Programming".to_string()];
+        let mut t2 = base_tweet("t2", "2023-02-02T00:00:00Z", "More");
+        t2.hashtags = vec!["rust".to_string()];
+        let mut t3 = base_tweet("t3", "2023-02-03T00:00:00Z", "Tech");
+        t3.hashtags = vec!["Tech".to_string()];
+        let storage = storage_with_tweets(&[t1, t2, t3], "user-1");
+        let stats = ContentStats::compute(&storage, 5).unwrap();
+        assert_eq!(stats.top_hashtags[0].tag, "rust");
+        assert_eq!(stats.top_hashtags[0].count, 2);
+        debug!("test_content_hashtag_extraction: done");
+    }
+
+    #[test]
+    fn test_content_media_ratio() {
+        debug!("test_content_media_ratio: setup");
+        let mut tweets = Vec::new();
+        for idx in 0..10 {
+            let mut tweet = base_tweet(&format!("t{idx}"), "2023-03-01T00:00:00Z", "Media");
+            if idx < 3 {
+                tweet.media = vec![TweetMedia {
+                    id: format!("m{idx}"),
+                    media_type: "photo".to_string(),
+                    url: "https://example.com".to_string(),
+                    local_path: None,
+                }];
+            }
+            tweets.push(tweet);
+        }
+        let storage = storage_with_tweets(&tweets, "user-1");
+        let stats = ContentStats::compute(&storage, 5).unwrap();
+        assert_approx(stats.media_ratio, 30.0, 0.01);
+        debug!("test_content_media_ratio: done");
+    }
+
+    #[test]
+    fn test_thread_detection() {
+        debug!("test_thread_detection: setup");
+        let account_id = "user-123";
+        let t1 = base_tweet("t1", "2023-04-01T00:00:00Z", "Root");
+        let mut t2 = base_tweet("t2", "2023-04-01T00:10:00Z", "Thread reply");
+        t2.in_reply_to_status_id = Some("t1".to_string());
+        t2.in_reply_to_user_id = Some(account_id.to_string());
+        let mut t3 = base_tweet("t3", "2023-04-01T00:20:00Z", "Another thread");
+        t3.in_reply_to_status_id = Some("t2".to_string());
+        t3.in_reply_to_user_id = Some(account_id.to_string());
+        let mut t4 = base_tweet("t4", "2023-04-01T01:00:00Z", "Reply to other");
+        t4.in_reply_to_status_id = Some("x1".to_string());
+        t4.in_reply_to_user_id = Some("other-user".to_string());
+        let storage = storage_with_tweets(&[t1, t2, t3, t4], account_id);
+        let stats = ContentStats::compute(&storage, 5).unwrap();
+        assert_eq!(stats.thread_count, 2);
+        assert_eq!(stats.total_count, 4);
+        debug!("test_thread_detection: done");
+    }
+
+    #[test]
+    fn test_empty_archive_stats() {
+        debug!("test_empty_archive_stats: setup");
+        let storage = storage_with_tweets(&[], "user-1");
+        let temporal = TemporalStats::compute(&storage).unwrap();
+        assert!(temporal.daily_counts.is_empty());
+        assert_eq!(temporal.total_days_in_range, 0);
+        let engagement = EngagementStats::compute(&storage, 5).unwrap();
+        assert_eq!(engagement.total_likes, 0);
+        let content = ContentStats::compute(&storage, 5).unwrap();
+        assert_eq!(content.total_count, 0);
+        debug!("test_empty_archive_stats: done");
+    }
+
+    #[test]
+    fn test_single_tweet_archive() {
+        debug!("test_single_tweet_archive: setup");
+        let tweet = base_tweet("t1", "2023-05-01T12:00:00Z", "Solo");
+        let storage = storage_with_tweets(&[tweet], "user-1");
+        let temporal = TemporalStats::compute(&storage).unwrap();
+        assert_eq!(temporal.active_days_count, 1);
+        assert_eq!(temporal.total_days_in_range, 1);
+        assert_eq!(temporal.longest_gap_days, 0);
+        let engagement = EngagementStats::compute(&storage, 5).unwrap();
+        assert_eq!(engagement.top_tweets.len(), 1);
+        let content = ContentStats::compute(&storage, 5).unwrap();
+        assert_eq!(content.total_count, 1);
+        debug!("test_single_tweet_archive: done");
+    }
+
+    #[test]
+    fn test_temporal_stats_performance_smoke() {
+        debug!("test_temporal_stats_performance_smoke: setup");
+        let mut tweets = Vec::new();
+        for day in 0..365 {
+            let date = NaiveDate::from_ymd_opt(2023, 1, 1)
+                .unwrap()
+                .checked_add_days(chrono::Days::new(day))
+                .unwrap();
+            let created_at = date.and_hms_opt(12, 0, 0).unwrap();
+            let mut tweet = base_tweet(
+                &format!("t{day}"),
+                &created_at.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+                "Load test",
+            );
+            tweet.favorite_count = 1;
+            tweets.push(tweet);
+        }
+        let storage = storage_with_tweets(&tweets, "user-1");
+        let start = std::time::Instant::now();
+        let _ = TemporalStats::compute(&storage).unwrap();
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "TemporalStats::compute took {elapsed:?}"
+        );
+        debug!("test_temporal_stats_performance_smoke: done");
+    }
+
+    #[test]
+    fn test_mentions_and_links() {
+        debug!("test_mentions_and_links: setup");
+        let mut tweet = base_tweet("t1", "2023-06-01T00:00:00Z", "Hello");
+        tweet.user_mentions = vec![UserMention {
+            id: "u1".to_string(),
+            screen_name: "Friend".to_string(),
+            name: Some("Friend".to_string()),
+        }];
+        tweet.urls = vec![TweetUrl {
+            url: "https://t.co/test".to_string(),
+            expanded_url: Some("https://example.com".to_string()),
+            display_url: Some("example.com".to_string()),
+        }];
+        let storage = storage_with_tweets(&[tweet], "user-1");
+        let stats = ContentStats::compute(&storage, 5).unwrap();
+        assert_eq!(stats.top_mentions[0].tag, "friend");
+        assert_eq!(stats.top_mentions[0].count, 1);
+        assert_approx(stats.link_ratio, 100.0, 0.01);
+        debug!("test_mentions_and_links: done");
+    }
+
+    #[test]
+    fn test_engagement_monthly_trend() {
+        debug!("test_engagement_monthly_trend: setup");
+        let mut jan = base_tweet("t1", "2023-01-15T00:00:00Z", "Jan");
+        jan.favorite_count = 10;
+        let mut feb = base_tweet("t2", "2023-02-15T00:00:00Z", "Feb");
+        feb.favorite_count = 20;
+        let storage = storage_with_tweets(&[jan, feb], "user-1");
+        let stats = EngagementStats::compute(&storage, 5).unwrap();
+        assert_eq!(stats.monthly_trend.len(), 2);
+        assert_eq!(stats.monthly_trend[0].month, "2023-01");
+        assert_eq!(stats.monthly_trend[1].month, "2023-02");
+        assert_approx(stats.monthly_trend[0].avg_engagement, 10.0, 0.01);
+        debug!("test_engagement_monthly_trend: done");
+    }
+
+    #[test]
+    fn test_avg_length_and_distribution() {
+        debug!("test_avg_length_and_distribution: setup");
+        let short = base_tweet("t1", "2023-07-01T00:00:00Z", "short");
+        let long_text = "L".repeat(200);
+        let mut long = base_tweet("t2", "2023-07-02T00:00:00Z", &long_text);
+        long.favorite_count = 1;
+        let storage = storage_with_tweets(&[short, long], "user-1");
+        let stats = ContentStats::compute(&storage, 5).unwrap();
+        assert!(stats.avg_tweet_length >= 5.0);
+        assert_eq!(stats.length_distribution.len(), 4);
+        assert_eq!(stats.total_count, 2);
+        debug!("test_avg_length_and_distribution: done");
+    }
+
+    #[test]
+    fn test_engagement_with_nulls_safe() {
+        debug!("test_engagement_with_nulls_safe: setup");
+        let storage = Storage::open_memory().unwrap();
+        let info = ArchiveInfo {
+            account_id: "user-1".to_string(),
+            username: "tester".to_string(),
+            display_name: None,
+            archive_size_bytes: 0,
+            generation_date: Utc::now(),
+            is_partial: false,
+        };
+        storage.store_archive_info(&info).unwrap();
+        storage
+            .connection()
+            .execute(
+                r"
+                INSERT INTO tweets
+                (id, created_at, full_text, source, favorite_count, retweet_count, lang,
+                 in_reply_to_status_id, in_reply_to_user_id, in_reply_to_screen_name,
+                 is_retweet, hashtags_json, mentions_json, urls_json, media_json)
+                VALUES (?, ?, ?, ?, NULL, 2, NULL, NULL, NULL, NULL, 0, NULL, NULL, NULL, NULL)
+                ",
+                ["null-1", "2023-08-01T00:00:00Z", "Null engagement", ""],
+            )
+            .unwrap();
+        let stats = EngagementStats::compute(&storage, 5).unwrap();
+        assert_eq!(stats.top_tweets.len(), 1);
+        assert_eq!(stats.total_likes, 0);
+        assert_eq!(stats.total_retweets, 2);
+        debug!("test_engagement_with_nulls_safe: done");
+    }
+
+    #[test]
+    fn test_longest_gap_calculation() {
+        debug!("test_longest_gap_calculation: setup");
+        let tweets = vec![
+            base_tweet("t1", "2023-01-01T00:00:00Z", "A"),
+            base_tweet("t2", "2023-01-10T00:00:00Z", "B"),
+            base_tweet("t3", "2023-01-12T00:00:00Z", "C"),
+        ];
+        let storage = storage_with_tweets(&tweets, "user-1");
+        let stats = TemporalStats::compute(&storage).unwrap();
+        assert_eq!(stats.longest_gap_days, 9);
+        assert_eq!(
+            stats.longest_gap_start,
+            Some(NaiveDate::from_ymd_opt(2023, 1, 1).unwrap())
+        );
+        assert_eq!(
+            stats.longest_gap_end,
+            Some(NaiveDate::from_ymd_opt(2023, 1, 10).unwrap())
+        );
+        debug!("test_longest_gap_calculation: done");
+    }
+
+    #[test]
+    fn test_avg_engagement_matches_totals() {
+        debug!("test_avg_engagement_matches_totals: setup");
+        let mut t1 = base_tweet("t1", "2023-09-01T00:00:00Z", "A");
+        t1.favorite_count = 10;
+        t1.retweet_count = 0;
+        let mut t2 = base_tweet("t2", "2023-09-02T00:00:00Z", "B");
+        t2.favorite_count = 0;
+        t2.retweet_count = 10;
+        let storage = storage_with_tweets(&[t1, t2], "user-1");
+        let stats = EngagementStats::compute(&storage, 5).unwrap();
+        assert_eq!(stats.total_likes, 10);
+        assert_eq!(stats.total_retweets, 10);
+        assert_approx(stats.avg_engagement, 10.0, 0.01);
+        debug!("test_avg_engagement_matches_totals: done");
+    }
+
+    #[test]
+    fn test_truncate_text_boundary() {
+        debug!("test_truncate_text_boundary: setup");
+        let text = "This is a sentence with words";
+        let truncated = truncate_text(text, 10);
+        assert!(truncated.ends_with("..."));
+        assert!(truncated.len() <= 13);
+        debug!("test_truncate_text_boundary: done");
+    }
+
+    #[test]
+    fn test_format_helpers() {
+        debug!("test_format_helpers: setup");
+        let dist = [
+            LengthBucket {
+                label: "0-50".to_string(),
+                count: 2,
+                percentage: 50.0,
+            },
+            LengthBucket {
+                label: "51-140".to_string(),
+                count: 2,
+                percentage: 50.0,
+            },
+        ];
+        let formatted = format_length_distribution(&dist);
+        assert!(formatted.contains("0-50"));
+        let tags = vec![
+            TagCount {
+                tag: "rust".to_string(),
+                count: 2,
+            },
+            TagCount {
+                tag: "cli".to_string(),
+                count: 1,
+            },
+        ];
+        let list = format_top_tags(&tags, "#");
+        assert!(list.contains("#rust"));
+        let likes = vec![LikesBucket {
+            label: "0".to_string(),
+            min: 0,
+            max: 0,
+            count: 1,
+            percentage: 100.0,
+        }];
+        let formatted_likes = format_likes_histogram(&likes);
+        assert!(formatted_likes.contains('0'));
+        debug!("test_format_helpers: done");
     }
 }

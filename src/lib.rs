@@ -14,6 +14,7 @@
 
 pub mod cli;
 pub mod config;
+pub mod date_parser;
 pub mod doctor;
 pub mod error;
 pub mod logging;

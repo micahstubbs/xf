@@ -65,6 +65,7 @@ parking_lot = "0.12"
 
 # Utilities
 chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
+chrono-english = "0.1"
 dirs = "5.0"
 rustyline = "12"
 walkdir = "2.5"
