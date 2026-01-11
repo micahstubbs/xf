@@ -884,7 +884,8 @@ impl ReplSession {
                 println!("id,type,score,created_at,text");
                 for r in &self.last_results {
                     let created = r.created_at.to_rfc3339();
-                    let text_escaped = r.text.replace('"', "\"\"").replace('\n', " ");
+                    // Escape quotes and replace newlines/carriage returns for valid CSV
+                    let text_escaped = r.text.replace('"', "\"\"").replace(['\n', '\r'], " ");
                     println!(
                         "{},{},{:.2},{},\"{}\"",
                         r.id, r.result_type, r.score, created, text_escaped

@@ -460,13 +460,15 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
         OutputFormat::Csv => {
             println!("type,id,created_at,score,text");
             for r in &results {
+                // Escape quotes and replace newlines/carriage returns for valid CSV
+                let text_escaped = r.text.replace('"', "\"\"").replace(['\n', '\r'], " ");
                 println!(
                     "{},{},{},{:.4},\"{}\"",
                     r.result_type,
                     r.id,
                     r.created_at.to_rfc3339(),
                     r.score,
-                    r.text.replace('"', "\"\"")
+                    text_escaped
                 );
             }
         }
@@ -664,14 +666,7 @@ fn print_result(num: usize, result: &SearchResult) {
     }
 
     if result.created_at.timestamp() > 0 {
-        println!(
-            "   {}",
-            result
-                .created_at
-                .format("%Y-%m-%d %H:%M")
-                .to_string()
-                .dimmed()
-        );
+        println!("   {}", format_relative_date(result.created_at).dimmed());
     }
 
     println!();
@@ -1351,6 +1346,46 @@ fn format_count(n: i64) -> String {
         format!("{whole}.{tenths}K")
     } else {
         n.to_string()
+    }
+}
+
+/// Format a datetime as a human-friendly relative string.
+///
+/// Uses smart thresholds for readability:
+/// - < 1 minute: "just now"
+/// - < 1 hour: "Nm ago"
+/// - < 24 hours: "Nh ago"
+/// - < 7 days: "Nd ago"
+/// - < 1 year: "Mon D"
+/// - >= 1 year: "Mon D, YYYY"
+fn format_relative_date(dt: DateTime<Utc>) -> String {
+    let now = Utc::now();
+    let duration = now.signed_duration_since(dt);
+
+    // Handle future dates (shouldn't happen, but be safe)
+    if duration.num_seconds() < 0 {
+        return dt.format("%b %d, %Y").to_string();
+    }
+
+    let seconds = duration.num_seconds();
+    let minutes = duration.num_minutes();
+    let hours = duration.num_hours();
+    let days = duration.num_days();
+
+    if seconds < 60 {
+        "just now".to_string()
+    } else if minutes < 60 {
+        format!("{minutes}m ago")
+    } else if hours < 24 {
+        format!("{hours}h ago")
+    } else if days < 7 {
+        format!("{days}d ago")
+    } else if days < 365 {
+        // Same year: "Jan 15"
+        dt.format("%b %d").to_string()
+    } else {
+        // Different year: "Jan 15, 2023"
+        dt.format("%b %d, %Y").to_string()
     }
 }
 
