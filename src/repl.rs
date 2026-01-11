@@ -587,7 +587,7 @@ impl ReplSession {
     fn run_set(&mut self, name: &str, value: &str) {
         debug!(name = %name, value = %value, "Setting variable");
         self.named_vars.insert(name.to_string(), value.to_string());
-        println!("{} = {}", format!("${name}").cyan(), value.green());
+        println!("{} = {}", format!("${name}").bold(), value);
     }
 
     fn run_search(&mut self, query: &str) -> Result<()> {
@@ -601,7 +601,7 @@ impl ReplSession {
 
         println!(
             "{} {}",
-            format_number_usize(count).cyan(),
+            format_number_usize(count).bold(),
             "results".dimmed()
         );
         print_results(&self.last_results, 0, self.page_size);
@@ -652,7 +652,7 @@ impl ReplSession {
                 let tweets = self.storage.get_all_tweets(None)?;
                 println!(
                     "{} {}",
-                    format_number_usize(tweets.len()).cyan(),
+                    format_number_usize(tweets.len()).bold(),
                     "tweets".dimmed()
                 );
                 for tweet in tweets.iter().take(self.page_size) {
@@ -678,7 +678,7 @@ impl ReplSession {
                 let likes = self.storage.get_all_likes(None)?;
                 println!(
                     "{} {}",
-                    format_number_usize(likes.len()).cyan(),
+                    format_number_usize(likes.len()).bold(),
                     "likes".dimmed()
                 );
                 for like in likes.iter().take(self.page_size) {
@@ -701,7 +701,7 @@ impl ReplSession {
                 let dms = self.storage.get_all_dms(None)?;
                 println!(
                     "{} {}",
-                    format_number_usize(dms.len()).cyan(),
+                    format_number_usize(dms.len()).bold(),
                     "DM messages".dimmed()
                 );
                 for dm in dms.iter().take(self.page_size) {
@@ -724,7 +724,7 @@ impl ReplSession {
                 let stats = self.storage.get_stats()?;
                 println!(
                     "{} {}",
-                    format_number(stats.dm_conversations_count).cyan(),
+                    format_number(stats.dm_conversations_count).bold(),
                     "DM conversations".dimmed()
                 );
             }
@@ -732,7 +732,7 @@ impl ReplSession {
                 let followers = self.storage.get_all_followers(None)?;
                 println!(
                     "{} {}",
-                    format_number_usize(followers.len()).cyan(),
+                    format_number_usize(followers.len()).bold(),
                     "followers".dimmed()
                 );
                 for f in followers.iter().take(self.page_size) {
@@ -753,7 +753,7 @@ impl ReplSession {
                 let following = self.storage.get_all_following(None)?;
                 println!(
                     "{} {}",
-                    format_number_usize(following.len()).cyan(),
+                    format_number_usize(following.len()).bold(),
                     "following".dimmed()
                 );
                 for f in following.iter().take(self.page_size) {
@@ -774,7 +774,7 @@ impl ReplSession {
                 let blocks = self.storage.get_all_blocks(None)?;
                 println!(
                     "{} {}",
-                    format_number_usize(blocks.len()).cyan(),
+                    format_number_usize(blocks.len()).bold(),
                     "blocked accounts".dimmed()
                 );
                 for b in blocks.iter().take(self.page_size) {
@@ -795,7 +795,7 @@ impl ReplSession {
                 let mutes = self.storage.get_all_mutes(None)?;
                 println!(
                     "{} {}",
-                    format_number_usize(mutes.len()).cyan(),
+                    format_number_usize(mutes.len()).bold(),
                     "muted accounts".dimmed()
                 );
                 for m in mutes.iter().take(self.page_size) {
@@ -842,7 +842,7 @@ impl ReplSession {
 
         println!(
             "{} {} (filtered by '{}')",
-            format_number_usize(count).cyan(),
+            format_number_usize(count).bold(),
             "results".dimmed(),
             filter.yellow()
         );
@@ -907,14 +907,14 @@ impl ReplSession {
         debug!(index, result_type = %result.result_type, "Showing result details");
 
         println!("{}", "─".repeat(CONTENT_DIVIDER_WIDTH));
-        println!("{}: {}", "Type".cyan(), result.result_type);
-        println!("{}: {}", "ID".cyan(), result.id);
+        println!("{}: {}", "Type".dimmed(), result.result_type);
+        println!("{}: {}", "ID".dimmed(), result.id);
         println!(
             "{}: {}",
-            "Date".cyan(),
+            "Date".dimmed(),
             format_relative_date(result.created_at)
         );
-        println!("{}: {:.2}", "Score".cyan(), result.score);
+        println!("{}: {:.2}", "Score".dimmed(), result.score);
         println!();
         println!("{}", result.text);
         println!("{}", "─".repeat(CONTENT_DIVIDER_WIDTH));
@@ -1112,7 +1112,8 @@ fn print_startup_banner(storage: &Storage) {
         "{}",
         "╭────────────────────────────────────────────────────────────╮".dimmed()
     );
-    let header_padding = " ".repeat(60 - 12 - VERSION.len() - 1);
+    // Inner width is 60 chars: "  xf shell " (11) + "vX.X.X" (1+VERSION.len()) + padding
+    let header_padding = " ".repeat(60usize.saturating_sub(12 + VERSION.len()));
     println!(
         "{}  {} {}{}{}",
         "│".dimmed(),
@@ -1128,12 +1129,13 @@ fn print_startup_banner(storage: &Storage) {
 
     // Archive info
     let archive_line = format!("  Archive: @{username}");
-    let padding = 60 - archive_line.len();
+    // Use chars().count() for proper alignment with potential non-ASCII usernames
+    let padding = 60usize.saturating_sub(archive_line.chars().count());
     println!(
         "{}{}{}{}",
         "│".dimmed(),
         archive_line,
-        " ".repeat(padding.saturating_sub(1)),
+        " ".repeat(padding),
         "│".dimmed()
     );
 
@@ -1145,12 +1147,13 @@ fn print_startup_banner(storage: &Storage) {
             format_number(s.dms_count),
             format_number(s.likes_count)
         );
-        let padding = 60 - stats_line.len();
+        // Use chars().count() since "•" is a multi-byte UTF-8 character
+        let padding = 60usize.saturating_sub(stats_line.chars().count());
         println!(
             "{}{}{}{}",
             "│".dimmed(),
             stats_line,
-            " ".repeat(padding.saturating_sub(1)),
+            " ".repeat(padding),
             "│".dimmed()
         );
     }

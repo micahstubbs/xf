@@ -323,7 +323,7 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
     println!("{}", "Indexing complete!".bold().green());
     println!(
         "  Total documents indexed: {}",
-        format_number_u64(search_engine.doc_count()).cyan()
+        format_number_u64(search_engine.doc_count()).bold()
     );
     println!();
     println!("Run {} to search your archive.", "xf search <query>".bold());
@@ -557,7 +557,7 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
 
             println!(
                 "Found {} results for \"{}\" in {}\n",
-                format_number_usize(results.len()).cyan(),
+                format_number_usize(results.len()).bold(),
                 args.query.bold(),
                 timing_str.dimmed()
             );
@@ -685,9 +685,9 @@ fn print_dm_context_text(contexts: &[DmConversationContext]) {
             println!(
                 "{} {} {} {}",
                 timestamp.dimmed(),
-                format_short_id(&message.sender_id).green(),
+                format_short_id(&message.sender_id).dimmed(),
                 "→".dimmed(),
-                format_short_id(&message.recipient_id).blue()
+                format_short_id(&message.recipient_id).dimmed()
             );
 
             let lines = textwrap::wrap(&message.text, 78);
@@ -1452,8 +1452,8 @@ fn cmd_tweet(cli: &Cli, args: &cli::TweetArgs) -> Result<()> {
                 if args.engagement {
                     println!(
                         "  {} likes  {} retweets",
-                        format_number(t.favorite_count).cyan(),
-                        format_number(t.retweet_count).cyan()
+                        format_number(t.favorite_count).bold(),
+                        format_number(t.retweet_count).bold()
                     );
                 }
                 if !t.hashtags.is_empty() {
@@ -1505,10 +1505,10 @@ fn cmd_list(cli: &Cli, args: &cli::ListArgs) -> Result<()> {
         println!(
             "{} {} files:\n",
             "Showing".dimmed(),
-            format_number_usize(files.len()).cyan()
+            format_number_usize(files.len()).bold()
         );
         for file in &files {
-            println!("{}", file.cyan());
+            println!("{file}");
         }
         return Ok(());
     }
@@ -1534,7 +1534,7 @@ fn cmd_list(cli: &Cli, args: &cli::ListArgs) -> Result<()> {
             println!(
                 "{} {} tweets:\n",
                 "Showing".dimmed(),
-                format_number_usize(tweets.len()).cyan()
+                format_number_usize(tweets.len()).bold()
             );
             for tweet in &tweets {
                 let date = format_relative_date(tweet.created_at);
@@ -1542,7 +1542,7 @@ fn cmd_list(cli: &Cli, args: &cli::ListArgs) -> Result<()> {
                 println!(
                     "{} {} {}",
                     date.dimmed(),
-                    format_short_id(&tweet.id).cyan(),
+                    format_short_id(&tweet.id).dimmed(),
                     text
                 );
             }
@@ -1552,14 +1552,14 @@ fn cmd_list(cli: &Cli, args: &cli::ListArgs) -> Result<()> {
             println!(
                 "{} {} likes:\n",
                 "Showing".dimmed(),
-                format_number_usize(likes.len()).cyan()
+                format_number_usize(likes.len()).bold()
             );
             for like in &likes {
                 let text = like
                     .full_text
                     .as_ref()
                     .map_or_else(|| "[No text]".to_string(), |t| truncate_text(t, 80));
-                println!("{} {}", format_short_id(&like.tweet_id).cyan(), text);
+                println!("{} {}", format_short_id(&like.tweet_id).dimmed(), text);
             }
         }
         ListTarget::Dms => {
@@ -1567,7 +1567,7 @@ fn cmd_list(cli: &Cli, args: &cli::ListArgs) -> Result<()> {
             println!(
                 "{} {} DM messages:\n",
                 "Showing".dimmed(),
-                format_number_usize(dms.len()).cyan()
+                format_number_usize(dms.len()).bold()
             );
             for dm in &dms {
                 let date = format_relative_date(dm.created_at);
@@ -1575,9 +1575,9 @@ fn cmd_list(cli: &Cli, args: &cli::ListArgs) -> Result<()> {
                 println!(
                     "{} {} {} {} {}",
                     date.dimmed(),
-                    format_short_id(&dm.sender_id).green(),
+                    format_short_id(&dm.sender_id).dimmed(),
                     "→".dimmed(),
-                    format_short_id(&dm.recipient_id).blue(),
+                    format_short_id(&dm.recipient_id).dimmed(),
                     text
                 );
             }
@@ -1587,7 +1587,7 @@ fn cmd_list(cli: &Cli, args: &cli::ListArgs) -> Result<()> {
             println!(
                 "{} {} conversations:\n",
                 "Showing".dimmed(),
-                format_number_usize(conversations.len()).cyan()
+                format_number_usize(conversations.len()).bold()
             );
             for convo in &conversations {
                 let participants = if convo.participant_ids.is_empty() {
@@ -1604,11 +1604,11 @@ fn cmd_list(cli: &Cli, args: &cli::ListArgs) -> Result<()> {
                 let last = format_optional_date(convo.last_message_at);
                 println!(
                     "{} {} msgs  {} → {}  {}",
-                    format_short_id(&convo.conversation_id).cyan(),
-                    format_number(convo.message_count).cyan(),
+                    format_short_id(&convo.conversation_id).dimmed(),
+                    format_number(convo.message_count).bold(),
                     first.dimmed(),
                     last.dimmed(),
-                    participants.blue()
+                    participants.dimmed()
                 );
             }
         }
@@ -1617,13 +1617,13 @@ fn cmd_list(cli: &Cli, args: &cli::ListArgs) -> Result<()> {
             println!(
                 "{} {} followers:\n",
                 "Showing".dimmed(),
-                format_number_usize(followers.len()).cyan()
+                format_number_usize(followers.len()).bold()
             );
             for follower in &followers {
                 let link = follower.user_link.as_deref().unwrap_or("[no link]");
                 println!(
                     "{} {}",
-                    format_short_id(&follower.account_id).cyan(),
+                    format_short_id(&follower.account_id).dimmed(),
                     link.dimmed()
                 );
             }
@@ -1633,13 +1633,13 @@ fn cmd_list(cli: &Cli, args: &cli::ListArgs) -> Result<()> {
             println!(
                 "{} {} following:\n",
                 "Showing".dimmed(),
-                format_number_usize(following.len()).cyan()
+                format_number_usize(following.len()).bold()
             );
             for f in &following {
                 let link = f.user_link.as_deref().unwrap_or("[no link]");
                 println!(
                     "{} {}",
-                    format_short_id(&f.account_id).cyan(),
+                    format_short_id(&f.account_id).dimmed(),
                     link.dimmed()
                 );
             }
@@ -1649,13 +1649,13 @@ fn cmd_list(cli: &Cli, args: &cli::ListArgs) -> Result<()> {
             println!(
                 "{} {} blocks:\n",
                 "Showing".dimmed(),
-                format_number_usize(blocks.len()).cyan()
+                format_number_usize(blocks.len()).bold()
             );
             for block in &blocks {
                 let link = block.user_link.as_deref().unwrap_or("[no link]");
                 println!(
                     "{} {}",
-                    format_short_id(&block.account_id).cyan(),
+                    format_short_id(&block.account_id).dimmed(),
                     link.dimmed()
                 );
             }
@@ -1665,13 +1665,13 @@ fn cmd_list(cli: &Cli, args: &cli::ListArgs) -> Result<()> {
             println!(
                 "{} {} mutes:\n",
                 "Showing".dimmed(),
-                format_number_usize(mutes.len()).cyan()
+                format_number_usize(mutes.len()).bold()
             );
             for mute in &mutes {
                 let link = mute.user_link.as_deref().unwrap_or("[no link]");
                 println!(
                     "{} {}",
-                    format_short_id(&mute.account_id).cyan(),
+                    format_short_id(&mute.account_id).dimmed(),
                     link.dimmed()
                 );
             }
@@ -1938,14 +1938,14 @@ fn cmd_tweet_thread(cli: &Cli, storage: &Storage, args: &cli::TweetArgs) -> Resu
                 println!(
                     "{} {} {}",
                     date.dimmed(),
-                    format_short_id(&tweet.id).cyan(),
+                    format_short_id(&tweet.id).dimmed(),
                     text
                 );
                 if args.engagement {
                     println!(
                         "  {} likes  {} retweets",
-                        format_number(tweet.favorite_count).cyan(),
-                        format_number(tweet.retweet_count).cyan()
+                        format_number(tweet.favorite_count).bold(),
+                        format_number(tweet.retweet_count).bold()
                     );
                 }
             }
