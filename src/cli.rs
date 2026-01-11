@@ -178,6 +178,10 @@ pub struct StatsArgs {
     #[arg(long)]
     pub engagement: bool,
 
+    /// Show content analysis (media/link ratios, length distribution, hashtags, mentions)
+    #[arg(long)]
+    pub content: bool,
+
     /// Number of top items to show
     #[arg(long, short = 'n', default_value = "10")]
     pub top: usize,

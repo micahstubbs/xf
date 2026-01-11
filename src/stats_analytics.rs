@@ -520,18 +520,359 @@ impl EngagementStats {
     }
 }
 
-/// Truncate text to approximately `max_len` characters at a word boundary.
-#[must_use]
-fn truncate_text(text: &str, max_len: usize) -> String {
-    if text.len() <= max_len {
-        return text.to_string();
+// ============================================================================
+// Content Analysis
+// ============================================================================
+
+/// Content breakdown and interaction patterns.
+#[derive(Debug, Clone, Serialize)]
+pub struct ContentStats {
+    /// Percentage of tweets with media attachments
+    pub media_ratio: f64,
+    /// Percentage of tweets with links
+    pub link_ratio: f64,
+    /// Percentage of tweets that are replies
+    pub reply_ratio: f64,
+    /// Number of tweets that are part of self-threads
+    pub thread_count: u64,
+    /// Number of standalone tweets (non-reply, non-thread)
+    pub standalone_count: u64,
+    /// Total tweet count
+    pub total_count: u64,
+    /// Average tweet length in characters
+    pub avg_tweet_length: f64,
+    /// Distribution of tweet lengths by bucket
+    pub length_distribution: Vec<LengthBucket>,
+    /// Top hashtags with counts
+    pub top_hashtags: Vec<TagCount>,
+    /// Top mentioned users with counts
+    pub top_mentions: Vec<TagCount>,
+}
+
+/// A length distribution bucket.
+#[derive(Debug, Clone, Serialize)]
+pub struct LengthBucket {
+    /// Label for this bucket (e.g., "0-50")
+    pub label: String,
+    /// Number of tweets in this bucket
+    pub count: u64,
+    /// Percentage of total tweets
+    pub percentage: f64,
+}
+
+/// A hashtag or mention with its count.
+#[derive(Debug, Clone, Serialize)]
+pub struct TagCount {
+    /// The tag or username
+    pub tag: String,
+    /// Number of occurrences
+    pub count: u64,
+}
+
+impl ContentStats {
+    /// Compute content statistics from the storage.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if database queries fail.
+    #[allow(clippy::cast_precision_loss, clippy::cast_sign_loss)]
+    pub fn compute(storage: &Storage, top_n: usize) -> Result<Self> {
+        let (total_count, media_count, link_count, reply_count, thread_count, standalone_count) =
+            Self::query_content_counts(storage)?;
+
+        let media_ratio = if total_count > 0 {
+            (media_count as f64 / total_count as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        let link_ratio = if total_count > 0 {
+            (link_count as f64 / total_count as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        let reply_ratio = if total_count > 0 {
+            (reply_count as f64 / total_count as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        let avg_tweet_length = Self::query_avg_length(storage)?;
+        let length_distribution = Self::query_length_distribution(storage)?;
+        let top_hashtags = Self::query_top_hashtags(storage, top_n)?;
+        let top_mentions = Self::query_top_mentions(storage, top_n)?;
+
+        Ok(Self {
+            media_ratio,
+            link_ratio,
+            reply_ratio,
+            thread_count,
+            standalone_count,
+            total_count,
+            avg_tweet_length,
+            length_distribution,
+            top_hashtags,
+            top_mentions,
+        })
     }
 
-    // Find a good break point
-    let truncated = &text[..max_len];
+    /// Query content type counts.
+    #[allow(clippy::cast_sign_loss)]
+    fn query_content_counts(storage: &Storage) -> Result<(u64, u64, u64, u64, u64, u64)> {
+        let conn = storage.connection();
+
+        // Total tweets
+        let total: i64 = conn.query_row("SELECT COUNT(*) FROM tweets", [], |row| row.get(0))?;
+
+        // Tweets with media
+        let media: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM tweets WHERE media_json IS NOT NULL AND media_json != '[]' AND media_json != ''",
+            [],
+            |row| row.get(0),
+        )?;
+
+        // Tweets with URLs
+        let links: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM tweets WHERE urls_json IS NOT NULL AND urls_json != '[]' AND urls_json != ''",
+            [],
+            |row| row.get(0),
+        )?;
+
+        // Replies (has in_reply_to_status_id)
+        let replies: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM tweets WHERE in_reply_to_status_id IS NOT NULL AND in_reply_to_status_id != ''",
+            [],
+            |row| row.get(0),
+        )?;
+
+        // Self-threads: replies where in_reply_to_user_id matches our user
+        // We need to get our user_id from archive_info
+        let threads: i64 = conn
+            .query_row(
+                r"
+                SELECT COUNT(*) FROM tweets t
+                WHERE t.in_reply_to_status_id IS NOT NULL
+                  AND t.in_reply_to_user_id = (SELECT account_id FROM archive_info LIMIT 1)
+            ",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+
+        let standalone = total - replies;
+
+        Ok((
+            total as u64,
+            media as u64,
+            links as u64,
+            replies as u64,
+            threads as u64,
+            standalone as u64,
+        ))
+    }
+
+    /// Query average tweet length.
+    fn query_avg_length(storage: &Storage) -> Result<f64> {
+        let conn = storage.connection();
+        // Use COALESCE to handle empty tables where AVG returns NULL
+        let avg: f64 = conn.query_row(
+            "SELECT COALESCE(AVG(LENGTH(full_text)), 0) FROM tweets",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(avg)
+    }
+
+    /// Query tweet length distribution.
+    #[allow(
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation
+    )]
+    fn query_length_distribution(storage: &Storage) -> Result<Vec<LengthBucket>> {
+        let conn = storage.connection();
+
+        // Get total for percentages
+        let total: i64 = conn.query_row("SELECT COUNT(*) FROM tweets", [], |row| row.get(0))?;
+        let total = total as u64;
+
+        let query = r"
+            SELECT
+                CASE
+                    WHEN LENGTH(full_text) <= 50 THEN 0
+                    WHEN LENGTH(full_text) <= 140 THEN 1
+                    WHEN LENGTH(full_text) <= 280 THEN 2
+                    ELSE 3
+                END as bucket,
+                COUNT(*) as count
+            FROM tweets
+            GROUP BY bucket
+            ORDER BY bucket
+        ";
+
+        let mut stmt = conn.prepare(query)?;
+        let rows = stmt.query_map([], |row| {
+            let bucket: i64 = row.get(0)?;
+            let count: i64 = row.get(1)?;
+            Ok((bucket as usize, count as u64))
+        })?;
+
+        let bucket_labels = ["0-50", "51-140", "141-280", "280+"];
+        let mut buckets: Vec<LengthBucket> = bucket_labels
+            .iter()
+            .map(|label| LengthBucket {
+                label: (*label).to_string(),
+                count: 0,
+                percentage: 0.0,
+            })
+            .collect();
+
+        for row in rows {
+            let (bucket_idx, count) = row?;
+            if bucket_idx < buckets.len() {
+                buckets[bucket_idx].count = count;
+                buckets[bucket_idx].percentage = if total > 0 {
+                    (count as f64 / total as f64) * 100.0
+                } else {
+                    0.0
+                };
+            }
+        }
+
+        Ok(buckets)
+    }
+
+    /// Query top hashtags from the `hashtags_json` column.
+    #[allow(clippy::cast_sign_loss)]
+    fn query_top_hashtags(storage: &Storage, limit: usize) -> Result<Vec<TagCount>> {
+        let conn = storage.connection();
+
+        // The hashtags are stored as JSON array in hashtags_json column
+        // We need to parse them and count
+        let query = "SELECT hashtags_json FROM tweets WHERE hashtags_json IS NOT NULL AND hashtags_json != '[]' AND hashtags_json != ''";
+        let mut stmt = conn.prepare(query)?;
+
+        let mut counts: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+
+        for json_str in rows.flatten() {
+            // Parse JSON array of hashtags
+            if let Ok(tags) = serde_json::from_str::<Vec<String>>(&json_str) {
+                for tag in tags {
+                    let tag_lower = tag.to_lowercase();
+                    *counts.entry(tag_lower).or_default() += 1;
+                }
+            }
+        }
+
+        // Sort by count and take top N
+        let mut sorted: Vec<_> = counts.into_iter().collect();
+        sorted.sort_by(|a, b| b.1.cmp(&a.1));
+
+        Ok(sorted
+            .into_iter()
+            .take(limit)
+            .map(|(tag, count)| TagCount { tag, count })
+            .collect())
+    }
+
+    /// Query top mentions from the `mentions_json` column.
+    #[allow(clippy::cast_sign_loss)]
+    fn query_top_mentions(storage: &Storage, limit: usize) -> Result<Vec<TagCount>> {
+        let conn = storage.connection();
+
+        let query = "SELECT mentions_json FROM tweets WHERE mentions_json IS NOT NULL AND mentions_json != '[]' AND mentions_json != ''";
+        let mut stmt = conn.prepare(query)?;
+
+        let mut counts: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+
+        for json_str in rows.flatten() {
+            // Parse JSON array of mention objects
+            if let Ok(mentions) = serde_json::from_str::<Vec<serde_json::Value>>(&json_str) {
+                for mention in mentions {
+                    if let Some(screen_name) = mention.get("screen_name").and_then(|v| v.as_str()) {
+                        let name_lower = screen_name.to_lowercase();
+                        *counts.entry(name_lower).or_default() += 1;
+                    }
+                }
+            }
+        }
+
+        // Sort by count and take top N
+        let mut sorted: Vec<_> = counts.into_iter().collect();
+        sorted.sort_by(|a, b| b.1.cmp(&a.1));
+
+        Ok(sorted
+            .into_iter()
+            .take(limit)
+            .map(|(tag, count)| TagCount { tag, count })
+            .collect())
+    }
+}
+
+/// Format length distribution as a horizontal bar chart.
+#[must_use]
+#[allow(clippy::cast_precision_loss)]
+pub fn format_length_distribution(distribution: &[LengthBucket]) -> String {
+    let max_count = distribution.iter().map(|b| b.count).max().unwrap_or(1);
+
+    distribution
+        .iter()
+        .map(|bucket| {
+            let bar_len = if max_count > 0 {
+                let scaled = bucket.count.saturating_mul(15) / max_count;
+                usize::try_from(scaled).unwrap_or(usize::MAX)
+            } else {
+                0
+            };
+            format!(
+                "{:>7} {} {:>5.1}%",
+                bucket.label,
+                "█".repeat(bar_len),
+                bucket.percentage
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Format top tags as a compact inline list.
+#[must_use]
+pub fn format_top_tags(tags: &[TagCount], prefix: &str) -> String {
+    if tags.is_empty() {
+        return String::new();
+    }
+
+    tags.iter()
+        .take(6)
+        .map(|t| format!("{}{} ({})", prefix, t.tag, t.count))
+        .collect::<Vec<_>>()
+        .join("  ")
+}
+
+/// Truncate text to approximately `max_len` characters at a word boundary.
+/// Uses character count, not byte count, to properly handle UTF-8.
+#[must_use]
+fn truncate_text(text: &str, max_len: usize) -> String {
+    // Normalize whitespace first
+    let text = text.replace('\n', " ").replace('\r', "");
+    let char_count = text.chars().count();
+
+    if char_count <= max_len {
+        return text;
+    }
+
+    // Take max_len - 3 characters to leave room for "..."
+    let truncated: String = text.chars().take(max_len.saturating_sub(3)).collect();
+
+    // Try to find a word boundary (space) to break at
     truncated.rfind(' ').map_or_else(
         || format!("{truncated}..."),
-        |last_space| format!("{}...", &text[..last_space]),
+        |last_space| format!("{}...", &truncated[..last_space]),
     )
 }
 

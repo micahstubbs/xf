@@ -19,7 +19,7 @@ use tracing_subscriber::EnvFilter;
 use xf::cli;
 use xf::config::Config;
 use xf::search;
-use xf::stats_analytics::{self, EngagementStats, TemporalStats};
+use xf::stats_analytics::{self, ContentStats, EngagementStats, TemporalStats};
 use xf::{
     ArchiveParser, ArchiveStats, Cli, Commands, DataType, ExportFormat, ExportTarget, ListTarget,
     OutputFormat, SearchEngine, SearchResult, SearchResultType, SortOrder, Storage, Tweet,
@@ -843,7 +843,14 @@ fn cmd_stats(cli: &Cli, args: &cli::StatsArgs) -> Result<()> {
         None
     };
 
-    let needs_extended = needs_tweets || args.temporal || args.engagement;
+    // Content analytics
+    let content = if args.content {
+        Some(ContentStats::compute(&storage, args.top)?)
+    } else {
+        None
+    };
+
+    let needs_extended = needs_tweets || args.temporal || args.engagement || args.content;
 
     match cli.format {
         OutputFormat::Json | OutputFormat::JsonPretty => {
@@ -855,6 +862,7 @@ fn cmd_stats(cli: &Cli, args: &cli::StatsArgs) -> Result<()> {
                     top_mentions,
                     temporal,
                     engagement,
+                    content,
                 };
                 let json = if matches!(cli.format, OutputFormat::JsonPretty) {
                     serde_json::to_string_pretty(&extended)?
@@ -1101,6 +1109,70 @@ fn cmd_stats(cli: &Cli, args: &cli::StatsArgs) -> Result<()> {
                     }
                 }
             }
+
+            #[allow(clippy::cast_possible_wrap)]
+            if let Some(ref content) = content {
+                println!();
+                println!("{}", "Content Analysis".bold().cyan());
+                println!("{}", "─".repeat(60));
+
+                // Content type ratios
+                println!(
+                    "  {:<25} {:>6.1}%",
+                    "Tweets with media:", content.media_ratio
+                );
+                println!(
+                    "  {:<25} {:>6.1}%",
+                    "Tweets with links:", content.link_ratio
+                );
+                println!("  {:<25} {:>6.1}%", "Replies:", content.reply_ratio);
+                println!(
+                    "  {:<25} {:>10}",
+                    "Self-threads:",
+                    format_count(content.thread_count as i64)
+                );
+                println!(
+                    "  {:<25} {:>10}",
+                    "Standalone tweets:",
+                    format_count(content.standalone_count as i64)
+                );
+
+                // Tweet length
+                println!();
+                println!(
+                    "  {:<25} {:.1} chars",
+                    "Average tweet length:", content.avg_tweet_length
+                );
+                println!();
+                println!("  {}:", "Length distribution".dimmed());
+                let length_chart =
+                    stats_analytics::format_length_distribution(&content.length_distribution);
+                for line in length_chart.lines() {
+                    println!("  {line}");
+                }
+
+                // Top hashtags
+                if !content.top_hashtags.is_empty() {
+                    println!();
+                    println!("  {}:", "Top hashtags".dimmed());
+                    for tag in content.top_hashtags.iter().take(6) {
+                        println!("    #{:<20} {}", tag.tag, format_count(tag.count as i64));
+                    }
+                }
+
+                // Top mentions
+                if !content.top_mentions.is_empty() {
+                    println!();
+                    println!("  {}:", "Top mentions".dimmed());
+                    for mention in content.top_mentions.iter().take(6) {
+                        println!(
+                            "    @{:<20} {}",
+                            mention.tag,
+                            format_count(mention.count as i64)
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -1120,6 +1192,8 @@ struct StatsExtended {
     temporal: Option<TemporalStats>,
     #[serde(skip_serializing_if = "Option::is_none")]
     engagement: Option<EngagementStats>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<ContentStats>,
 }
 
 #[derive(Serialize)]
