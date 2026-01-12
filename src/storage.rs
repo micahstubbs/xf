@@ -52,6 +52,22 @@ pub struct FtsRebuildStats {
     pub grok: usize,
 }
 
+/// Aggregate counts and date bounds for archive tables.
+#[derive(Debug, Clone)]
+pub struct AllCounts {
+    pub tweets_count: i64,
+    pub likes_count: i64,
+    pub dms_count: i64,
+    pub dm_conversations_count: i64,
+    pub followers_count: i64,
+    pub following_count: i64,
+    pub blocks_count: i64,
+    pub mutes_count: i64,
+    pub grok_messages_count: i64,
+    pub first_tweet_date: Option<DateTime<Utc>>,
+    pub last_tweet_date: Option<DateTime<Utc>>,
+}
+
 impl Storage {
     /// Open or create the database at the given path.
     ///
@@ -703,72 +719,62 @@ impl Storage {
     ///
     /// Returns an error if statistics queries fail.
     pub fn get_stats(&self) -> Result<ArchiveStats> {
-        let tweets_count: i64 = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM tweets", [], |row| row.get(0))?;
-
-        let likes_count: i64 = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM likes", [], |row| row.get(0))?;
-
-        let dms_count: i64 =
-            self.conn
-                .query_row("SELECT COUNT(*) FROM direct_messages", [], |row| row.get(0))?;
-
-        let dm_conversations_count: i64 =
-            self.conn
-                .query_row("SELECT COUNT(*) FROM dm_conversations", [], |row| {
-                    row.get(0)
-                })?;
-
-        let followers_count: i64 =
-            self.conn
-                .query_row("SELECT COUNT(*) FROM followers", [], |row| row.get(0))?;
-
-        let following_count: i64 =
-            self.conn
-                .query_row("SELECT COUNT(*) FROM following", [], |row| row.get(0))?;
-
-        let blocks_count: i64 = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM blocks", [], |row| row.get(0))?;
-
-        let mutes_count: i64 = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM mutes", [], |row| row.get(0))?;
-
-        let grok_messages_count: i64 =
-            self.conn
-                .query_row("SELECT COUNT(*) FROM grok_messages", [], |row| row.get(0))?;
-
-        let first_tweet_date: Option<String> = self
-            .conn
-            .query_row("SELECT MIN(created_at) FROM tweets", [], |row| row.get(0))
-            .ok();
-
-        let last_tweet_date: Option<String> = self
-            .conn
-            .query_row("SELECT MAX(created_at) FROM tweets", [], |row| row.get(0))
-            .ok();
+        let counts = self.get_all_counts()?;
 
         Ok(ArchiveStats {
-            tweets_count,
-            likes_count,
-            dms_count,
-            dm_conversations_count,
-            followers_count,
-            following_count,
-            blocks_count,
-            mutes_count,
-            grok_messages_count,
-            first_tweet_date: first_tweet_date
-                .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
-                .map(|dt| dt.with_timezone(&Utc)),
-            last_tweet_date: last_tweet_date
-                .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
-                .map(|dt| dt.with_timezone(&Utc)),
+            tweets_count: counts.tweets_count,
+            likes_count: counts.likes_count,
+            dms_count: counts.dms_count,
+            dm_conversations_count: counts.dm_conversations_count,
+            followers_count: counts.followers_count,
+            following_count: counts.following_count,
+            blocks_count: counts.blocks_count,
+            mutes_count: counts.mutes_count,
+            grok_messages_count: counts.grok_messages_count,
+            first_tweet_date: counts.first_tweet_date,
+            last_tweet_date: counts.last_tweet_date,
             index_built_at: Utc::now(),
         })
+    }
+
+    /// Get all archive counts and tweet date bounds in a single query.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the consolidated query fails.
+    pub fn get_all_counts(&self) -> Result<AllCounts> {
+        let query = r"
+            SELECT
+                (SELECT COUNT(*) FROM tweets) AS tweets_count,
+                (SELECT COUNT(*) FROM likes) AS likes_count,
+                (SELECT COUNT(*) FROM direct_messages) AS dms_count,
+                (SELECT COUNT(*) FROM dm_conversations) AS dm_conversations_count,
+                (SELECT COUNT(*) FROM followers) AS followers_count,
+                (SELECT COUNT(*) FROM following) AS following_count,
+                (SELECT COUNT(*) FROM blocks) AS blocks_count,
+                (SELECT COUNT(*) FROM mutes) AS mutes_count,
+                (SELECT COUNT(*) FROM grok_messages) AS grok_messages_count,
+                (SELECT MIN(created_at) FROM tweets) AS first_tweet_date,
+                (SELECT MAX(created_at) FROM tweets) AS last_tweet_date
+        ";
+
+        Ok(self.conn.query_row(query, [], |row| {
+            let first_tweet_date: Option<String> = row.get(9)?;
+            let last_tweet_date: Option<String> = row.get(10)?;
+            Ok(AllCounts {
+                tweets_count: row.get(0)?,
+                likes_count: row.get(1)?,
+                dms_count: row.get(2)?,
+                dm_conversations_count: row.get(3)?,
+                followers_count: row.get(4)?,
+                following_count: row.get(5)?,
+                blocks_count: row.get(6)?,
+                mutes_count: row.get(7)?,
+                grok_messages_count: row.get(8)?,
+                first_tweet_date: parse_rfc3339_opt(first_tweet_date),
+                last_tweet_date: parse_rfc3339_opt(last_tweet_date),
+            })
+        })?)
     }
 
     /// Get the count of documents expected in the Tantivy index.
@@ -2998,6 +3004,108 @@ mod tests {
         assert_eq!(stats.blocks_count, 1);
         assert_eq!(stats.mutes_count, 1);
         assert_eq!(stats.grok_messages_count, 1);
+    }
+
+    #[test]
+    fn test_get_all_counts() {
+        let mut storage = Storage::open_memory().unwrap();
+
+        let early_date = DateTime::parse_from_rfc3339("2020-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let late_date = DateTime::parse_from_rfc3339("2024-12-31T23:59:59Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let tweets = vec![
+            Tweet {
+                id: "1".to_string(),
+                created_at: early_date,
+                full_text: "Early tweet".to_string(),
+                source: None,
+                favorite_count: 0,
+                retweet_count: 0,
+                lang: None,
+                in_reply_to_status_id: None,
+                in_reply_to_user_id: None,
+                in_reply_to_screen_name: None,
+                is_retweet: false,
+                hashtags: vec![],
+                user_mentions: vec![],
+                urls: vec![],
+                media: vec![],
+            },
+            Tweet {
+                id: "2".to_string(),
+                created_at: late_date,
+                full_text: "Late tweet".to_string(),
+                source: None,
+                favorite_count: 0,
+                retweet_count: 0,
+                lang: None,
+                in_reply_to_status_id: None,
+                in_reply_to_user_id: None,
+                in_reply_to_screen_name: None,
+                is_retweet: false,
+                hashtags: vec![],
+                user_mentions: vec![],
+                urls: vec![],
+                media: vec![],
+            },
+        ];
+        storage.store_tweets(&tweets).unwrap();
+        storage
+            .store_likes(&[create_test_like("l1", Some("Like"))])
+            .unwrap();
+        storage
+            .store_dm_conversations(&[DmConversation {
+                conversation_id: "conv1".to_string(),
+                messages: vec![
+                    create_test_dm("dm1", "Hello"),
+                    create_test_dm("dm2", "World"),
+                ],
+            }])
+            .unwrap();
+        storage
+            .store_followers(&[Follower {
+                account_id: "f1".to_string(),
+                user_link: None,
+            }])
+            .unwrap();
+        storage
+            .store_following(&[Following {
+                account_id: "fo1".to_string(),
+                user_link: None,
+            }])
+            .unwrap();
+        storage
+            .store_blocks(&[Block {
+                account_id: "b1".to_string(),
+                user_link: None,
+            }])
+            .unwrap();
+        storage
+            .store_mutes(&[Mute {
+                account_id: "m1".to_string(),
+                user_link: None,
+            }])
+            .unwrap();
+        storage
+            .store_grok_messages(&[create_test_grok_message("c1", "Grok")])
+            .unwrap();
+
+        let counts = storage.get_all_counts().unwrap();
+        assert_eq!(counts.tweets_count, 2);
+        assert_eq!(counts.likes_count, 1);
+        assert_eq!(counts.dms_count, 2);
+        assert_eq!(counts.dm_conversations_count, 1);
+        assert_eq!(counts.followers_count, 1);
+        assert_eq!(counts.following_count, 1);
+        assert_eq!(counts.blocks_count, 1);
+        assert_eq!(counts.mutes_count, 1);
+        assert_eq!(counts.grok_messages_count, 1);
+        assert_eq!(counts.first_tweet_date, Some(early_date));
+        assert_eq!(counts.last_tweet_date, Some(late_date));
     }
 
     #[test]
