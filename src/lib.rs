@@ -216,6 +216,7 @@ pub fn generate_embeddings(storage: &Storage, show_progress: bool) -> Result<()>
     use crate::hash_embedder::HashEmbedder;
     use colored::Colorize;
     use indicatif::{ProgressBar, ProgressStyle};
+    use rayon::prelude::*;
     use std::collections::{HashMap, HashSet};
     use std::time::Instant;
     use tracing::warn;
@@ -223,7 +224,8 @@ pub fn generate_embeddings(storage: &Storage, show_progress: bool) -> Result<()>
     // Type alias for embedding records: (doc_id, doc_type, embedding, content_hash)
     type EmbedRecord = (String, String, Vec<f32>, Option<[u8; 32]>);
 
-    const BATCH_SIZE: usize = 100;
+    const EMBED_CHUNK_SIZE: usize = 1000;
+    const STORE_BATCH_SIZE: usize = 100;
     let embed_start = Instant::now();
     let embedder = HashEmbedder::default();
 
@@ -312,7 +314,7 @@ pub fn generate_embeddings(storage: &Storage, show_progress: bool) -> Result<()>
     let mut reused_count = 0;
     let mut skipped_count = 0;
 
-    for chunk in docs.chunks(BATCH_SIZE) {
+    for chunk in docs.chunks(EMBED_CHUNK_SIZE) {
         let mut batch: Vec<EmbedRecord> = Vec::new();
         let mut candidates: Vec<(String, String, String, [u8; 32])> = Vec::new();
 
@@ -366,7 +368,38 @@ pub fn generate_embeddings(storage: &Storage, show_progress: bool) -> Result<()>
             }
         }
 
-        for (doc_id, doc_type, canonical, hash) in candidates {
+        let mut new_hashes: Vec<(String, String, [u8; 32])> = Vec::new();
+        let mut new_hashes_set: HashSet<[u8; 32]> = HashSet::new();
+        for (doc_id, _doc_type, canonical, hash) in &candidates {
+            if batch_cache.contains_key(hash) {
+                continue;
+            }
+            if new_hashes_set.insert(*hash) {
+                new_hashes.push((doc_id.clone(), canonical.clone(), *hash));
+            }
+        }
+
+        if !new_hashes.is_empty() {
+            let computed_embeddings: Vec<([u8; 32], Vec<f32>)> = new_hashes
+                .par_iter()
+                .filter_map(
+                    |(doc_id, canonical, hash)| match embedder.embed(canonical) {
+                        Ok(embedding) => Some((*hash, embedding)),
+                        Err(e) => {
+                            warn!("Failed to embed doc {}: {}", doc_id, e);
+                            None
+                        }
+                    },
+                )
+                .collect();
+
+            for (hash, embedding) in computed_embeddings {
+                batch_cache.insert(hash, embedding);
+            }
+        }
+
+        let mut seen_new_hashes: HashSet<[u8; 32]> = HashSet::new();
+        for (doc_id, doc_type, _canonical, hash) in candidates {
             // Reuse an existing embedding if identical content exists.
             if let Some(existing_embedding) = batch_cache.get(&hash) {
                 batch.push((
@@ -375,27 +408,21 @@ pub fn generate_embeddings(storage: &Storage, show_progress: bool) -> Result<()>
                     existing_embedding.clone(),
                     Some(hash),
                 ));
-                reused_count += 1;
-                continue;
-            }
 
-            // Generate embedding
-            match embedder.embed(&canonical) {
-                Ok(embedding) => {
-                    batch_cache.insert(hash, embedding.clone());
-                    batch.push((doc_id.clone(), doc_type.clone(), embedding, Some(hash)));
+                if existing_hashes.contains(&hash) || !seen_new_hashes.insert(hash) {
+                    reused_count += 1;
                 }
-                Err(e) => {
-                    warn!("Failed to embed doc {}: {}", doc_id, e);
-                    skipped_count += 1;
-                }
+            } else {
+                skipped_count += 1;
             }
         }
 
         // Store batch
         if !batch.is_empty() {
-            storage.store_embeddings_batch(&batch)?;
-            stored_count += batch.len();
+            for chunk in batch.chunks(STORE_BATCH_SIZE) {
+                storage.store_embeddings_batch(chunk)?;
+                stored_count += chunk.len();
+            }
         }
     }
 
@@ -486,11 +513,18 @@ fn format_bytes_with_unit(bytes: u64, unit: u64, suffix: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        csv_escape_text, format_bytes_i64, format_duration, format_number,
-        format_relative_date_with_base, format_short_id,
+        Like, Storage, Tweet, TweetUrl, csv_escape_text, format_bytes_i64, format_duration,
+        format_number, format_relative_date_with_base, format_short_id, generate_embeddings,
     };
-    use chrono::{Duration, TimeZone, Utc};
+    use crate::canonicalize::{canonicalize_for_embedding, content_hash};
+    use crate::embedder::Embedder;
+    use crate::hash_embedder::HashEmbedder;
+    use crate::model::{DirectMessage, DmConversation, GrokMessage};
+    use anyhow::Result;
+    use chrono::{DateTime, Duration, TimeZone, Utc};
     use std::time::Duration as StdDuration;
+
+    type EmbedBatch = Vec<(String, String, Vec<f32>, Option<[u8; 32]>)>;
 
     #[test]
     fn format_number_adds_separators() {
@@ -568,5 +602,166 @@ mod tests {
     #[test]
     fn format_bytes_i64_clamps_negative() {
         assert_eq!(format_bytes_i64(-5), "0 B");
+    }
+
+    fn seed_storage(storage: &mut Storage, base: DateTime<Utc>) -> Result<()> {
+        let tweet = Tweet {
+            id: "t1".to_string(),
+            created_at: base,
+            full_text: "hello world".to_string(),
+            source: None,
+            favorite_count: 0,
+            retweet_count: 0,
+            lang: None,
+            in_reply_to_status_id: None,
+            in_reply_to_user_id: None,
+            in_reply_to_screen_name: None,
+            is_retweet: false,
+            hashtags: Vec::new(),
+            user_mentions: Vec::new(),
+            urls: vec![TweetUrl {
+                url: "https://example.com".to_string(),
+                expanded_url: None,
+                display_url: None,
+            }],
+            media: Vec::new(),
+        };
+        storage.store_tweets(&[tweet])?;
+
+        let like = Like {
+            tweet_id: "l1".to_string(),
+            full_text: Some("liked tweet".to_string()),
+            expanded_url: None,
+        };
+        storage.store_likes(&[like])?;
+
+        let dm = DirectMessage {
+            id: "dm1".to_string(),
+            conversation_id: "conv1".to_string(),
+            sender_id: "u1".to_string(),
+            recipient_id: "u2".to_string(),
+            text: "dm body".to_string(),
+            created_at: base,
+            urls: Vec::new(),
+            media_urls: Vec::new(),
+        };
+        storage.store_dm_conversations(&[DmConversation {
+            conversation_id: "conv1".to_string(),
+            messages: vec![dm],
+        }])?;
+
+        let grok = GrokMessage {
+            chat_id: "chat1".to_string(),
+            message: "grok response".to_string(),
+            sender: "user".to_string(),
+            created_at: base,
+            grok_mode: None,
+        };
+        storage.store_grok_messages(&[grok])?;
+
+        Ok(())
+    }
+
+    fn generate_embeddings_sequential(storage: &Storage) -> Result<()> {
+        let embedder = HashEmbedder::default();
+        let mut batch: EmbedBatch = Vec::new();
+
+        for tweet in storage.get_all_tweets(None)? {
+            let canonical = canonicalize_for_embedding(&tweet.full_text);
+            if canonical.is_empty() {
+                continue;
+            }
+            let hash = content_hash(&canonical);
+            let embedding = embedder.embed(&canonical)?;
+            batch.push((tweet.id, "tweet".to_string(), embedding, Some(hash)));
+        }
+
+        for like in storage.get_all_likes(None)? {
+            let Some(text) = like.full_text else {
+                continue;
+            };
+            if text.is_empty() {
+                continue;
+            }
+            let canonical = canonicalize_for_embedding(&text);
+            if canonical.is_empty() {
+                continue;
+            }
+            let hash = content_hash(&canonical);
+            let embedding = embedder.embed(&canonical)?;
+            batch.push((like.tweet_id, "like".to_string(), embedding, Some(hash)));
+        }
+
+        for dm in storage.get_all_dms(None)? {
+            if dm.text.is_empty() {
+                continue;
+            }
+            let canonical = canonicalize_for_embedding(&dm.text);
+            if canonical.is_empty() {
+                continue;
+            }
+            let hash = content_hash(&canonical);
+            let embedding = embedder.embed(&canonical)?;
+            batch.push((dm.id, "dm".to_string(), embedding, Some(hash)));
+        }
+
+        for msg in storage.get_all_grok_messages(None)? {
+            if msg.message.is_empty() {
+                continue;
+            }
+            let canonical = canonicalize_for_embedding(&msg.message);
+            if canonical.is_empty() {
+                continue;
+            }
+            let hash = content_hash(&canonical);
+            let embedding = embedder.embed(&canonical)?;
+            let doc_id = format!(
+                "{}_{}_{}_{}",
+                msg.chat_id,
+                msg.created_at.timestamp(),
+                msg.created_at.timestamp_subsec_nanos(),
+                msg.sender
+            );
+            batch.push((doc_id, "grok".to_string(), embedding, Some(hash)));
+        }
+
+        if !batch.is_empty() {
+            storage.store_embeddings_batch(&batch)?;
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn generate_embeddings_matches_sequential_output() -> Result<()> {
+        let base = Utc
+            .with_ymd_and_hms(2025, 1, 10, 12, 0, 0)
+            .single()
+            .unwrap();
+
+        let mut storage_seq = Storage::open_memory()?;
+        seed_storage(&mut storage_seq, base)?;
+        generate_embeddings_sequential(&storage_seq)?;
+        let mut seq = storage_seq.load_all_embeddings()?;
+
+        let mut storage_par = Storage::open_memory()?;
+        seed_storage(&mut storage_par, base)?;
+        generate_embeddings(&storage_par, false)?;
+        let mut par = storage_par.load_all_embeddings()?;
+
+        seq.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+        par.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+
+        assert_eq!(seq.len(), par.len());
+        for ((id_a, ty_a, emb_a), (id_b, ty_b, emb_b)) in seq.iter().zip(par.iter()) {
+            assert_eq!(id_a, id_b);
+            assert_eq!(ty_a, ty_b);
+            assert_eq!(emb_a.len(), emb_b.len());
+            for (a, b) in emb_a.iter().zip(emb_b.iter()) {
+                assert!((a - b).abs() < 1e-6);
+            }
+        }
+
+        Ok(())
     }
 }

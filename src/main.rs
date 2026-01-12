@@ -24,12 +24,12 @@ use xf::cli;
 use xf::config::Config;
 use xf::date_parser;
 use xf::embedder::Embedder;
-use xf::hash_embedder::{DEFAULT_DIMENSION, HashEmbedder};
+use xf::hash_embedder::HashEmbedder;
 use xf::hybrid::{self, SearchMode};
 use xf::repl;
 use xf::search;
 use xf::stats_analytics::{self, ContentStats, EngagementStats, TemporalStats};
-use xf::vector::{VectorIndex, write_vector_index};
+use xf::vector::{VECTOR_INDEX_FILENAME, VectorIndex, write_vector_index};
 use xf::{
     ArchiveParser, ArchiveStats, CONTENT_DIVIDER_WIDTH, Cli, Commands, DataType, ExportFormat,
     ExportTarget, HEADER_DIVIDER_WIDTH, ListTarget, OutputFormat, SearchEngine, SearchResult,
@@ -75,7 +75,12 @@ impl VectorIndexCache {
         }
     }
 
-    fn load<'a>(&'a self, storage: &Storage, db_path: &Path) -> Result<(&'a VectorIndex, bool)> {
+    fn load<'a>(
+        &'a self,
+        storage: &Storage,
+        db_path: &Path,
+        index_path: &Path,
+    ) -> Result<(&'a VectorIndex, bool)> {
         if let Some(index) = self.index.get() {
             self.warn_if_stale(storage, db_path);
             return Ok((index, false));
@@ -90,18 +95,15 @@ impl VectorIndexCache {
             return Ok((index, false));
         }
 
-        info!("Loading embeddings into VectorIndex (first search)...");
+        info!("Loading VectorIndex (first search)...");
         let start = Instant::now();
-        let embeddings = storage.load_all_embeddings()?;
-        let mut index = VectorIndex::new(DEFAULT_DIMENSION);
-        let mut type_counts: HashMap<String, usize> = HashMap::new();
-        let mut embedding_count = 0_usize;
 
-        for (doc_id, doc_type, embedding) in embeddings {
-            embedding_count += 1;
-            *type_counts.entry(doc_type.clone()).or_insert(0) += 1;
-            index.add(doc_id, doc_type, embedding);
-        }
+        // Try file first (fast path), fall back to storage (slow path)
+        let index = VectorIndex::load_from_file_or_storage(index_path, storage)?;
+
+        // Collect stats for staleness checking
+        let type_counts: HashMap<String, usize> = HashMap::new();
+        let embedding_count = index.len();
 
         let db_mtime = db_path
             .metadata()
@@ -1175,7 +1177,7 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
 
     // Load vector index for semantic/hybrid search (cached per process)
     let vector_index = if matches!(args.mode, SearchMode::Semantic | SearchMode::Hybrid) {
-        let index = load_vector_index_cached(&storage, &db_path)?;
+        let index = load_vector_index_cached(&storage, &db_path, &index_path)?;
         if matches!(args.mode, SearchMode::Semantic)
             && !has_embeddings_for_types(doc_types.as_deref())
         {
@@ -1474,8 +1476,12 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
     Ok(())
 }
 
-fn load_vector_index_cached(storage: &Storage, db_path: &Path) -> Result<&'static VectorIndex> {
-    let (index, _loaded_now) = VECTOR_INDEX_CACHE.load(storage, db_path)?;
+fn load_vector_index_cached(
+    storage: &Storage,
+    db_path: &Path,
+    index_path: &Path,
+) -> Result<&'static VectorIndex> {
+    let (index, _loaded_now) = VECTOR_INDEX_CACHE.load(storage, db_path, index_path)?;
     Ok(index)
 }
 
@@ -3197,6 +3203,10 @@ fn cmd_doctor(cli: &Cli, args: &cli::DoctorArgs) -> Result<()> {
                             let perf_checks =
                                 doctor::run_performance_benchmarks(&index_path, &engine, &storage);
                             all_checks.extend(perf_checks);
+
+                            // ========== Vector Index Checks ==========
+                            info!("Checking vector index...");
+                            all_checks.extend(check_vector_index_health(&index_path, &storage));
                         }
                         Err(e) => {
                             warn!("Failed to open index: {}", e);
@@ -3563,6 +3573,138 @@ fn cmd_shell(cli: &Cli, args: &cli::ShellArgs) -> Result<()> {
     repl::run(storage, search, config)
 }
 
+// ============================================================================
+// Vector Index Health Checks
+// ============================================================================
+
+/// Run health checks on the vector index file.
+///
+/// Checks for:
+/// - File existence
+/// - File size and record count
+/// - Consistency with database embedding count
+#[allow(clippy::too_many_lines, clippy::cast_possible_wrap)]
+fn check_vector_index_health(index_path: &Path, storage: &Storage) -> Vec<HealthCheck> {
+    let mut checks = Vec::new();
+    let vector_file = index_path.join(VECTOR_INDEX_FILENAME);
+
+    if !vector_file.exists() {
+        checks.push(HealthCheck {
+            category: CheckCategory::Index,
+            name: "Vector Index File".into(),
+            status: CheckStatus::Warning,
+            message: "Not found (semantic search will load from DB)".into(),
+            suggestion: Some("Run 'xf index --force' to regenerate vector index".into()),
+        });
+        return checks;
+    }
+
+    // Check file size
+    match std::fs::metadata(&vector_file) {
+        Ok(meta) => {
+            let size = meta.len();
+            let size_str = format_bytes(size);
+
+            if size < 32 {
+                checks.push(HealthCheck {
+                    category: CheckCategory::Index,
+                    name: "Vector Index File".into(),
+                    status: CheckStatus::Error,
+                    message: format!("File too small ({size_str})"),
+                    suggestion: Some("Run 'xf index --force' to regenerate".into()),
+                });
+                return checks;
+            }
+
+            // Try to read header to get record count
+            match std::fs::read(&vector_file) {
+                Ok(bytes) => {
+                    // Parse record count from header (bytes 12-19)
+                    if bytes.len() >= 20 {
+                        let record_count = u64::from_le_bytes([
+                            bytes[12], bytes[13], bytes[14], bytes[15], bytes[16], bytes[17],
+                            bytes[18], bytes[19],
+                        ]);
+
+                        // Check consistency with DB
+                        let db_count = storage.embedding_count().unwrap_or(0);
+                        let diff = (record_count as i64 - db_count).abs();
+
+                        let (status, message, suggestion) = if diff == 0 {
+                            (
+                                CheckStatus::Pass,
+                                format!(
+                                    "Found ({} records, {})",
+                                    format_number_u64(record_count),
+                                    size_str
+                                ),
+                                None,
+                            )
+                        } else if diff <= 10 || (db_count > 0 && diff * 100 / db_count <= 1) {
+                            (
+                                CheckStatus::Warning,
+                                format!(
+                                    "Found ({} records, DB has {}, diff: {})",
+                                    format_number_u64(record_count),
+                                    format_number(db_count),
+                                    diff
+                                ),
+                                Some("Minor mismatch. Run 'xf index --force' to regenerate".into()),
+                            )
+                        } else {
+                            (
+                                CheckStatus::Warning,
+                                format!(
+                                    "Stale ({} records, DB has {})",
+                                    format_number_u64(record_count),
+                                    format_number(db_count)
+                                ),
+                                Some("Run 'xf index --force' to regenerate vector index".into()),
+                            )
+                        };
+
+                        checks.push(HealthCheck {
+                            category: CheckCategory::Index,
+                            name: "Vector Index File".into(),
+                            status,
+                            message,
+                            suggestion,
+                        });
+                    } else {
+                        checks.push(HealthCheck {
+                            category: CheckCategory::Index,
+                            name: "Vector Index File".into(),
+                            status: CheckStatus::Error,
+                            message: "Header truncated".into(),
+                            suggestion: Some("Run 'xf index --force' to regenerate".into()),
+                        });
+                    }
+                }
+                Err(e) => {
+                    checks.push(HealthCheck {
+                        category: CheckCategory::Index,
+                        name: "Vector Index File".into(),
+                        status: CheckStatus::Error,
+                        message: format!("Cannot read: {e}"),
+                        suggestion: Some("Check file permissions".into()),
+                    });
+                }
+            }
+        }
+        Err(e) => {
+            checks.push(HealthCheck {
+                category: CheckCategory::Index,
+                name: "Vector Index File".into(),
+                status: CheckStatus::Error,
+                message: format!("Cannot stat: {e}"),
+                suggestion: Some("Check file permissions".into()),
+            });
+        }
+    }
+
+    checks
+}
+
 #[cfg(test)]
 mod cache_tests {
     use super::CacheMeta;
@@ -3575,11 +3717,13 @@ mod cache_tests {
     use std::time::SystemTime;
     use tempfile::tempdir;
 
-    fn create_storage() -> Result<(tempfile::TempDir, PathBuf, Storage)> {
+    fn create_storage() -> Result<(tempfile::TempDir, PathBuf, PathBuf, Storage)> {
         let dir = tempdir().context("create temp dir")?;
         let db_path = dir.path().join("xf-test.db");
+        let index_path = dir.path().join("index");
+        std::fs::create_dir_all(&index_path).context("create index dir")?;
         let storage = Storage::open(&db_path)?;
-        Ok((dir, db_path, storage))
+        Ok((dir, db_path, index_path, storage))
     }
 
     fn build_meta(storage: &Storage, db_path: &Path) -> Result<CacheMeta> {
@@ -3602,7 +3746,7 @@ mod cache_tests {
 
     #[test]
     fn test_fresh_when_no_changes() -> Result<()> {
-        let (_dir, db_path, storage) = create_storage()?;
+        let (_dir, db_path, _index_path, storage) = create_storage()?;
         store_sample_embedding(&storage, "doc-1")?;
         let meta = build_meta(&storage, &db_path)?;
         assert!(!meta.is_stale(&storage, &db_path)?);
@@ -3611,7 +3755,7 @@ mod cache_tests {
 
     #[test]
     fn test_stale_after_embedding_added() -> Result<()> {
-        let (_dir, db_path, storage) = create_storage()?;
+        let (_dir, db_path, _index_path, storage) = create_storage()?;
         store_sample_embedding(&storage, "doc-1")?;
         let meta = build_meta(&storage, &db_path)?;
         store_sample_embedding(&storage, "doc-2")?;
@@ -3621,7 +3765,7 @@ mod cache_tests {
 
     #[test]
     fn test_stale_after_embedding_deleted() -> Result<()> {
-        let (_dir, db_path, storage) = create_storage()?;
+        let (_dir, db_path, _index_path, storage) = create_storage()?;
         store_sample_embedding(&storage, "doc-1")?;
         store_sample_embedding(&storage, "doc-2")?;
         let meta = build_meta(&storage, &db_path)?;
@@ -3632,7 +3776,7 @@ mod cache_tests {
 
     #[test]
     fn test_stale_after_db_file_modified() -> Result<()> {
-        let (_dir, db_path, storage) = create_storage()?;
+        let (_dir, db_path, _index_path, storage) = create_storage()?;
         store_sample_embedding(&storage, "doc-1")?;
         let mut meta = build_meta(&storage, &db_path)?;
         meta.db_mtime = SystemTime::UNIX_EPOCH;
@@ -3642,7 +3786,7 @@ mod cache_tests {
 
     #[test]
     fn test_stale_with_missing_db_file() -> Result<()> {
-        let (_dir, _db_path, storage) = create_storage()?;
+        let (_dir, _db_path, _index_path, storage) = create_storage()?;
         let missing_path = PathBuf::from("missing-xf-db.sqlite");
         let meta = CacheMeta {
             db_mtime: SystemTime::UNIX_EPOCH,
@@ -3655,11 +3799,11 @@ mod cache_tests {
 
     #[test]
     fn test_vector_index_initializes_once() -> Result<()> {
-        let (_dir, db_path, storage) = create_storage()?;
+        let (_dir, db_path, index_path, storage) = create_storage()?;
         store_sample_embedding(&storage, "doc-1")?;
         let cache = VectorIndexCache::new();
-        let (first, loaded_first) = cache.load(&storage, &db_path)?;
-        let (second, loaded_second) = cache.load(&storage, &db_path)?;
+        let (first, loaded_first) = cache.load(&storage, &db_path, &index_path)?;
+        let (second, loaded_second) = cache.load(&storage, &db_path, &index_path)?;
         assert!(loaded_first);
         assert!(!loaded_second);
         assert!(std::ptr::eq(first, second));
@@ -3668,9 +3812,9 @@ mod cache_tests {
 
     #[test]
     fn test_vector_index_handles_empty_embeddings() -> Result<()> {
-        let (_dir, db_path, storage) = create_storage()?;
+        let (_dir, db_path, index_path, storage) = create_storage()?;
         let cache = VectorIndexCache::new();
-        let (_index, loaded) = cache.load(&storage, &db_path)?;
+        let (_index, loaded) = cache.load(&storage, &db_path, &index_path)?;
         assert!(loaded);
         let meta = cache.meta().context("cache meta missing")?;
         assert_eq!(meta.embedding_count, 0);
@@ -3679,10 +3823,10 @@ mod cache_tests {
 
     #[test]
     fn test_concurrent_cache_access_after_init() -> Result<()> {
-        let (_dir, db_path, storage) = create_storage()?;
+        let (_dir, db_path, index_path, storage) = create_storage()?;
         store_sample_embedding(&storage, "doc-1")?;
         let cache = Arc::new(VectorIndexCache::new());
-        let _ = cache.load(&storage, &db_path)?;
+        let _ = cache.load(&storage, &db_path, &index_path)?;
 
         let mut handles = Vec::new();
         for _ in 0..4 {
