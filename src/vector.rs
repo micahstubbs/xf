@@ -7,6 +7,7 @@
 use crate::embedder::dot_product_simd;
 use crate::storage::Storage;
 use anyhow::{Result, ensure};
+use fmmap::{MmapFile, MmapFileExt};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::str;
@@ -161,6 +162,69 @@ fn validate_vector_index_layout(bytes: &[u8]) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DocTypeFilter {
+    allowed: [bool; 4],
+}
+
+impl DocTypeFilter {
+    fn new(doc_types: Option<&[&str]>) -> Option<Self> {
+        let doc_types = doc_types?;
+        let mut allowed = [false; 4];
+        for doc_type in doc_types {
+            if let Some(code) = encode_doc_type(doc_type) {
+                let idx = usize::from(code);
+                if idx < allowed.len() {
+                    allowed[idx] = true;
+                }
+            }
+        }
+        Some(Self { allowed })
+    }
+
+    fn allows(self, code: u8) -> bool {
+        let idx = usize::from(code);
+        self.allowed.get(idx).copied().unwrap_or(false)
+    }
+}
+
+fn dot_product_f16_simd(query: &[f32], embedding: &[u8]) -> Option<f32> {
+    use half::f16;
+    use wide::f32x8;
+
+    if embedding.len() != query.len().saturating_mul(2) {
+        return None;
+    }
+    if query.is_empty() {
+        return Some(0.0);
+    }
+
+    let mut sum = f32x8::ZERO;
+    let mut idx = 0usize;
+    while idx + 8 <= query.len() {
+        let mut emb = [0.0f32; 8];
+        for (lane, value) in emb.iter_mut().enumerate() {
+            let byte_idx = (idx + lane) * 2;
+            let arr = [embedding[byte_idx], embedding[byte_idx + 1]];
+            *value = f16::from_le_bytes(arr).to_f32();
+        }
+
+        let mut q_arr = [0.0f32; 8];
+        q_arr.copy_from_slice(&query[idx..idx + 8]);
+        sum += f32x8::from(emb) * f32x8::from(q_arr);
+        idx += 8;
+    }
+
+    let mut scalar_sum = sum.reduce_add();
+    for (pos, value) in query.iter().enumerate().skip(idx) {
+        let byte_idx = pos * 2;
+        let arr = [embedding[byte_idx], embedding[byte_idx + 1]];
+        scalar_sum += f16::from_le_bytes(arr).to_f32() * value;
+    }
+
+    Some(scalar_sum)
 }
 
 /// Default filename for the vector index file.
@@ -348,6 +412,162 @@ impl Ord for ScoredEntry {
     }
 }
 
+/// Mmap-backed vector index for fast similarity search without `SQLite`.
+pub struct MmapVectorIndex {
+    mmap: MmapFile,
+    record_count: usize,
+    dimension: usize,
+    embedding_len: usize,
+    offsets_range: std::ops::Range<usize>,
+}
+
+impl MmapVectorIndex {
+    /// Open a memory-mapped vector index file.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be mapped or fails validation.
+    pub fn open(path: &std::path::Path) -> Result<Self> {
+        let mmap = MmapFile::open(path)?;
+        let bytes = mmap.as_slice();
+        validate_vector_index_layout(bytes)?;
+
+        let header = parse_vector_index_header(bytes)?;
+        let record_count = usize::try_from(header.record_count)
+            .map_err(|_| anyhow::anyhow!("record count overflow"))?;
+        let dimension =
+            usize::try_from(header.dimension).map_err(|_| anyhow::anyhow!("dimension overflow"))?;
+        let embedding_len = dimension
+            .checked_mul(2)
+            .ok_or_else(|| anyhow::anyhow!("embedding length overflow"))?;
+
+        let offsets_start = usize::try_from(header.offsets_start)
+            .map_err(|_| anyhow::anyhow!("offsets start overflow"))?;
+        let offsets_len = record_count
+            .checked_mul(8)
+            .ok_or_else(|| anyhow::anyhow!("offset table length overflow"))?;
+        let offsets_end = offsets_start
+            .checked_add(offsets_len)
+            .ok_or_else(|| anyhow::anyhow!("offset table end overflow"))?;
+
+        Ok(Self {
+            mmap,
+            record_count,
+            dimension,
+            embedding_len,
+            offsets_range: offsets_start..offsets_end,
+        })
+    }
+
+    /// Get number of records in the index.
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.record_count
+    }
+
+    /// Check if the index is empty.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.record_count == 0
+    }
+
+    /// Get embedding dimension for the index.
+    #[must_use]
+    pub const fn dimension(&self) -> usize {
+        self.dimension
+    }
+
+    /// Search for the top-k most similar vectors.
+    #[must_use]
+    pub fn search_top_k(
+        &self,
+        query: &[f32],
+        k: usize,
+        doc_types: Option<&[&str]>,
+    ) -> Vec<VectorSearchResult> {
+        if k == 0 || self.record_count == 0 || query.len() != self.dimension {
+            return Vec::new();
+        }
+
+        let filter = DocTypeFilter::new(doc_types);
+        let bytes = self.mmap.as_slice();
+        let Some(offsets_bytes) = bytes.get(self.offsets_range.clone()) else {
+            return Vec::new();
+        };
+
+        let mut heap: BinaryHeap<ScoredEntry> = BinaryHeap::with_capacity(k + 1);
+
+        for chunk in offsets_bytes.chunks_exact(8) {
+            let offset = usize::try_from(u64::from_le_bytes([
+                chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
+            ]))
+            .unwrap_or(usize::MAX);
+            let Some(record) = bytes.get(offset..) else {
+                continue;
+            };
+            if record.len() < 4 {
+                continue;
+            }
+
+            let doc_type_code = record[0];
+            if let Some(filter) = &filter {
+                if !filter.allows(doc_type_code) {
+                    continue;
+                }
+            }
+            let Some(doc_type) = decode_doc_type(doc_type_code) else {
+                continue;
+            };
+
+            let doc_id_len = u16::from_le_bytes([record[2], record[3]]) as usize;
+            let doc_id_start = 4usize;
+            let doc_id_end = doc_id_start.saturating_add(doc_id_len);
+            let embedding_end = doc_id_end.saturating_add(self.embedding_len);
+            if record.len() < embedding_end {
+                continue;
+            }
+
+            let doc_id_bytes = &record[doc_id_start..doc_id_end];
+            let Ok(doc_id) = str::from_utf8(doc_id_bytes) else {
+                continue;
+            };
+
+            let embedding_bytes = &record[doc_id_end..embedding_end];
+            let Some(score) = dot_product_f16_simd(query, embedding_bytes) else {
+                continue;
+            };
+
+            heap.push(ScoredEntry {
+                score,
+                doc_id: doc_id.to_string(),
+                doc_type: doc_type.to_string(),
+            });
+
+            if heap.len() > k {
+                heap.pop();
+            }
+        }
+
+        let mut results: Vec<VectorSearchResult> = heap
+            .into_iter()
+            .map(|entry| VectorSearchResult {
+                doc_id: entry.doc_id,
+                doc_type: entry.doc_type,
+                score: entry.score,
+            })
+            .collect();
+
+        results.sort_by(|a, b| {
+            b.score
+                .total_cmp(&a.score)
+                .then_with(|| a.doc_id.cmp(&b.doc_id))
+                .then_with(|| a.doc_type.cmp(&b.doc_type))
+        });
+
+        results
+    }
+}
+
 /// In-memory vector index for fast similarity search.
 pub struct VectorIndex {
     /// All stored vectors with their metadata.
@@ -380,6 +600,114 @@ impl VectorIndex {
             vectors: embeddings,
             dimension,
         })
+    }
+
+    /// Load embeddings from a vector index file.
+    ///
+    /// This is the fast path for semantic search - it reads the pre-computed
+    /// index file directly instead of scanning `SQLite`.
+    ///
+    /// Returns `None` if the file doesn't exist. Returns an error if the file
+    /// exists but is corrupt or has an unsupported version.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file exists but cannot be read or is invalid.
+    #[allow(clippy::missing_panics_doc, clippy::cast_possible_truncation)]
+    pub fn load_from_file(index_path: &std::path::Path) -> Result<Option<Self>> {
+        use half::f16;
+        use std::fs::File;
+        use std::io::Read;
+        use tracing::warn;
+
+        let file_path = index_path.join(VECTOR_INDEX_FILENAME);
+        if !file_path.exists() {
+            return Ok(None);
+        }
+
+        // Read entire file into memory
+        let mut file = File::open(&file_path)?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)?;
+
+        // Validate header and layout
+        if let Err(e) = validate_vector_index_layout(&bytes) {
+            warn!("Vector index file is invalid, falling back to DB: {}", e);
+            return Ok(None);
+        }
+
+        let header = parse_vector_index_header(&bytes)?;
+        let dimension = header.dimension as usize;
+        let record_count = header.record_count as usize;
+        let offsets_start = header.offsets_start as usize;
+        let embedding_bytes = dimension * 2; // F16 = 2 bytes per float
+
+        // Parse offset table
+        let offsets_end = offsets_start + record_count * 8;
+        let offsets_slice = &bytes[offsets_start..offsets_end];
+
+        // Pre-allocate vector storage
+        let mut vectors = Vec::with_capacity(record_count);
+
+        // Parse each record
+        for i in 0..record_count {
+            let offset_bytes = &offsets_slice[i * 8..(i + 1) * 8];
+            let offset = u64::from_le_bytes(offset_bytes.try_into().unwrap()) as usize;
+
+            let record = &bytes[offset..];
+
+            // Parse record header
+            let doc_type_code = record[0];
+            let doc_id_len = u16::from_le_bytes([record[2], record[3]]) as usize;
+
+            // Extract doc_id
+            let doc_id_start = 4;
+            let doc_id_bytes = &record[doc_id_start..doc_id_start + doc_id_len];
+            let doc_id = std::str::from_utf8(doc_id_bytes)
+                .map_err(|_| anyhow::anyhow!("invalid UTF-8 in doc_id"))?
+                .to_string();
+
+            // Decode doc_type
+            let doc_type = decode_doc_type(doc_type_code)
+                .ok_or_else(|| anyhow::anyhow!("unknown doc_type code: {doc_type_code}"))?
+                .to_string();
+
+            // Extract and convert embedding F16 -> f32
+            let embedding_start = doc_id_start + doc_id_len;
+            let embedding_slice = &record[embedding_start..embedding_start + embedding_bytes];
+            let embedding: Vec<f32> = embedding_slice
+                .chunks_exact(2)
+                .map(|chunk| {
+                    let arr: [u8; 2] = chunk.try_into().unwrap();
+                    f16::from_le_bytes(arr).to_f32()
+                })
+                .collect();
+
+            vectors.push((doc_id, doc_type, embedding));
+        }
+
+        Ok(Some(Self { vectors, dimension }))
+    }
+
+    /// Try to load from file first, fall back to storage if unavailable.
+    ///
+    /// This is the preferred method for search operations - it uses the fast
+    /// file-based index when available, and falls back to `SQLite` otherwise.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if both file loading and storage loading fail.
+    pub fn load_from_file_or_storage(
+        index_path: &std::path::Path,
+        storage: &Storage,
+    ) -> Result<Self> {
+        // Try file first (fast path)
+        if let Some(index) = Self::load_from_file(index_path)? {
+            return Ok(index);
+        }
+
+        // Fall back to storage (slow path)
+        Self::load_from_storage(storage)
     }
 
     /// Add a vector to the index.
@@ -1067,5 +1395,146 @@ mod tests {
         assert_eq!(header.dimension, 384);
         assert_eq!(header.record_count, 2);
         assert_eq!(header.offsets_start, VECTOR_INDEX_HEADER_LEN as u64);
+    }
+
+    // Tests for load_from_file (reader)
+    #[test]
+    fn test_load_from_file_nonexistent() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let result = VectorIndex::load_from_file(temp_dir.path()).unwrap();
+        assert!(result.is_none(), "Should return None for missing file");
+    }
+
+    #[test]
+    #[allow(clippy::cast_precision_loss)]
+    fn test_load_from_file_roundtrip() {
+        let storage = Storage::open_memory().unwrap();
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        // Store some embeddings with different types
+        let embedding1: Vec<f32> = (0..384).map(|i| i as f32 / 384.0).collect();
+        let embedding2: Vec<f32> = (0..384).map(|i| (384 - i) as f32 / 384.0).collect();
+        storage
+            .store_embedding("doc1", "tweet", &embedding1, None)
+            .unwrap();
+        storage
+            .store_embedding("doc2", "like", &embedding2, None)
+            .unwrap();
+
+        // Write to file
+        let stats = write_vector_index(temp_dir.path(), &storage).unwrap();
+        assert_eq!(stats.record_count, 2);
+
+        // Load from file
+        let index = VectorIndex::load_from_file(temp_dir.path())
+            .unwrap()
+            .expect("Should load successfully");
+
+        assert_eq!(index.len(), 2);
+        assert_eq!(index.dimension(), 384);
+    }
+
+    #[test]
+    #[allow(clippy::cast_precision_loss)]
+    fn test_load_from_file_matches_storage() {
+        let storage = Storage::open_memory().unwrap();
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        // Store embeddings
+        let embedding: Vec<f32> = (0..384).map(|i| i as f32 / 384.0).collect();
+        storage
+            .store_embedding("doc1", "tweet", &embedding, None)
+            .unwrap();
+
+        // Write to file
+        write_vector_index(temp_dir.path(), &storage).unwrap();
+
+        // Load from both sources
+        let from_file = VectorIndex::load_from_file(temp_dir.path())
+            .unwrap()
+            .expect("Should load from file");
+        let from_storage = VectorIndex::load_from_storage(&storage).unwrap();
+
+        // Should have same data
+        assert_eq!(from_file.len(), from_storage.len());
+        assert_eq!(from_file.dimension(), from_storage.dimension());
+
+        // Search should return same results
+        let query: Vec<f32> = (0..384).map(|i| i as f32 / 384.0).collect();
+        let results_file = from_file.search_top_k(&query, 10, None);
+        let results_storage = from_storage.search_top_k(&query, 10, None);
+
+        assert_eq!(results_file.len(), results_storage.len());
+        for (rf, rs) in results_file.iter().zip(results_storage.iter()) {
+            assert_eq!(rf.doc_id, rs.doc_id);
+            assert_eq!(rf.doc_type, rs.doc_type);
+            // Scores should be very close (F16 precision loss is minimal)
+            assert!(
+                (rf.score - rs.score).abs() < 0.001,
+                "Scores differ: {} vs {}",
+                rf.score,
+                rs.score
+            );
+        }
+    }
+
+    #[test]
+    fn test_load_from_file_invalid_magic() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let file_path = temp_dir.path().join(VECTOR_INDEX_FILENAME);
+
+        // Write invalid file
+        let mut bytes = vec![0u8; 100];
+        bytes[0..4].copy_from_slice(b"XXXX"); // Wrong magic
+        std::fs::write(&file_path, &bytes).unwrap();
+
+        // Should return None (fall back to DB)
+        let result = VectorIndex::load_from_file(temp_dir.path()).unwrap();
+        assert!(result.is_none(), "Should return None for invalid magic");
+    }
+
+    #[test]
+    #[allow(clippy::cast_precision_loss)]
+    fn test_load_from_file_or_storage_prefers_file() {
+        let storage = Storage::open_memory().unwrap();
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        // Store embeddings in both
+        let embedding: Vec<f32> = (0..384).map(|i| i as f32 / 384.0).collect();
+        storage
+            .store_embedding("doc1", "tweet", &embedding, None)
+            .unwrap();
+
+        // Write to file
+        write_vector_index(temp_dir.path(), &storage).unwrap();
+
+        // Add more to storage (file is now stale)
+        storage
+            .store_embedding("doc2", "like", &embedding, None)
+            .unwrap();
+
+        // load_from_file_or_storage should load from file (2 in storage, 1 in file)
+        let index = VectorIndex::load_from_file_or_storage(temp_dir.path(), &storage).unwrap();
+
+        // Should have file version (1 record, not 2)
+        assert_eq!(index.len(), 1, "Should load from file, not storage");
+    }
+
+    #[test]
+    #[allow(clippy::cast_precision_loss)]
+    fn test_load_from_file_or_storage_falls_back() {
+        let storage = Storage::open_memory().unwrap();
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        // Store embedding but don't write file
+        let embedding: Vec<f32> = (0..384).map(|i| i as f32 / 384.0).collect();
+        storage
+            .store_embedding("doc1", "tweet", &embedding, None)
+            .unwrap();
+
+        // load_from_file_or_storage should fall back to storage
+        let index = VectorIndex::load_from_file_or_storage(temp_dir.path(), &storage).unwrap();
+
+        assert_eq!(index.len(), 1, "Should fall back to storage");
     }
 }
