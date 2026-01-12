@@ -385,6 +385,10 @@ impl SearchEngine {
         let mut count = 0;
         for like in likes {
             if let Some(text) = &like.full_text {
+                if text.is_empty() {
+                    continue;
+                }
+
                 let prefixes = generate_prefixes(text);
 
                 let metadata = serde_json::json!({

@@ -470,7 +470,9 @@ impl Storage {
             for like in likes {
                 stmt.execute(params![like.tweet_id, like.full_text, like.expanded_url])?;
                 if let Some(text) = &like.full_text {
-                    fts_stmt.execute(params![&like.tweet_id, text])?;
+                    if !text.is_empty() {
+                        fts_stmt.execute(params![&like.tweet_id, text])?;
+                    }
                 }
                 count += 1;
             }
@@ -855,7 +857,7 @@ impl Storage {
         tx.execute("DELETE FROM fts_likes", [])?;
         let likes = tx.execute(
             "INSERT INTO fts_likes (tweet_id, full_text)
-             SELECT tweet_id, full_text FROM likes WHERE full_text IS NOT NULL",
+             SELECT tweet_id, full_text FROM likes WHERE full_text IS NOT NULL AND full_text != ''",
             [],
         )?;
 
@@ -1091,7 +1093,7 @@ impl Storage {
             ),
             self.check_count(
                 "FTS missing rows (likes)",
-                "SELECT COUNT(*) FROM likes l LEFT JOIN fts_likes fts ON fts.tweet_id = l.tweet_id WHERE l.full_text IS NOT NULL AND fts.tweet_id IS NULL",
+                "SELECT COUNT(*) FROM likes l LEFT JOIN fts_likes fts ON fts.tweet_id = l.tweet_id WHERE l.full_text IS NOT NULL AND l.full_text != '' AND fts.tweet_id IS NULL",
                 "Run 'xf index --force' to rebuild FTS tables.",
             ),
             self.check_count(
