@@ -387,8 +387,12 @@ fn get_index_path(cli: &Cli) -> PathBuf {
 
 #[allow(clippy::too_many_lines)]
 fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
-    // Use provided path or fall back to default
-    let default_path = PathBuf::from(xf::DEFAULT_ARCHIVE_PATH);
+    // Use provided path or fall back to config/default
+    let config = Config::load();
+    let default_path = config
+        .paths
+        .archive
+        .unwrap_or_else(|| PathBuf::from(xf::DEFAULT_ARCHIVE_PATH));
     let archive_path = args.archive_path.as_ref().unwrap_or(&default_path);
 
     // Validate archive path
@@ -776,6 +780,7 @@ fn generate_embeddings(storage: &Storage, show_progress: bool) -> Result<()> {
 
     // Generate and store embeddings in batches
     let mut stored_count = 0;
+    let mut reused_count = 0;
     let mut skipped_count = 0;
 
     for chunk in docs.chunks(BATCH_SIZE) {
@@ -795,23 +800,36 @@ fn generate_embeddings(storage: &Storage, show_progress: bool) -> Result<()> {
             // Compute content hash for deduplication
             let hash = content_hash(&canonical);
 
-            // Check if we already have this exact content
-            if storage.embedding_exists_by_hash(&hash)? {
-                skipped_count += 1;
-                if let Some(ref pb) = pb {
-                    pb.inc(1);
+            // Skip if this doc already has the same content hash.
+            if let Some(existing_hash) = storage.get_embedding_hash(doc_id)? {
+                if existing_hash == hash {
+                    skipped_count += 1;
+                    if let Some(ref pb) = pb {
+                        pb.inc(1);
+                    }
+                    continue;
                 }
-                continue;
             }
 
-            // Generate embedding
-            match embedder.embed(&canonical) {
-                Ok(embedding) => {
-                    batch.push((doc_id.clone(), doc_type.clone(), embedding, Some(hash)));
-                }
-                Err(e) => {
-                    warn!("Failed to embed doc {}: {}", doc_id, e);
-                    skipped_count += 1;
+            // Reuse an existing embedding if identical content exists.
+            if let Some(existing_embedding) = storage.get_embedding_by_hash(&hash)? {
+                batch.push((
+                    doc_id.clone(),
+                    doc_type.clone(),
+                    existing_embedding,
+                    Some(hash),
+                ));
+                reused_count += 1;
+            } else {
+                // Generate embedding
+                match embedder.embed(&canonical) {
+                    Ok(embedding) => {
+                        batch.push((doc_id.clone(), doc_type.clone(), embedding, Some(hash)));
+                    }
+                    Err(e) => {
+                        warn!("Failed to embed doc {}: {}", doc_id, e);
+                        skipped_count += 1;
+                    }
                 }
             }
 
@@ -832,16 +850,31 @@ fn generate_embeddings(storage: &Storage, show_progress: bool) -> Result<()> {
     }
 
     let embed_elapsed = format_duration(embed_start.elapsed());
+    let generated_count = stored_count.saturating_sub(reused_count);
     if show_progress {
         println!(
-            "  {} {} embeddings generated {}",
+            "  {} {} embeddings stored {}",
             "✓".green(),
             format_number_usize(stored_count).bold(),
             format!("({embed_elapsed})").dimmed()
         );
+        if reused_count > 0 {
+            println!(
+                "  {} {} reused from identical content",
+                "·".dimmed(),
+                format_number_usize(reused_count).dimmed()
+            );
+        }
+        if generated_count > 0 && reused_count > 0 {
+            println!(
+                "  {} {} generated",
+                "·".dimmed(),
+                format_number_usize(generated_count).dimmed()
+            );
+        }
         if skipped_count > 0 {
             println!(
-                "  {} {} skipped (empty or duplicate)",
+                "  {} {} skipped (empty or unchanged)",
                 "·".dimmed(),
                 format_number_usize(skipped_count).dimmed()
             );
@@ -1011,7 +1044,7 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
                     );
                 }
 
-                if batch.len() >= limit_target || fetch_limit >= max_docs {
+                if (batch.len() >= limit_target && !needs_full_sort) || fetch_limit >= max_docs {
                     break batch;
                 }
 
@@ -1498,9 +1531,6 @@ fn apply_search_filters(
 ) {
     if since.is_some() || until.is_some() {
         results.retain(|r| {
-            if r.result_type != SearchResultType::Tweet {
-                return true;
-            }
             if let Some(since_dt) = since {
                 if r.created_at < since_dt {
                     return false;
@@ -2958,15 +2988,129 @@ fn cmd_doctor(cli: &Cli, args: &cli::DoctorArgs) -> Result<()> {
     // ========== Apply Fixes (--fix) ==========
     if args.fix {
         info!("Applying safe fixes...");
-        // TODO: Implement safe fixes like PRAGMA optimize, FTS rebuild, etc.
-        // For now, just log that --fix was requested
-        all_checks.push(HealthCheck {
-            category: CheckCategory::Database,
-            name: "Auto-fix".into(),
-            status: CheckStatus::Pass,
-            message: "No automatic fixes needed".into(),
-            suggestion: None,
-        });
+        if db_path.exists() {
+            match Storage::open(&db_path) {
+                Ok(mut storage) => {
+                    let db_checks = storage.database_health_checks();
+                    let fts_issue = db_checks
+                        .iter()
+                        .any(|check| check.name.starts_with("FTS") && !check.status.is_ok());
+                    let dm_issue = db_checks
+                        .iter()
+                        .any(|check| check.name == "Orphaned DM messages" && !check.status.is_ok());
+
+                    let mut applied_any = false;
+
+                    if fts_issue {
+                        match storage.rebuild_fts_tables() {
+                            Ok(stats) => {
+                                applied_any = true;
+                                all_checks.push(HealthCheck {
+                                    category: CheckCategory::Database,
+                                    name: "Auto-fix (FTS rebuild)".into(),
+                                    status: CheckStatus::Pass,
+                                    message: format!(
+                                        "fts_tweets={}; fts_likes={}; fts_dms={}; fts_grok={}",
+                                        stats.tweets, stats.likes, stats.dms, stats.grok
+                                    ),
+                                    suggestion: None,
+                                });
+                            }
+                            Err(err) => {
+                                all_checks.push(HealthCheck {
+                                    category: CheckCategory::Database,
+                                    name: "Auto-fix (FTS rebuild)".into(),
+                                    status: CheckStatus::Error,
+                                    message: format!("Failed to rebuild FTS tables: {err}"),
+                                    suggestion: Some(
+                                        "Run 'xf index --force' to rebuild the database.".into(),
+                                    ),
+                                });
+                            }
+                        }
+                    }
+
+                    if dm_issue {
+                        match storage.rebuild_dm_conversations() {
+                            Ok(rebuilt) => {
+                                applied_any = true;
+                                all_checks.push(HealthCheck {
+                                    category: CheckCategory::Database,
+                                    name: "Auto-fix (DM conversations)".into(),
+                                    status: CheckStatus::Pass,
+                                    message: format!("Rebuilt {rebuilt} conversations"),
+                                    suggestion: None,
+                                });
+                            }
+                            Err(err) => {
+                                all_checks.push(HealthCheck {
+                                    category: CheckCategory::Database,
+                                    name: "Auto-fix (DM conversations)".into(),
+                                    status: CheckStatus::Error,
+                                    message: format!("Failed to rebuild DM conversations: {err}"),
+                                    suggestion: Some(
+                                        "Run 'xf index --force' to rebuild DM conversations."
+                                            .into(),
+                                    ),
+                                });
+                            }
+                        }
+                    }
+
+                    match storage.optimize() {
+                        Ok(()) => {
+                            all_checks.push(HealthCheck {
+                                category: CheckCategory::Database,
+                                name: "Auto-fix (SQLite optimize)".into(),
+                                status: CheckStatus::Pass,
+                                message: "PRAGMA optimize completed".into(),
+                                suggestion: None,
+                            });
+                        }
+                        Err(err) => {
+                            all_checks.push(HealthCheck {
+                                category: CheckCategory::Database,
+                                name: "Auto-fix (SQLite optimize)".into(),
+                                status: CheckStatus::Warning,
+                                message: format!("Optimize failed: {err}"),
+                                suggestion: Some(
+                                    "Database may be locked by another process.".into(),
+                                ),
+                            });
+                        }
+                    }
+
+                    if !applied_any && !fts_issue && !dm_issue {
+                        all_checks.push(HealthCheck {
+                            category: CheckCategory::Database,
+                            name: "Auto-fix".into(),
+                            status: CheckStatus::Pass,
+                            message: "No structural issues detected".into(),
+                            suggestion: None,
+                        });
+                    }
+                }
+                Err(err) => {
+                    all_checks.push(HealthCheck {
+                        category: CheckCategory::Database,
+                        name: "Auto-fix".into(),
+                        status: CheckStatus::Error,
+                        message: format!("Failed to open database: {err}"),
+                        suggestion: Some(
+                            "Run 'xf index <archive_path>' to create the database".into(),
+                        ),
+                    });
+                }
+            }
+        } else {
+            all_checks.push(HealthCheck {
+                category: CheckCategory::Database,
+                name: "Auto-fix".into(),
+                status: CheckStatus::Error,
+                message: format!("No database found at {}", db_path.display()),
+                suggestion: Some("Run 'xf index <archive_path>' to create the database".into()),
+            });
+        }
     }
 
     // ========== Sort Checks ==========

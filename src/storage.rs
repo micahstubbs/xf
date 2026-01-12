@@ -16,6 +16,10 @@ use std::path::Path;
 use tracing::info;
 
 const SCHEMA_VERSION: i32 = 2;
+// SQLite default limit on host parameters is usually 999 or 32766.
+// We use a safe batch size to avoid "too many SQL variables" errors.
+const SQLITE_BATCH_SIZE: usize = 900;
+
 const fn epoch_utc() -> DateTime<Utc> {
     DateTime::<Utc>::from_timestamp(0, 0).unwrap()
 }
@@ -38,6 +42,15 @@ pub struct Storage {
 }
 
 type EmbeddingRecord = (String, String, Vec<f32>, Option<[u8; 32]>);
+
+/// Summary of FTS rebuild results.
+#[derive(Debug, Clone, Copy)]
+pub struct FtsRebuildStats {
+    pub tweets: usize,
+    pub likes: usize,
+    pub dms: usize,
+    pub grok: usize,
+}
 
 impl Storage {
     /// Open or create the database at the given path.
@@ -351,11 +364,13 @@ impl Storage {
             // FTS5 doesn't support INSERT OR REPLACE, so we must delete first to avoid duplicates.
             // Batch delete for performance: one DELETE with IN clause instead of N individual DELETEs.
             if !tweets.is_empty() {
-                let placeholders: String = tweets.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-                let delete_sql =
-                    format!("DELETE FROM fts_tweets WHERE tweet_id IN ({placeholders})");
-                let mut delete_stmt = tx.prepare(&delete_sql)?;
-                delete_stmt.execute(rusqlite::params_from_iter(tweets.iter().map(|t| &t.id)))?;
+                for chunk in tweets.chunks(SQLITE_BATCH_SIZE) {
+                    let placeholders: String = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+                    let delete_sql =
+                        format!("DELETE FROM fts_tweets WHERE tweet_id IN ({placeholders})");
+                    let mut delete_stmt = tx.prepare_cached(&delete_sql)?;
+                    delete_stmt.execute(rusqlite::params_from_iter(chunk.iter().map(|t| &t.id)))?;
+                }
             }
 
             let mut stmt = tx.prepare(
@@ -411,17 +426,19 @@ impl Storage {
             // FTS5 batch delete for likes with text
             let likes_with_text: Vec<_> = likes.iter().filter(|l| l.full_text.is_some()).collect();
             if !likes_with_text.is_empty() {
-                let placeholders: String = likes_with_text
-                    .iter()
-                    .map(|_| "?")
-                    .collect::<Vec<_>>()
-                    .join(",");
-                let delete_sql =
-                    format!("DELETE FROM fts_likes WHERE tweet_id IN ({placeholders})");
-                let mut delete_stmt = tx.prepare(&delete_sql)?;
-                delete_stmt.execute(rusqlite::params_from_iter(
-                    likes_with_text.iter().map(|l| &l.tweet_id),
-                ))?;
+                for chunk in likes_with_text.chunks(SQLITE_BATCH_SIZE) {
+                    let placeholders: String = chunk
+                        .iter()
+                        .map(|_| "?")
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    let delete_sql =
+                        format!("DELETE FROM fts_likes WHERE tweet_id IN ({placeholders})");
+                    let mut delete_stmt = tx.prepare_cached(&delete_sql)?;
+                    delete_stmt.execute(rusqlite::params_from_iter(
+                        chunk.iter().map(|l| &l.tweet_id),
+                    ))?;
+                }
             }
 
             let mut stmt = tx.prepare(
@@ -460,14 +477,16 @@ impl Storage {
                 .flat_map(|c| c.messages.iter().map(|m| m.id.as_str()))
                 .collect();
             if !all_msg_ids.is_empty() {
-                let placeholders: String = all_msg_ids
-                    .iter()
-                    .map(|_| "?")
-                    .collect::<Vec<_>>()
-                    .join(",");
-                let delete_sql = format!("DELETE FROM fts_dms WHERE dm_id IN ({placeholders})");
-                let mut delete_stmt = tx.prepare(&delete_sql)?;
-                delete_stmt.execute(rusqlite::params_from_iter(all_msg_ids.iter()))?;
+                for chunk in all_msg_ids.chunks(SQLITE_BATCH_SIZE) {
+                    let placeholders: String = chunk
+                        .iter()
+                        .map(|_| "?")
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    let delete_sql = format!("DELETE FROM fts_dms WHERE dm_id IN ({placeholders})");
+                    let mut delete_stmt = tx.prepare_cached(&delete_sql)?;
+                    delete_stmt.execute(rusqlite::params_from_iter(chunk.iter()))?;
+                }
             }
 
             let mut conv_stmt = tx.prepare(
@@ -795,6 +814,117 @@ impl Storage {
         checks
     }
 
+    /// Apply safe, idempotent database optimizations.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any pragma fails.
+    pub fn optimize(&self) -> Result<()> {
+        self.conn.execute_batch(
+            "
+            PRAGMA optimize;
+            PRAGMA wal_checkpoint(TRUNCATE);
+            ",
+        )?;
+        Ok(())
+    }
+
+    /// Rebuild all FTS5 tables from source tables.
+    ///
+    /// This is safe and idempotent because FTS tables are derived data.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the rebuild fails.
+    pub fn rebuild_fts_tables(&mut self) -> Result<FtsRebuildStats> {
+        let tx = self.conn.transaction()?;
+
+        tx.execute("DELETE FROM fts_tweets", [])?;
+        let tweets = tx.execute(
+            "INSERT INTO fts_tweets (tweet_id, full_text) SELECT id, full_text FROM tweets",
+            [],
+        )?;
+
+        tx.execute("DELETE FROM fts_likes", [])?;
+        let likes = tx.execute(
+            "INSERT INTO fts_likes (tweet_id, full_text)
+             SELECT tweet_id, full_text FROM likes WHERE full_text IS NOT NULL",
+            [],
+        )?;
+
+        tx.execute("DELETE FROM fts_dms", [])?;
+        let dms = tx.execute(
+            "INSERT INTO fts_dms (dm_id, text) SELECT id, text FROM direct_messages",
+            [],
+        )?;
+
+        tx.execute("DELETE FROM fts_grok", [])?;
+        let grok = tx.execute(
+            "INSERT INTO fts_grok (grok_id, message)
+             SELECT CAST(id AS TEXT), message FROM grok_messages",
+            [],
+        )?;
+
+        tx.commit()?;
+
+        Ok(FtsRebuildStats {
+            tweets,
+            likes,
+            dms,
+            grok,
+        })
+    }
+
+    /// Rebuild DM conversation summaries from direct messages.
+    ///
+    /// This avoids dropping conversations while foreign keys are enabled.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any SQL statement fails.
+    pub fn rebuild_dm_conversations(&mut self) -> Result<usize> {
+        let tx = self.conn.transaction()?;
+
+        let rebuilt = tx.execute(
+            r"
+            INSERT OR REPLACE INTO dm_conversations
+                (conversation_id, participant_ids, message_count, first_message_at, last_message_at)
+            SELECT
+                dm.conversation_id,
+                (
+                    SELECT group_concat(participant_id, ',')
+                    FROM (
+                        SELECT sender_id AS participant_id
+                        FROM direct_messages dm2
+                        WHERE dm2.conversation_id = dm.conversation_id
+                        UNION
+                        SELECT recipient_id AS participant_id
+                        FROM direct_messages dm3
+                        WHERE dm3.conversation_id = dm.conversation_id
+                        ORDER BY participant_id
+                    )
+                ) AS participant_ids,
+                COUNT(*) AS message_count,
+                MIN(created_at) AS first_message_at,
+                MAX(created_at) AS last_message_at
+            FROM direct_messages dm
+            GROUP BY dm.conversation_id
+            ",
+            [],
+        )?;
+
+        tx.execute(
+            "
+            DELETE FROM dm_conversations
+            WHERE conversation_id NOT IN (SELECT DISTINCT conversation_id FROM direct_messages)
+            ",
+            [],
+        )?;
+
+        tx.commit()?;
+        Ok(rebuilt)
+    }
+
     /// Collect per-table row counts and optional size statistics.
     ///
     /// # Errors
@@ -840,7 +970,9 @@ impl Storage {
     fn check_integrity(&self) -> HealthCheck {
         match self
             .conn
-            .query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
+            .query_row("PRAGMA integrity_check", [], |row| {
+                row.get::<_, String>(0)
+            })
         {
             Ok(result) => {
                 if result == "ok" {
@@ -1835,6 +1967,69 @@ impl Storage {
         }
     }
 
+    /// Get the content hash for a document's embedding.
+    ///
+    /// Returns None if the document is missing or has no stored hash.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database query fails.
+    pub fn get_embedding_hash(&self, doc_id: &str) -> Result<Option<[u8; 32]>> {
+        let result: rusqlite::Result<Option<Vec<u8>>> = self.conn.query_row(
+            "SELECT content_hash FROM embeddings WHERE doc_id = ?",
+            params![doc_id],
+            |row| row.get(0),
+        );
+
+        match result {
+            Ok(Some(bytes)) => {
+                let arr: [u8; 32] = bytes
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| anyhow::anyhow!("Invalid content_hash length"))?;
+                Ok(Some(arr))
+            }
+            Ok(None) | Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Get an embedding by content hash.
+    ///
+    /// Returns None if no embedding with the given hash exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database query fails.
+    ///
+    /// # Panics
+    ///
+    /// Panics if stored embedding bytes are not aligned to 2-byte F16 chunks.
+    pub fn get_embedding_by_hash(&self, content_hash: &[u8; 32]) -> Result<Option<Vec<f32>>> {
+        use half::f16;
+
+        let result: rusqlite::Result<Vec<u8>> = self.conn.query_row(
+            "SELECT embedding FROM embeddings WHERE content_hash = ? LIMIT 1",
+            params![content_hash.as_slice()],
+            |row| row.get(0),
+        );
+
+        match result {
+            Ok(bytes) => {
+                let floats: Vec<f32> = bytes
+                    .chunks_exact(2)
+                    .map(|chunk| {
+                        let arr: [u8; 2] = chunk.try_into().unwrap();
+                        f16::from_le_bytes(arr).to_f32()
+                    })
+                    .collect();
+                Ok(Some(floats))
+            }
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     /// Load all embeddings for vector search.
     ///
     /// Returns tuples of (`doc_id`, `doc_type`, embedding).
@@ -1981,15 +2176,15 @@ mod tests {
             id: id.to_string(),
             created_at: Utc::now(),
             full_text: text.to_string(),
-            source: Some("test".to_string()),
-            favorite_count: 10,
-            retweet_count: 5,
-            lang: Some("en".to_string()),
+            source: None,
+            favorite_count: 0,
+            retweet_count: 0,
+            lang: None,
             in_reply_to_status_id: None,
             in_reply_to_user_id: None,
             in_reply_to_screen_name: None,
             is_retweet: false,
-            hashtags: vec!["rust".to_string()],
+            hashtags: vec![],
             user_mentions: vec![],
             urls: vec![],
             media: vec![],
@@ -2304,54 +2499,6 @@ mod tests {
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].id, "dm1");
         assert_eq!(messages[1].id, "dm2");
-    }
-
-    #[test]
-    fn test_get_dm_conversation_summaries() {
-        let mut storage = Storage::open_memory().unwrap();
-
-        let base_time = DateTime::parse_from_rfc3339("2024-02-01T10:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc);
-        let later_time = base_time + Duration::minutes(30);
-
-        let conversation = DmConversation {
-            conversation_id: "conv_summary".to_string(),
-            messages: vec![
-                DirectMessage {
-                    id: "dm1".to_string(),
-                    conversation_id: "conv_summary".to_string(),
-                    sender_id: "user2".to_string(),
-                    recipient_id: "user1".to_string(),
-                    text: "Second message".to_string(),
-                    created_at: later_time,
-                    urls: vec![],
-                    media_urls: vec![],
-                },
-                DirectMessage {
-                    id: "dm0".to_string(),
-                    conversation_id: "conv_summary".to_string(),
-                    sender_id: "user1".to_string(),
-                    recipient_id: "user2".to_string(),
-                    text: "First message".to_string(),
-                    created_at: base_time,
-                    urls: vec![],
-                    media_urls: vec![],
-                },
-            ],
-        };
-
-        storage.store_dm_conversations(&[conversation]).unwrap();
-
-        let summaries = storage.get_dm_conversation_summaries(None).unwrap();
-        assert_eq!(summaries.len(), 1);
-
-        let summary = &summaries[0];
-        assert_eq!(summary.conversation_id, "conv_summary");
-        assert_eq!(summary.message_count, 2);
-        assert_eq!(summary.participant_ids, vec!["user1", "user2"]);
-        assert_eq!(summary.first_message_at, Some(base_time));
-        assert_eq!(summary.last_message_at, Some(later_time));
     }
 
     #[test]

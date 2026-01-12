@@ -9,8 +9,10 @@ use crate::model::{
 };
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
+use glob::glob;
 use rayon::prelude::*;
 use serde_json::Value;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use tracing::info;
 use walkdir::WalkDir;
@@ -124,47 +126,76 @@ impl ArchiveParser {
     ///
     /// Returns an error if the tweets file cannot be read or parsed.
     pub fn parse_tweets(&self) -> Result<Vec<Tweet>> {
-        info!("Parsing tweets.js...");
-        let data = self.read_data_file("tweets.js")?;
+        info!("Parsing tweets...");
 
-        let tweets: Vec<Tweet> = data
-            .as_array()
-            .unwrap_or(&vec![])
-            .par_iter()
-            .filter_map(|item| {
-                let tweet = &item["tweet"];
-                Some(Tweet {
-                    id: tweet["id_str"].as_str()?.to_string(),
-                    created_at: tweet["created_at"].as_str().and_then(Self::parse_x_date)?,
-                    full_text: tweet["full_text"].as_str()?.to_string(),
-                    source: tweet["source"].as_str().map(|s| {
-                        // Extract text from HTML anchor tag
-                        s.split('>')
-                            .nth(1)
-                            .and_then(|s| s.split('<').next())
-                            .unwrap_or(s)
-                            .to_string()
-                    }),
-                    favorite_count: Self::parse_i64(&tweet["favorite_count"]).unwrap_or(0),
-                    retweet_count: Self::parse_i64(&tweet["retweet_count"]).unwrap_or(0),
-                    lang: tweet["lang"].as_str().map(String::from),
-                    in_reply_to_status_id: tweet["in_reply_to_status_id_str"]
-                        .as_str()
-                        .map(String::from),
-                    in_reply_to_user_id: tweet["in_reply_to_user_id_str"]
-                        .as_str()
-                        .map(String::from),
-                    in_reply_to_screen_name: tweet["in_reply_to_screen_name"]
-                        .as_str()
-                        .map(String::from),
-                    is_retweet: tweet["retweeted"].as_bool().unwrap_or(false),
-                    hashtags: Self::parse_hashtags(&tweet["entities"]["hashtags"]),
-                    user_mentions: Self::parse_user_mentions(&tweet["entities"]["user_mentions"]),
-                    urls: Self::parse_urls(&tweet["entities"]["urls"]),
-                    media: Self::parse_media(&tweet["entities"]["media"]),
+        let mut files = Vec::new();
+        let tweets_path = self.archive_path.join("data").join("tweets.js");
+        if tweets_path.exists() {
+            files.push(tweets_path);
+        }
+        files.extend(self.collect_data_files("tweets-part*.js")?);
+
+        if files.is_empty() {
+            info!("No tweet files found.");
+            return Ok(Vec::new());
+        }
+
+        let mut tweets: Vec<Tweet> = Vec::new();
+        let mut seen_ids: HashSet<String> = HashSet::new();
+
+        for path in files {
+            let content = std::fs::read_to_string(&path)
+                .with_context(|| format!("Failed to read {}", path.display()))?;
+            let data = self.parse_js_file(&content)?;
+            let Some(items) = data.as_array() else {
+                continue;
+            };
+
+            let file_tweets: Vec<Tweet> = items
+                .par_iter()
+                .filter_map(|item| {
+                    let tweet = &item["tweet"];
+                    Some(Tweet {
+                        id: tweet["id_str"].as_str()?.to_string(),
+                        created_at: tweet["created_at"].as_str().and_then(Self::parse_x_date)?,
+                        full_text: tweet["full_text"].as_str()?.to_string(),
+                        source: tweet["source"].as_str().map(|s| {
+                            // Extract text from HTML anchor tag
+                            s.split('>')
+                                .nth(1)
+                                .and_then(|s| s.split('<').next())
+                                .unwrap_or(s)
+                                .to_string()
+                        }),
+                        favorite_count: Self::parse_i64(&tweet["favorite_count"]).unwrap_or(0),
+                        retweet_count: Self::parse_i64(&tweet["retweet_count"]).unwrap_or(0),
+                        lang: tweet["lang"].as_str().map(String::from),
+                        in_reply_to_status_id: tweet["in_reply_to_status_id_str"]
+                            .as_str()
+                            .map(String::from),
+                        in_reply_to_user_id: tweet["in_reply_to_user_id_str"]
+                            .as_str()
+                            .map(String::from),
+                        in_reply_to_screen_name: tweet["in_reply_to_screen_name"]
+                            .as_str()
+                            .map(String::from),
+                        is_retweet: tweet["retweeted"].as_bool().unwrap_or(false),
+                        hashtags: Self::parse_hashtags(&tweet["entities"]["hashtags"]),
+                        user_mentions: Self::parse_user_mentions(
+                            &tweet["entities"]["user_mentions"],
+                        ),
+                        urls: Self::parse_urls(&tweet["entities"]["urls"]),
+                        media: Self::parse_media(&tweet["entities"]["media"]),
+                    })
                 })
-            })
-            .collect();
+                .collect();
+
+            for tweet in file_tweets {
+                if seen_ids.insert(tweet.id.clone()) {
+                    tweets.push(tweet);
+                }
+            }
+        }
 
         info!("Parsed {} tweets", tweets.len());
         Ok(tweets)
@@ -268,54 +299,113 @@ impl ArchiveParser {
     ///
     /// Returns an error if the direct messages file cannot be read or parsed.
     pub fn parse_direct_messages(&self) -> Result<Vec<DmConversation>> {
-        info!("Parsing direct-messages.js...");
-        let data = self.read_data_file("direct-messages.js")?;
+        info!("Parsing direct messages...");
 
-        let conversations: Vec<DmConversation> = data
-            .as_array()
-            .unwrap_or(&vec![])
-            .iter()
-            .filter_map(|item| {
+        let mut files = Vec::new();
+        let dm_path = self.archive_path.join("data").join("direct-messages.js");
+        if dm_path.exists() {
+            files.push(dm_path);
+        }
+        files.extend(self.collect_data_files("direct-messages-group*.js")?);
+
+        if files.is_empty() {
+            info!("No direct message files found.");
+            return Ok(Vec::new());
+        }
+
+        let mut conversations: HashMap<String, Vec<DirectMessage>> = HashMap::new();
+        let mut seen_ids: HashSet<String> = HashSet::new();
+
+        for path in files {
+            let content = std::fs::read_to_string(&path)
+                .with_context(|| format!("Failed to read {}", path.display()))?;
+            let data = self.parse_js_file(&content)?;
+            let Some(items) = data.as_array() else {
+                continue;
+            };
+
+            for item in items {
                 let conv = &item["dmConversation"];
-                let conversation_id = conv["conversationId"].as_str()?.to_string();
-                let messages: Vec<DirectMessage> = conv["messages"]
-                    .as_array()
-                    .unwrap_or(&vec![])
-                    .iter()
-                    .filter_map(|msg| {
-                        let mc = &msg["messageCreate"];
-                        Some(DirectMessage {
-                            id: mc["id"].as_str()?.to_string(),
-                            conversation_id: conversation_id.clone(),
-                            sender_id: mc["senderId"].as_str()?.to_string(),
-                            recipient_id: mc["recipientId"].as_str()?.to_string(),
-                            text: mc["text"].as_str()?.to_string(),
-                            created_at: mc["createdAt"].as_str().and_then(Self::parse_iso_date)?,
-                            urls: Self::parse_dm_urls(&mc["urls"]),
-                            media_urls: mc["mediaUrls"]
-                                .as_array()
-                                .unwrap_or(&vec![])
-                                .iter()
-                                .filter_map(|u| u.as_str().map(String::from))
-                                .collect(),
-                        })
-                    })
-                    .collect();
+                let Some(conversation_id) = conv["conversationId"].as_str().map(String::from)
+                else {
+                    continue;
+                };
 
-                Some(DmConversation {
+                if let Some(messages) = conv["messages"].as_array() {
+                    for msg in messages {
+                        let mc = &msg["messageCreate"];
+                        let Some(id) = mc["id"].as_str().map(String::from) else {
+                            continue;
+                        };
+                        if !seen_ids.insert(id.clone()) {
+                            continue;
+                        }
+
+                        let Some(sender_id) = mc["senderId"].as_str().map(String::from) else {
+                            continue;
+                        };
+                        let Some(recipient_id) = mc["recipientId"].as_str().map(String::from)
+                        else {
+                            continue;
+                        };
+                        let Some(text) = mc["text"].as_str().map(String::from) else {
+                            continue;
+                        };
+                        let Some(created_at) =
+                            mc["createdAt"].as_str().and_then(Self::parse_iso_date)
+                        else {
+                            continue;
+                        };
+
+                        let media_urls = mc["mediaUrls"]
+                            .as_array()
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|u| u.as_str().map(String::from))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+
+                        let dm = DirectMessage {
+                            id,
+                            conversation_id: conversation_id.clone(),
+                            sender_id,
+                            recipient_id,
+                            text,
+                            created_at,
+                            urls: Self::parse_dm_urls(&mc["urls"]),
+                            media_urls,
+                        };
+
+                        conversations
+                            .entry(conversation_id.clone())
+                            .or_default()
+                            .push(dm);
+                    }
+                }
+            }
+        }
+
+        let mut output: Vec<DmConversation> = conversations
+            .into_iter()
+            .map(|(conversation_id, mut messages)| {
+                messages.sort_by_key(|m| m.created_at);
+                DmConversation {
                     conversation_id,
                     messages,
-                })
+                }
             })
             .collect();
 
-        let total_messages: usize = conversations.iter().map(|c| c.messages.len()).sum();
+        output.sort_by(|a, b| a.conversation_id.cmp(&b.conversation_id));
+
+        let total_messages: usize = output.iter().map(|c| c.messages.len()).sum();
         info!(
             "Parsed {} DM conversations with {} total messages",
-            conversations.len(),
+            output.len(),
             total_messages
         );
-        Ok(conversations)
+        Ok(output)
     }
 
     fn parse_dm_urls(value: &Value) -> Vec<TweetUrl> {
@@ -539,6 +629,17 @@ impl ArchiveParser {
 
         files.sort();
         Ok(files)
+    }
+
+    fn collect_data_files(&self, pattern: &str) -> Result<Vec<std::path::PathBuf>> {
+        let full_pattern = self.archive_path.join("data").join(pattern);
+        let pattern_str = full_pattern.to_string_lossy();
+        let mut paths: Vec<_> = glob(&pattern_str)
+            .map_err(|e| anyhow::anyhow!("Invalid glob pattern: {e}"))?
+            .filter_map(std::result::Result::ok)
+            .collect();
+        paths.sort();
+        Ok(paths)
     }
 }
 
@@ -881,6 +982,66 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_tweets_parts_combines_and_dedupes() {
+        let temp_dir = TempDir::new().unwrap();
+        let data_dir = temp_dir.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+
+        let part1 = r#"window.YTD.tweets.part0 = [
+            {
+                "tweet": {
+                    "id_str": "t1",
+                    "created_at": "Fri Jan 10 12:00:00 +0000 2025",
+                    "full_text": "First part",
+                    "source": "web",
+                    "favorite_count": "1",
+                    "retweet_count": "0",
+                    "lang": "en",
+                    "entities": {"hashtags": [], "user_mentions": [], "urls": []}
+                }
+            }
+        ]"#;
+
+        let part2 = r#"window.YTD.tweets.part1 = [
+            {
+                "tweet": {
+                    "id_str": "t2",
+                    "created_at": "Fri Jan 10 12:01:00 +0000 2025",
+                    "full_text": "Second part",
+                    "source": "web",
+                    "favorite_count": "2",
+                    "retweet_count": "0",
+                    "lang": "en",
+                    "entities": {"hashtags": [], "user_mentions": [], "urls": []}
+                }
+            },
+            {
+                "tweet": {
+                    "id_str": "t1",
+                    "created_at": "Fri Jan 10 12:00:00 +0000 2025",
+                    "full_text": "Duplicate from part2",
+                    "source": "web",
+                    "favorite_count": "1",
+                    "retweet_count": "0",
+                    "lang": "en",
+                    "entities": {"hashtags": [], "user_mentions": [], "urls": []}
+                }
+            }
+        ]"#;
+
+        std::fs::write(data_dir.join("tweets-part1.js"), part1).unwrap();
+        std::fs::write(data_dir.join("tweets-part2.js"), part2).unwrap();
+
+        let parser = ArchiveParser::new(temp_dir.path());
+        let tweets = parser.parse_tweets().unwrap();
+
+        let ids: std::collections::HashSet<_> = tweets.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(tweets.len(), 2);
+        assert!(ids.contains("t1"));
+        assert!(ids.contains("t2"));
+    }
+
+    #[test]
     fn test_parse_tweets_with_retweet() {
         let temp_dir = TempDir::new().unwrap();
         let data_dir = temp_dir.path().join("data");
@@ -1027,6 +1188,67 @@ mod tests {
         assert_eq!(conversations[0].messages[0].text, "Hello!");
         assert_eq!(conversations[0].messages[1].id, "msg2");
         assert_eq!(conversations[0].messages[1].text, "Hi there!");
+    }
+
+    #[test]
+    fn test_parse_direct_messages_group_parts() {
+        let temp_dir = TempDir::new().unwrap();
+        let data_dir = temp_dir.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+
+        let part1 = r#"window.YTD.direct_messages.part0 = [
+            {
+                "dmConversation": {
+                    "conversationId": "convA",
+                    "messages": [
+                        {
+                            "messageCreate": {
+                                "id": "msg1",
+                                "senderId": "user1",
+                                "recipientId": "user2",
+                                "text": "First",
+                                "createdAt": "2025-01-10T12:00:00.000Z",
+                                "urls": [],
+                                "mediaUrls": []
+                            }
+                        }
+                    ]
+                }
+            }
+        ]"#;
+
+        let part2 = r#"window.YTD.direct_messages.part1 = [
+            {
+                "dmConversation": {
+                    "conversationId": "convA",
+                    "messages": [
+                        {
+                            "messageCreate": {
+                                "id": "msg2",
+                                "senderId": "user2",
+                                "recipientId": "user1",
+                                "text": "Second",
+                                "createdAt": "2025-01-10T12:01:00.000Z",
+                                "urls": [],
+                                "mediaUrls": []
+                            }
+                        }
+                    ]
+                }
+            }
+        ]"#;
+
+        std::fs::write(data_dir.join("direct-messages-group1.js"), part1).unwrap();
+        std::fs::write(data_dir.join("direct-messages-group2.js"), part2).unwrap();
+
+        let parser = ArchiveParser::new(temp_dir.path());
+        let conversations = parser.parse_direct_messages().unwrap();
+
+        assert_eq!(conversations.len(), 1);
+        assert_eq!(conversations[0].conversation_id, "convA");
+        assert_eq!(conversations[0].messages.len(), 2);
+        assert_eq!(conversations[0].messages[0].id, "msg1");
+        assert_eq!(conversations[0].messages[1].id, "msg2");
     }
 
     #[test]

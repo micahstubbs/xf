@@ -834,7 +834,7 @@ fn generate_prefixes(text: &str) -> String {
     let words: Vec<&str> = text
         .split_whitespace()
         .filter(|w| w.chars().count() >= 2) // Filter by character count, not bytes
-        .take(50) // Limit to prevent huge documents
+        .take(100) // Limit to prevent huge documents
         .collect();
 
     let mut prefixes = Vec::new();
