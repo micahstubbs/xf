@@ -3504,3 +3504,92 @@ fn cmd_shell(cli: &Cli, args: &cli::ShellArgs) -> Result<()> {
 
     repl::run(storage, search, config)
 }
+
+#[cfg(test)]
+mod cache_invalidation_tests {
+    use super::CacheMeta;
+    use super::Storage;
+    use anyhow::{Context, Result};
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::time::SystemTime;
+    use tempfile::tempdir;
+
+    fn create_storage() -> Result<(tempfile::TempDir, PathBuf, Storage)> {
+        let dir = tempdir().context("create temp dir")?;
+        let db_path = dir.path().join("xf-test.db");
+        let storage = Storage::open(&db_path)?;
+        Ok((dir, db_path, storage))
+    }
+
+    fn build_meta(storage: &Storage, db_path: &Path) -> Result<CacheMeta> {
+        let db_mtime = db_path
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .context("read database mtime")?;
+        let embedding_count =
+            usize::try_from(storage.embedding_count()?).context("convert embedding count")?;
+        Ok(CacheMeta {
+            db_mtime,
+            embedding_count,
+            type_counts: HashMap::new(),
+        })
+    }
+
+    fn store_sample_embedding(storage: &Storage, doc_id: &str) -> Result<()> {
+        storage.store_embedding(doc_id, "tweet", &[0.1, 0.2], None)
+    }
+
+    #[test]
+    fn test_fresh_when_no_changes() -> Result<()> {
+        let (_dir, db_path, storage) = create_storage()?;
+        store_sample_embedding(&storage, "doc-1")?;
+        let meta = build_meta(&storage, &db_path)?;
+        assert!(!meta.is_stale(&storage, &db_path)?);
+        Ok(())
+    }
+
+    #[test]
+    fn test_stale_after_embedding_added() -> Result<()> {
+        let (_dir, db_path, storage) = create_storage()?;
+        store_sample_embedding(&storage, "doc-1")?;
+        let meta = build_meta(&storage, &db_path)?;
+        store_sample_embedding(&storage, "doc-2")?;
+        assert!(meta.is_stale(&storage, &db_path)?);
+        Ok(())
+    }
+
+    #[test]
+    fn test_stale_after_embedding_deleted() -> Result<()> {
+        let (_dir, db_path, storage) = create_storage()?;
+        store_sample_embedding(&storage, "doc-1")?;
+        store_sample_embedding(&storage, "doc-2")?;
+        let meta = build_meta(&storage, &db_path)?;
+        storage.clear_embeddings()?;
+        assert!(meta.is_stale(&storage, &db_path)?);
+        Ok(())
+    }
+
+    #[test]
+    fn test_stale_after_db_file_modified() -> Result<()> {
+        let (_dir, db_path, storage) = create_storage()?;
+        store_sample_embedding(&storage, "doc-1")?;
+        let mut meta = build_meta(&storage, &db_path)?;
+        meta.db_mtime = SystemTime::UNIX_EPOCH;
+        assert!(meta.is_stale(&storage, &db_path)?);
+        Ok(())
+    }
+
+    #[test]
+    fn test_stale_with_missing_db_file() -> Result<()> {
+        let (_dir, _db_path, storage) = create_storage()?;
+        let missing_path = PathBuf::from("missing-xf-db.sqlite");
+        let meta = CacheMeta {
+            db_mtime: SystemTime::UNIX_EPOCH,
+            embedding_count: 0,
+            type_counts: HashMap::new(),
+        };
+        assert!(meta.is_stale(&storage, &missing_path).is_err());
+        Ok(())
+    }
+}
