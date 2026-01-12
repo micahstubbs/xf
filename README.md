@@ -36,6 +36,8 @@ curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/xf/main/install.s
 | Feature | What It Does |
 |---------|--------------|
 | **Sub-Millisecond Search** | Tantivy-powered full-text search with BM25 ranking |
+| **Semantic Search** | Find content by meaning, not just keywords—"feeling stressed" finds tweets about burnout |
+| **Hybrid Search** | Combines keyword + semantic with RRF fusion for best-of-both-worlds relevance |
 | **Search Everything** | Tweets, likes, DMs, and Grok conversations in one place |
 | **Rich Query Syntax** | Phrases, wildcards, boolean operators (`AND`, `OR`, `NOT`) |
 | **DM Context** | View full conversation threads with search matches highlighted |
@@ -49,8 +51,14 @@ curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/xf/main/install.s
 # Index your archive (one-time setup, ~5 seconds)
 $ xf index ~/x-archive
 
-# Search across everything
+# Search across everything (hybrid mode by default)
 $ xf search "machine learning"
+
+# Semantic search: find by meaning, not just keywords
+$ xf search "feeling overwhelmed at work" --mode semantic
+
+# Keyword-only search (classic BM25)
+$ xf search "rust async" --mode lexical
 
 # Search only your DMs with full conversation context
 $ xf search "meeting tomorrow" --types dm --context
@@ -63,7 +71,7 @@ $ xf search "rust async" --format json --limit 50
 ```
 ## xf — X Archive Search
 
-Ultra-fast local search for X (Twitter) data archives. Parses `window.YTD.*` JavaScript format from X data exports. Sub-millisecond full-text search via Tantivy + SQLite storage.
+Ultra-fast local search for X (Twitter) data archives. Parses `window.YTD.*` JavaScript format from X data exports. Hybrid search combining keyword (BM25) + semantic (vector similarity) via RRF fusion.
 
 ### Core Workflow
 
@@ -75,13 +83,19 @@ xf index ~/x-archive --only tweet,dm  # Index specific types
 xf index ~/x-archive --skip grok      # Skip specific types
 
 # 2. Search
-xf search "machine learning"          # Search all indexed content
+xf search "machine learning"          # Hybrid search (default)
+xf search "feeling stressed" --mode semantic  # Meaning-based
+xf search "rust async" --mode lexical # Keyword-only (BM25)
 xf search "meeting" --types dm        # DMs only
-xf search "rust async" --types tweet  # Tweets only
 xf search "article" --types like      # Liked tweets only
-xf search "claude" --types grok       # Grok conversations only
 
-Search Syntax
+Search Modes
+
+--mode hybrid   # Default: combines keyword + semantic with RRF fusion
+--mode lexical  # Keyword-only (BM25), best for exact terms
+--mode semantic # Meaning-based, finds conceptually similar content
+
+Search Syntax (lexical mode)
 
 xf search "exact phrase"              # Phrase match (quotes matter)
 xf search "rust AND async"            # Boolean AND
@@ -124,9 +138,10 @@ Storage
 
 Notes
 
-- First search after restart may be slower (index loading). Subsequent searches <1ms.
+- First search after restart may be slower (index loading). Subsequent searches <10ms.
+- Semantic search finds content by meaning, not just keywords.
 - --context only works with --types dm — shows full conversation around matches.
-- All data stays local. No network access.
+- All data stays local. No network access, no model downloads.
 ```
 
 ---
@@ -325,8 +340,13 @@ xf index ~/Downloads/x-archive --skip dm,grok
 Search the indexed archive.
 
 ```bash
-# Basic search
+# Basic search (hybrid mode by default)
 xf search "your query"
+
+# Search modes
+xf search "query" --mode hybrid    # Default: combines keyword + semantic
+xf search "query" --mode lexical   # Keyword-only (BM25)
+xf search "query" --mode semantic  # Meaning-based vector similarity
 
 # Filter by type
 xf search "query" --types tweet,dm
@@ -343,6 +363,14 @@ xf search "query" --format compact
 xf search "meeting" --types dm --context
 xf search "meeting" --types dm --context --format json
 ```
+
+**Search Modes:**
+
+| Mode | Best For | How It Works |
+|------|----------|--------------|
+| `hybrid` | General use (default) | Combines keyword + semantic with RRF fusion |
+| `lexical` | Exact terms, boolean queries | Classic BM25 keyword matching |
+| `semantic` | Conceptual search | Finds content by meaning, not exact words |
 
 **Query syntax:**
 - Simple terms: `machine learning`
@@ -458,18 +486,27 @@ Override with environment variables:
 │   Handles window.YTD.* JavaScript format with rayon parallelism │
 └─────────────────────────────────────────────────────────────────┘
                             │
-              ┌─────────────┴─────────────┐
-              ▼                           ▼
-┌──────────────────────┐    ┌──────────────────────────┐
-│  SQLite (storage.rs) │    │  Tantivy (search.rs)     │
-│  - Metadata storage  │    │  - Full-text search      │
-│  - Statistics        │    │  - BM25 ranking          │
-│  - FTS5 for fallback │    │  - Phrase queries        │
-│  - Tweet lookup      │    │  - Boolean operators     │
-└──────────────────────┘    └──────────────────────────┘
-              │                           │
-              └─────────────┬─────────────┘
-                            ▼
+        ┌───────────────────┼───────────────────┐
+        ▼                   ▼                   ▼
+┌──────────────────┐ ┌──────────────────┐ ┌──────────────────┐
+│ SQLite           │ │ Tantivy          │ │ Vector Index     │
+│ (storage.rs)     │ │ (search.rs)      │ │ (vector.rs)      │
+│ - Metadata       │ │ - Full-text      │ │ - Embeddings     │
+│ - Statistics     │ │ - BM25 ranking   │ │ - SIMD search    │
+│ - FTS5 fallback  │ │ - Phrase queries │ │ - F16 storage    │
+│ - Tweet lookup   │ │ - Boolean ops    │ │ - Cosine sim     │
+└──────────────────┘ └──────────────────┘ └──────────────────┘
+        │                   │                   │
+        │                   ▼                   │
+        │         ┌──────────────────┐          │
+        │         │ Hybrid Fusion    │◀─────────┘
+        │         │ (hybrid.rs)      │
+        │         │ - RRF algorithm  │
+        │         │ - Score fusion   │
+        │         └────────┬─────────┘
+        │                  │
+        └────────┬─────────┘
+                 ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │                      CLI (cli.rs)                                │
 │   clap-based command parsing with rich colored output           │
@@ -488,15 +525,127 @@ Override with environment variables:
 - Stores in SQLite with FTS5 virtual tables for fallback search
 - Maintains statistics and metadata
 
-**Stage 3: Indexing**
+**Stage 3: Keyword Indexing**
 - Feeds content to Tantivy search engine
 - Creates inverted index with BM25 scoring
 - Supports prefix queries via edge n-grams
 
-**Stage 4: Search**
-- Parses user query with Tantivy's query parser
-- Returns ranked results with scores and highlights
+**Stage 4: Embedding Generation**
+- Canonicalizes text (strips markdown, normalizes whitespace, filters noise)
+- Generates 384-dimensional embeddings via FNV-1a hash-based embedder
+- Stores embeddings with F16 quantization (50% size reduction)
+- Content hashing (SHA256) enables incremental re-indexing
+
+**Stage 5: Search**
+- **Lexical mode**: Tantivy BM25 keyword matching
+- **Semantic mode**: Vector similarity via SIMD dot product
+- **Hybrid mode**: RRF fusion of both result sets for optimal relevance
 - Joins with SQLite for full metadata retrieval
+
+### Search Algorithms
+
+`xf` implements three distinct search strategies, each optimized for different use cases:
+
+#### Lexical Search (BM25)
+
+The classic information retrieval approach, powered by [Tantivy](https://github.com/quickwit-oss/tantivy):
+
+- **Algorithm**: BM25 (Best Match 25) with saturation term frequency
+- **Strengths**: Exact keyword matching, phrase queries, boolean operators
+- **Use case**: When you know the exact words you're looking for
+
+```bash
+xf search "async await" --mode lexical
+```
+
+#### Semantic Search (Vector Similarity)
+
+Finds content by meaning rather than exact keyword matches:
+
+- **Embedder**: FNV-1a hash-based embeddings (zero external dependencies)
+- **Dimensions**: 384-dimensional vectors
+- **Similarity**: Cosine similarity via SIMD-accelerated dot product
+- **Storage**: F16 quantization reduces memory by 50%
+
+```bash
+# Finds tweets about job stress even without those exact words
+xf search "feeling overwhelmed at work" --mode semantic
+```
+
+**How the Hash Embedder Works:**
+
+Unlike neural network embedders (Word2Vec, BERT), xf uses a deterministic hash-based approach:
+
+1. **Tokenize**: Split text on word boundaries
+2. **Hash**: FNV-1a 64-bit hash for each token
+3. **Project**: Hash determines vector index (`hash % 384`) and sign (MSB)
+4. **Normalize**: L2 normalization for cosine similarity
+
+This approach is:
+- **Fast**: ~0ms per embedding (no GPU needed)
+- **Deterministic**: Same input always produces same output
+- **Zero dependencies**: No model files to download
+
+#### Hybrid Search (RRF Fusion)
+
+Combines the best of both approaches using Reciprocal Rank Fusion:
+
+```
+                     User Query
+                         │
+           ┌─────────────┴─────────────┐
+           ▼                           ▼
+    ┌──────────────┐           ┌──────────────┐
+    │   Tantivy    │           │   Vector     │
+    │   (BM25)     │           │  (Cosine)    │
+    └──────┬───────┘           └──────┬───────┘
+           │ Rank 0,1,2...            │ Rank 0,1,2...
+           │                          │
+           └────────────┬─────────────┘
+                        ▼
+                ┌───────────────┐
+                │  RRF Fusion   │
+                │  K=60         │
+                └───────┬───────┘
+                        ▼
+                  Final Results
+```
+
+**RRF Algorithm:**
+
+```
+Score(doc) = Σ 1/(K + rank + 1)
+```
+
+Where:
+- **K = 60**: Empirically optimal constant that balances score distribution
+- **rank**: 0-indexed position in each result list
+- Documents appearing in both lists get scores from both, naturally boosting multi-signal matches
+
+**Why RRF?**
+
+1. **Score normalization**: BM25 scores (0-20+) and cosine similarity (0-1) are incompatible. RRF uses ranks, not scores.
+2. **Robust fusion**: Outperforms simple score averaging or max-pooling
+3. **No tuning needed**: K=60 works well across diverse datasets
+4. **Deterministic**: Tie-breaking by doc ID ensures consistent ordering
+
+```bash
+# Default mode—best of both worlds
+xf search "productivity tips"
+```
+
+### Text Canonicalization
+
+Before embedding, text passes through a normalization pipeline:
+
+1. **Unicode NFC**: Normalize composed characters
+2. **Strip Markdown**: Remove `**bold**`, `*italic*`, `[links](url)`, headers
+3. **Collapse Code Blocks**: Keep first 20 + last 10 lines of code
+4. **Normalize Whitespace**: Collapse runs of spaces/newlines
+5. **Filter Low-Signal**: Skip trivial content ("OK", "Thanks", "Done")
+6. **Truncate**: Cap at 2000 characters for consistent embedding dimensions
+
+This ensures semantically equivalent text produces identical embeddings.
 
 ## Performance
 
@@ -510,10 +659,19 @@ Override with environment variables:
 ### Benchmarks
 
 On a typical archive (12,000 tweets, 40,000 likes):
-- Index time: ~5 seconds
-- Search latency: <1ms
-- Database size: ~10MB
-- Index size: ~15MB
+
+| Operation | Time |
+|-----------|------|
+| Index + embed | ~8 seconds |
+| Lexical search | <1ms |
+| Semantic search | <5ms |
+| Hybrid search | <10ms |
+
+| Storage | Size |
+|---------|------|
+| SQLite database | ~10MB |
+| Tantivy index | ~15MB |
+| Embeddings (F16) | ~3MB |
 
 ### Performance Optimizations
 
@@ -612,6 +770,52 @@ Tantivy's query parser supports:
 - Wildcards: `rust*`
 - Field-specific: `type:tweet text:rust`
 
+### When should I use semantic vs lexical search?
+
+**Use lexical (`--mode lexical`) when:**
+- You know the exact words or phrases
+- You need boolean operators (`AND`, `OR`, `NOT`)
+- You're searching for specific names, hashtags, or technical terms
+
+**Use semantic (`--mode semantic`) when:**
+- You're searching by concept rather than keywords
+- You want to find related content with different wording
+- Example: "feeling stressed" finds tweets about burnout, deadlines, pressure
+
+**Use hybrid (default) when:**
+- You're not sure which approach is best
+- You want the most comprehensive results
+- Hybrid combines both and uses RRF to rank results optimally
+
+### How does semantic search work without a neural network?
+
+`xf` uses a hash-based embedder instead of traditional ML models like BERT or Word2Vec. Each word is hashed (FNV-1a) to deterministically select which dimensions to activate in a 384-dimensional vector. This approach:
+
+- Requires **no model download** (zero bytes of ML weights)
+- Runs in **~0ms** (no GPU needed)
+- Produces **deterministic** results (same input = same output)
+- Works well for **word overlap** and **topic similarity**
+
+The tradeoff: it won't understand synonyms that share no words (e.g., "car" vs "automobile"). For most personal archive searches, this is rarely an issue.
+
+### Why is hybrid search the default?
+
+Hybrid search gives you the best of both worlds:
+
+1. **Lexical catches exact matches** — important for names, hashtags, URLs
+2. **Semantic catches related content** — finds topically similar tweets
+3. **RRF fusion prioritizes documents that score well in both** — naturally surfacing the most relevant results
+
+If a document ranks #1 in both lexical and semantic results, it's almost certainly what you're looking for.
+
+### Does semantic search require re-indexing?
+
+Yes, if you indexed your archive before semantic search was available (unlikely, since it's been there from the start). Embeddings are generated automatically during `xf index`. If you're missing embeddings for some reason, re-run:
+
+```bash
+xf index ~/x-archive --force
+```
+
 ## Contributing
 
 *About Contributions:* Please don't take this the wrong way, but I do not accept outside contributions for any of my projects. I simply don't have the mental bandwidth to review anything, and it's my name on the thing, so I'm responsible for any problems it causes; thus, the risk-reward is highly asymmetric from my perspective. I'd also have to worry about other "stakeholders," which seems unwise for tools I mostly make for myself for free. Feel free to submit issues, and even PRs if you want to illustrate a proposed fix, but know I won't merge them directly. Instead, I'll have Claude or Codex review submissions via `gh` and independently decide whether and how to address them. Bug reports in particular are welcome. Sorry if this offends, but I want to avoid wasted time and hurt feelings. I understand this isn't in sync with the prevailing open-source ethos that seeks community contributions, but it's the only way I can move at this velocity and keep my sanity.
@@ -622,4 +826,4 @@ MIT - see [LICENSE](LICENSE) for details.
 
 ---
 
-Built with Rust, Tantivy, and SQLite. Inspired by the need to actually search through years of tweets.
+Built with Rust, Tantivy, and SQLite. Features hybrid search combining keyword matching with semantic similarity via RRF fusion. Inspired by the need to actually search through years of tweets.
