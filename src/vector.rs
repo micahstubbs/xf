@@ -1537,4 +1537,282 @@ mod tests {
 
         assert_eq!(index.len(), 1, "Should fall back to storage");
     }
+
+    // ========================================================================
+    // xf-70: Vector index regression tests
+    // ========================================================================
+
+    #[test]
+    fn test_load_from_file_truncated_header() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let file_path = temp_dir.path().join(VECTOR_INDEX_FILENAME);
+
+        // Write truncated header (only 16 bytes instead of 32)
+        let mut bytes = vec![0u8; 16];
+        bytes[0..4].copy_from_slice(&VECTOR_INDEX_MAGIC);
+        bytes[4..6].copy_from_slice(&VECTOR_INDEX_VERSION.to_le_bytes());
+        std::fs::write(&file_path, &bytes).unwrap();
+
+        // Should return None (invalid file)
+        let result = VectorIndex::load_from_file(temp_dir.path()).unwrap();
+        assert!(result.is_none(), "Should return None for truncated header");
+    }
+
+    #[test]
+    fn test_load_from_file_version_mismatch() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let file_path = temp_dir.path().join(VECTOR_INDEX_FILENAME);
+
+        // Write header with wrong version (99 instead of 1)
+        let mut bytes = vec![0u8; 100];
+        bytes[0..4].copy_from_slice(&VECTOR_INDEX_MAGIC);
+        bytes[4..6].copy_from_slice(&99u16.to_le_bytes()); // Wrong version
+        bytes[6] = VECTOR_INDEX_DOC_TYPE_ENCODING;
+        bytes[7] = 0; // padding
+        bytes[8..12].copy_from_slice(&384u32.to_le_bytes()); // dimension
+        bytes[12..20].copy_from_slice(&0u64.to_le_bytes()); // record_count
+        bytes[20..28].copy_from_slice(&32u64.to_le_bytes()); // offset_table_offset
+        bytes[28..32].copy_from_slice(&[0u8; 4]); // reserved
+        std::fs::write(&file_path, &bytes).unwrap();
+
+        // Should return None (unsupported version)
+        let result = VectorIndex::load_from_file(temp_dir.path()).unwrap();
+        assert!(result.is_none(), "Should return None for version mismatch");
+    }
+
+    #[test]
+    #[allow(clippy::cast_precision_loss)]
+    fn test_load_from_file_truncated_record() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open_memory().unwrap();
+
+        // Store an embedding
+        let embedding: Vec<f32> = (0..384).map(|i| (i as f32) / 384.0).collect();
+        storage
+            .store_embedding("doc1", "tweet", &embedding, None)
+            .unwrap();
+
+        // Write valid file
+        write_vector_index(temp_dir.path(), &storage).unwrap();
+
+        // Read and truncate
+        let file_path = temp_dir.path().join(VECTOR_INDEX_FILENAME);
+        let bytes = std::fs::read(&file_path).unwrap();
+
+        // Truncate mid-record (remove last 100 bytes)
+        let truncated = &bytes[..bytes.len().saturating_sub(100)];
+        std::fs::write(&file_path, truncated).unwrap();
+
+        // Should return None (truncated record data)
+        let result = VectorIndex::load_from_file(temp_dir.path()).unwrap();
+        assert!(result.is_none(), "Should return None for truncated record");
+    }
+
+    #[test]
+    #[allow(clippy::cast_precision_loss)]
+    fn test_load_from_file_corrupted_offset_table() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open_memory().unwrap();
+
+        // Store multiple embeddings
+        for i in 0..5 {
+            let embedding: Vec<f32> = (0..384).map(|j| ((i * 384 + j) as f32) / 1920.0).collect();
+            storage
+                .store_embedding(&format!("doc{i}"), "tweet", &embedding, None)
+                .unwrap();
+        }
+
+        // Write valid file
+        write_vector_index(temp_dir.path(), &storage).unwrap();
+
+        // Read and corrupt offset table
+        let file_path = temp_dir.path().join(VECTOR_INDEX_FILENAME);
+        let mut bytes = std::fs::read(&file_path).unwrap();
+
+        // Corrupt offset table entry (set to impossibly large value)
+        if bytes.len() > 40 {
+            bytes[32..40].copy_from_slice(&u64::MAX.to_le_bytes());
+        }
+        std::fs::write(&file_path, &bytes).unwrap();
+
+        // Should return None (corrupted offset)
+        let result = VectorIndex::load_from_file(temp_dir.path()).unwrap();
+        assert!(result.is_none(), "Should return None for corrupted offset");
+    }
+
+    #[test]
+    #[allow(clippy::cast_precision_loss)]
+    fn test_search_isomorphism_file_vs_storage() {
+        // Verify that searching the file-loaded index produces identical
+        // results to the storage-loaded index
+        let storage = Storage::open_memory().unwrap();
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        // Create diverse embeddings
+        let embeddings: Vec<Vec<f32>> = (0..10)
+            .map(|i| {
+                (0..384)
+                    .map(|j| {
+                        // Create somewhat distinct embeddings
+                        let base = (i * 100 + j) as f32;
+                        f32::midpoint(base.sin(), base.cos())
+                    })
+                    .collect()
+            })
+            .collect();
+
+        // Store embeddings with different types
+        for (i, emb) in embeddings.iter().enumerate() {
+            let doc_type = if i % 3 == 0 {
+                "tweet"
+            } else if i % 3 == 1 {
+                "like"
+            } else {
+                "dm"
+            };
+            storage
+                .store_embedding(&format!("doc{i}"), doc_type, emb, None)
+                .unwrap();
+        }
+
+        // Write to file
+        write_vector_index(temp_dir.path(), &storage).unwrap();
+
+        // Load both ways
+        let file_index = VectorIndex::load_from_file(temp_dir.path())
+            .unwrap()
+            .expect("Should load from file");
+        let storage_index = VectorIndex::load_from_storage(&storage).unwrap();
+
+        // Use first embedding as query
+        let query = &embeddings[0];
+
+        // Search both indices
+        let file_results = file_index.search_top_k(query, 5, None);
+        let storage_results = storage_index.search_top_k(query, 5, None);
+
+        // Verify isomorphism
+        assert_eq!(
+            file_results.len(),
+            storage_results.len(),
+            "Same number of results"
+        );
+
+        for (file_r, storage_r) in file_results.iter().zip(storage_results.iter()) {
+            assert_eq!(file_r.doc_id, storage_r.doc_id, "Same doc_id");
+            assert_eq!(file_r.doc_type, storage_r.doc_type, "Same doc_type");
+            // Allow small floating point differences
+            let score_diff = (file_r.score - storage_r.score).abs();
+            assert!(
+                score_diff < 1e-5,
+                "Scores should match: {} vs {} (diff: {})",
+                file_r.score,
+                storage_r.score,
+                score_diff
+            );
+        }
+    }
+
+    #[test]
+    #[allow(clippy::cast_precision_loss)]
+    fn test_search_isomorphism_with_type_filter() {
+        // Verify type-filtered searches produce identical results
+        let storage = Storage::open_memory().unwrap();
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        // Create embeddings
+        for i in 0..20 {
+            let embedding: Vec<f32> = (0..384).map(|j| ((i * 50 + j) as f32).sin()).collect();
+            let doc_type = match i % 4 {
+                0 => "tweet",
+                1 => "like",
+                2 => "dm",
+                _ => "grok",
+            };
+            storage
+                .store_embedding(&format!("doc{i}"), doc_type, &embedding, None)
+                .unwrap();
+        }
+
+        // Write to file
+        write_vector_index(temp_dir.path(), &storage).unwrap();
+
+        // Load both ways
+        let file_index = VectorIndex::load_from_file(temp_dir.path())
+            .unwrap()
+            .expect("Should load from file");
+        let storage_index = VectorIndex::load_from_storage(&storage).unwrap();
+
+        // Query embedding
+        let query: Vec<f32> = (0..384).map(|j| (j as f32).sin()).collect();
+
+        // Search with type filter
+        let filter = ["tweet", "dm"];
+        let file_results = file_index.search_top_k(&query, 10, Some(&filter));
+        let storage_results = storage_index.search_top_k(&query, 10, Some(&filter));
+
+        // Verify same results
+        assert_eq!(file_results.len(), storage_results.len());
+        for (f, s) in file_results.iter().zip(storage_results.iter()) {
+            assert_eq!(f.doc_id, s.doc_id);
+            assert_eq!(f.doc_type, s.doc_type);
+            assert!(
+                (f.score - s.score).abs() < 1e-5,
+                "Score mismatch: {} vs {}",
+                f.score,
+                s.score
+            );
+        }
+
+        // Verify only filtered types returned
+        for r in &file_results {
+            assert!(
+                r.doc_type == "tweet" || r.doc_type == "dm",
+                "Unexpected type: {}",
+                r.doc_type
+            );
+        }
+    }
+
+    #[test]
+    #[allow(clippy::cast_precision_loss)]
+    fn test_search_order_determinism() {
+        // Verify search results are deterministic (same order across runs)
+        let storage = Storage::open_memory().unwrap();
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        // Create embeddings with similar scores to test tie-breaking
+        for i in 0..10 {
+            let embedding: Vec<f32> = (0..384)
+                .map(|j| {
+                    if j == 0 {
+                        1.0 // All have same first component
+                    } else {
+                        (i as f32).mul_add(0.001, j as f32 * 0.0001)
+                    }
+                })
+                .collect();
+            storage
+                .store_embedding(&format!("doc{i}"), "tweet", &embedding, None)
+                .unwrap();
+        }
+
+        write_vector_index(temp_dir.path(), &storage).unwrap();
+        let index = VectorIndex::load_from_file(temp_dir.path())
+            .unwrap()
+            .expect("Should load");
+
+        // Run search multiple times
+        let query: Vec<f32> = (0..384).map(|j| if j == 0 { 1.0 } else { 0.0 }).collect();
+
+        let results1 = index.search_top_k(&query, 5, None);
+        let results2 = index.search_top_k(&query, 5, None);
+        let results3 = index.search_top_k(&query, 5, None);
+
+        // All runs should produce identical results
+        for i in 0..results1.len() {
+            assert_eq!(results1[i].doc_id, results2[i].doc_id);
+            assert_eq!(results1[i].doc_id, results3[i].doc_id);
+        }
+    }
 }

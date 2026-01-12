@@ -62,7 +62,7 @@ struct IndexedState {
     engine: SearchEngine,
     storage: Storage,
     vector_index: Option<VectorIndex>,
-    _temp: TempDir,
+    temp: TempDir,
 }
 
 fn build_indexed_state(with_embeddings: bool) -> Result<IndexedState> {
@@ -120,7 +120,7 @@ fn build_indexed_state(with_embeddings: bool) -> Result<IndexedState> {
         engine,
         storage,
         vector_index,
-        _temp: temp_dir,
+        temp: temp_dir,
     })
 }
 
@@ -594,6 +594,63 @@ fn bench_stats_detailed(c: &mut Criterion) {
 }
 
 // ============================================================================
+// Vector Index Loading Benchmarks (xf-70)
+// ============================================================================
+
+fn bench_vector_index_load_from_storage(c: &mut Criterion) {
+    let state = match build_indexed_state(true) {
+        Ok(state) => state,
+        Err(err) => {
+            eprintln!("bench_vector_index_load_from_storage setup failed: {err}");
+            return;
+        }
+    };
+
+    let mut group = c.benchmark_group("vector_index_load");
+    group.measurement_time(Duration::from_secs(10));
+    group.sample_size(30);
+
+    group.bench_function("from_storage", |b| {
+        b.iter(|| {
+            let index = VectorIndex::load_from_storage(&state.storage);
+            black_box(index.map(|i| i.len()).unwrap_or(0));
+        });
+    });
+
+    group.finish();
+}
+
+fn bench_vector_index_load_from_file(c: &mut Criterion) {
+    let state = match build_indexed_state(true) {
+        Ok(state) => state,
+        Err(err) => {
+            eprintln!("bench_vector_index_load_from_file setup failed: {err}");
+            return;
+        }
+    };
+
+    // Write vector index to file
+    let index_path = state.temp.path().join("index");
+    if let Err(err) = xf::vector::write_vector_index(&index_path, &state.storage) {
+        eprintln!("bench_vector_index_load_from_file write failed: {err}");
+        return;
+    }
+
+    let mut group = c.benchmark_group("vector_index_load");
+    group.measurement_time(Duration::from_secs(10));
+    group.sample_size(50);
+
+    group.bench_function("from_file", |b| {
+        b.iter(|| {
+            let index = VectorIndex::load_from_file(&index_path);
+            black_box(index.map(|opt| opt.map(|i| i.len())).unwrap_or(None));
+        });
+    });
+
+    group.finish();
+}
+
+// ============================================================================
 // Criterion Groups
 // ============================================================================
 
@@ -606,6 +663,14 @@ criterion_group!(
         bench_lexical_search,
         bench_semantic_search,
         bench_search_pagination
+);
+
+criterion_group!(
+    name = vector_index_benches;
+    config = Criterion::default().significance_level(0.05);
+    targets =
+        bench_vector_index_load_from_storage,
+        bench_vector_index_load_from_file
 );
 
 criterion_group!(
@@ -625,4 +690,9 @@ criterion_group!(
         bench_stats_detailed
 );
 
-criterion_main!(search_benches, indexing_benches, stats_benches);
+criterion_main!(
+    search_benches,
+    indexing_benches,
+    stats_benches,
+    vector_index_benches
+);
