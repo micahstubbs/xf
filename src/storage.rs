@@ -114,6 +114,14 @@ impl Storage {
                 "Migrating database from version {} to {}",
                 current_version, SCHEMA_VERSION
             );
+            
+            // For Version 2, we introduced `content_hash` to the embeddings table.
+            // Since this is a derived data table, the safest migration is to drop and recreate it
+            // to ensure the schema matches our expectations.
+            if current_version < 2 {
+                self.conn.execute("DROP TABLE IF EXISTS embeddings", [])?;
+            }
+
             self.create_schema()?;
             self.set_schema_version(SCHEMA_VERSION)?;
         }
