@@ -237,6 +237,105 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    struct LegacyDocKey {
+        id: String,
+        doc_type: String,
+    }
+
+    #[derive(Debug, Clone)]
+    struct LegacyFusedHit {
+        doc_id: String,
+        doc_type: String,
+        score: f32,
+        lexical_rank: Option<usize>,
+        in_both: bool,
+    }
+
+    #[allow(clippy::cast_precision_loss)]
+    fn legacy_rrf_fuse(
+        lexical: &[SearchResult],
+        semantic: &[VectorSearchResult],
+        limit: usize,
+        offset: usize,
+    ) -> Vec<LegacyFusedHit> {
+        if limit == 0 {
+            return Vec::new();
+        }
+
+        let mut scores: HashMap<LegacyDocKey, HybridScore> = HashMap::new();
+
+        for (rank, hit) in lexical.iter().enumerate() {
+            let doc_type = hit.result_type.to_string();
+            let key = LegacyDocKey {
+                id: hit.id.clone(),
+                doc_type: doc_type.clone(),
+            };
+            let entry = scores.entry(key).or_default();
+            entry.rrf += 1.0 / (RRF_K + rank as f32 + 1.0);
+            entry.lexical_rank = Some(rank);
+        }
+
+        for (rank, hit) in semantic.iter().enumerate() {
+            let key = LegacyDocKey {
+                id: hit.doc_id.clone(),
+                doc_type: hit.doc_type.clone(),
+            };
+            let entry = scores.entry(key).or_default();
+            entry.rrf += 1.0 / (RRF_K + rank as f32 + 1.0);
+            entry.semantic_rank = Some(rank);
+        }
+
+        let mut fused: Vec<LegacyFusedHit> = scores
+            .into_iter()
+            .map(|(key, score)| {
+                let in_both = score.lexical_rank.is_some() && score.semantic_rank.is_some();
+                LegacyFusedHit {
+                    doc_id: key.id,
+                    doc_type: key.doc_type,
+                    score: score.rrf,
+                    lexical_rank: score.lexical_rank,
+                    in_both,
+                }
+            })
+            .collect();
+
+        fused.sort_by(|a, b| {
+            b.score
+                .total_cmp(&a.score)
+                .then_with(|| match (b.in_both, a.in_both) {
+                    (true, false) => Ordering::Greater,
+                    (false, true) => Ordering::Less,
+                    _ => Ordering::Equal,
+                })
+                .then_with(|| a.doc_id.cmp(&b.doc_id))
+                .then_with(|| a.doc_type.cmp(&b.doc_type))
+        });
+
+        let start = offset.min(fused.len());
+        let end = start.saturating_add(limit).min(fused.len());
+
+        fused.into_iter().skip(start).take(end - start).collect()
+    }
+
+    fn next_u32(seed: &mut u64) -> u32 {
+        *seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+        (*seed >> 32) as u32
+    }
+
+    fn doc_type_for(idx: u32) -> (SearchResultType, &'static str) {
+        match idx % 4 {
+            0 => (SearchResultType::Tweet, "tweet"),
+            1 => (SearchResultType::Like, "like"),
+            2 => (SearchResultType::DirectMessage, "dm"),
+            _ => (SearchResultType::GrokMessage, "grok"),
+        }
+    }
+
+    fn usize_to_f32(value: usize) -> f32 {
+        f32::from(u16::try_from(value).unwrap_or(u16::MAX))
+    }
+
     #[test]
     fn test_rrf_basic() {
         let lexical = vec![
@@ -427,5 +526,67 @@ mod tests {
         assert_eq!(matching.len(), 2);
         assert!(matching.iter().any(|hit| hit.doc_type == "tweet"));
         assert!(matching.iter().any(|hit| hit.doc_type == "like"));
+    }
+
+    #[test]
+    fn test_rrf_isomorphic_legacy_randomized() {
+        let mut seed = 42u64;
+
+        for _case in 0..25 {
+            let lexical_len = (next_u32(&mut seed) % 10 + 1) as usize;
+            let semantic_len = (next_u32(&mut seed) % 10) as usize;
+            let limit = (next_u32(&mut seed) % 10 + 1) as usize;
+            let offset = (next_u32(&mut seed) % 3) as usize;
+
+            let mut lexical = Vec::with_capacity(lexical_len);
+            for i in 0..lexical_len {
+                let id = format!("doc{}", next_u32(&mut seed) % 7);
+                let (result_type, _) = doc_type_for(next_u32(&mut seed));
+                let score = usize_to_f32(lexical_len.saturating_sub(i) + 1);
+                lexical.push(make_lexical_hit(&id, score, result_type));
+            }
+
+            let mut semantic = Vec::with_capacity(semantic_len);
+            for i in 0..semantic_len {
+                let id = format!("doc{}", next_u32(&mut seed) % 7);
+                let (_, doc_type) = doc_type_for(next_u32(&mut seed));
+                let score = usize_to_f32(semantic_len.saturating_sub(i) + 1) / 10.0;
+                semantic.push(make_semantic_hit(&id, score, doc_type));
+            }
+
+            let fused = rrf_fuse(&lexical, &semantic, limit, offset);
+            let legacy = legacy_rrf_fuse(&lexical, &semantic, limit, offset);
+
+            assert_eq!(fused.len(), legacy.len());
+            for (new, old) in fused.iter().zip(legacy.iter()) {
+                assert_eq!(new.doc_id, old.doc_id);
+                assert_eq!(new.doc_type, old.doc_type);
+                assert_eq!(new.in_both, old.in_both);
+                assert_eq!(new.lexical_rank, old.lexical_rank);
+                assert_eq!(new.score.to_bits(), old.score.to_bits());
+            }
+        }
+    }
+
+    #[test]
+    fn test_rrf_borrows_doc_id_from_lexical() {
+        let lexical = vec![make_lexical_hit("borrowed", 1.0, SearchResultType::Tweet)];
+        let semantic: Vec<VectorSearchResult> = vec![];
+
+        let fused = rrf_fuse(&lexical, &semantic, 10, 0);
+        let fused_ptr = fused[0].doc_id.as_ptr();
+        let lexical_ptr = lexical[0].id.as_ptr();
+        assert_eq!(fused_ptr, lexical_ptr);
+    }
+
+    #[test]
+    fn test_rrf_borrows_doc_id_from_semantic() {
+        let lexical: Vec<SearchResult> = vec![];
+        let semantic = vec![make_semantic_hit("borrowed", 0.9, "tweet")];
+
+        let fused = rrf_fuse(&lexical, &semantic, 10, 0);
+        let fused_ptr = fused[0].doc_id.as_ptr();
+        let semantic_ptr = semantic[0].doc_id.as_ptr();
+        assert_eq!(fused_ptr, semantic_ptr);
     }
 }
