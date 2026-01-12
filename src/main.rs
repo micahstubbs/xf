@@ -739,10 +739,16 @@ fn generate_embeddings(storage: &Storage, show_progress: bool) -> Result<()> {
 
     // Grok messages
     let grok_msgs = storage.get_all_grok_messages(None)?;
-    for (idx, msg) in grok_msgs.iter().enumerate() {
+    for msg in &grok_msgs {
         if !msg.message.is_empty() {
-            // Grok messages don't have unique IDs, use chat_id + index
-            let doc_id = format!("grok_{}_{}", msg.chat_id, idx);
+            // Use same doc_id format as Tantivy indexing (search.rs:344-350)
+            let doc_id = format!(
+                "{}_{}_{}_{}",
+                msg.chat_id,
+                msg.created_at.timestamp(),
+                msg.created_at.timestamp_subsec_nanos(),
+                msg.sender
+            );
             docs.push((doc_id, msg.message.clone(), "grok".to_string()));
         }
     }
