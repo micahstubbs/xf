@@ -30,6 +30,7 @@ const FIELD_CREATED_AT: &str = "created_at";
 const FIELD_METADATA: &str = "metadata";
 
 const LARGE_INDEX_BYTES: u64 = 500 * 1024 * 1024;
+const MAX_DOC_TYPES: usize = 4;
 
 const fn epoch_utc() -> DateTime<Utc> {
     DateTime::<Utc>::from_timestamp(0, 0).unwrap()
@@ -667,7 +668,19 @@ impl SearchEngine {
             return Ok(vec![None; lookups.len()]);
         };
 
-        let top_docs = searcher.search(&query, &TopDocs::with_limit(lookups.len()))?;
+        let max_docs = lookups
+            .iter()
+            .map(|lookup| {
+                if lookup.doc_type.is_some() {
+                    1
+                } else {
+                    MAX_DOC_TYPES
+                }
+            })
+            .sum::<usize>()
+            .max(lookups.len());
+
+        let top_docs = searcher.search(&query, &TopDocs::with_limit(max_docs))?;
 
         let mut results_by_id: HashMap<String, SearchResult> = HashMap::new();
         let mut results_by_type: HashMap<String, HashMap<String, SearchResult>> = HashMap::new();
@@ -1650,6 +1663,30 @@ mod tests {
             SearchResultType::Tweet
         );
         assert_eq!(results[2].as_ref().unwrap().text, "tweet 99");
+    }
+
+    #[test]
+    fn test_get_by_ids_untyped_handles_multiple_doc_types() {
+        let engine = SearchEngine::open_memory().unwrap();
+        let mut writer = engine.writer(15_000_000).unwrap();
+
+        let tweets = vec![
+            create_test_tweet("42", "tweet 42"),
+            create_test_tweet("99", "tweet 99"),
+        ];
+        let likes = vec![create_test_like("42", Some("like 42"))];
+
+        engine.index_tweets(&mut writer, &tweets).unwrap();
+        engine.index_likes(&mut writer, &likes).unwrap();
+        writer.commit().unwrap();
+        engine.reload().unwrap();
+
+        let lookups = vec![DocLookup::new("42"), DocLookup::new("99")];
+        let results = engine.get_by_ids(&lookups).unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert!(results[0].is_some());
+        assert_eq!(results[1].as_ref().unwrap().id, "99");
     }
 
     #[test]
