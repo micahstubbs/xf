@@ -1087,8 +1087,14 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
             );
 
             // Fuse results using RRF
-            let fused =
-                hybrid::rrf_fuse(&lexical_results, &semantic_results, args.limit, args.offset);
+            // Pass limit + offset as the limit, and 0 for offset, so the common
+            // pagination code at the end handles offset consistently with other modes
+            let fused = hybrid::rrf_fuse(
+                &lexical_results,
+                &semantic_results,
+                args.limit.saturating_add(args.offset),
+                0,
+            );
 
             // Convert fused hits back to SearchResults
             let mut results = Vec::new();
