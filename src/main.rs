@@ -1027,7 +1027,6 @@ fn generate_embeddings(storage: &Storage, show_progress: bool) -> Result<()> {
             existing_hashes.insert(*hash);
         }
     }
-    let mut embedding_cache: HashMap<[u8; 32], Vec<f32>> = HashMap::new();
 
     // Create progress bar
     let pb = if show_progress {
@@ -1086,9 +1085,11 @@ fn generate_embeddings(storage: &Storage, show_progress: bool) -> Result<()> {
             }
         }
 
+        let mut batch_cache: HashMap<[u8; 32], Vec<f32>> = HashMap::new();
         let mut needed_hashes: Vec<[u8; 32]> = Vec::new();
+        let mut needed_hashes_set: HashSet<[u8; 32]> = HashSet::new();
         for (_, _, _, hash) in &candidates {
-            if existing_hashes.contains(hash) && !embedding_cache.contains_key(hash) {
+            if existing_hashes.contains(hash) && needed_hashes_set.insert(*hash) {
                 needed_hashes.push(*hash);
             }
         }
@@ -1096,13 +1097,13 @@ fn generate_embeddings(storage: &Storage, show_progress: bool) -> Result<()> {
         if !needed_hashes.is_empty() {
             let fetched = storage.load_embeddings_by_hashes(&needed_hashes)?;
             for (hash, embedding) in fetched {
-                embedding_cache.insert(hash, embedding);
+                batch_cache.insert(hash, embedding);
             }
         }
 
         for (doc_id, doc_type, canonical, hash) in candidates {
             // Reuse an existing embedding if identical content exists.
-            if let Some(existing_embedding) = embedding_cache.get(&hash) {
+            if let Some(existing_embedding) = batch_cache.get(&hash) {
                 batch.push((
                     doc_id.clone(),
                     doc_type.clone(),
@@ -1116,7 +1117,7 @@ fn generate_embeddings(storage: &Storage, show_progress: bool) -> Result<()> {
             // Generate embedding
             match embedder.embed(&canonical) {
                 Ok(embedding) => {
-                    embedding_cache.insert(hash, embedding.clone());
+                    batch_cache.insert(hash, embedding.clone());
                     batch.push((doc_id.clone(), doc_type.clone(), embedding, Some(hash)));
                 }
                 Err(e) => {
