@@ -3,6 +3,7 @@
 //! Run with: `cargo bench --bench search_perf`
 
 use anyhow::{Context, Result, anyhow};
+use chrono::Utc;
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -13,10 +14,67 @@ use xf::canonicalize::canonicalize_for_embedding;
 use xf::embedder::Embedder;
 use xf::hash_embedder::HashEmbedder;
 use xf::hybrid::{candidate_count, rrf_fuse};
-use xf::model::{DmConversation, GrokMessage, Like, Tweet};
+use xf::model::{DmConversation, GrokMessage, Like, SearchResult, SearchResultType, Tweet};
 use xf::stats_analytics::{ContentStats, EngagementStats, TemporalStats};
-use xf::vector::VectorIndex;
+use xf::vector::{VectorIndex, VectorSearchResult};
 use xf::{ArchiveParser, SearchEngine, Storage};
+
+#[cfg(feature = "alloc-count")]
+use std::alloc::{GlobalAlloc, Layout, System};
+#[cfg(feature = "alloc-count")]
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+#[cfg(feature = "alloc-count")]
+struct CountingAllocator;
+
+#[cfg(feature = "alloc-count")]
+static ALLOC_COUNT: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "alloc-count")]
+static ALLOC_BYTES: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "alloc-count")]
+static DEALLOC_COUNT: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "alloc-count")]
+static DEALLOC_BYTES: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(feature = "alloc-count")]
+unsafe impl GlobalAlloc for CountingAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let ptr = System.alloc(layout);
+        if !ptr.is_null() {
+            ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
+            ALLOC_BYTES.fetch_add(layout.size(), Ordering::Relaxed);
+        }
+        ptr
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        System.dealloc(ptr, layout);
+        DEALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
+        DEALLOC_BYTES.fetch_add(layout.size(), Ordering::Relaxed);
+    }
+}
+
+#[cfg(feature = "alloc-count")]
+#[global_allocator]
+static GLOBAL_ALLOC: CountingAllocator = CountingAllocator;
+
+#[cfg(feature = "alloc-count")]
+fn reset_alloc_counts() {
+    ALLOC_COUNT.store(0, Ordering::Relaxed);
+    ALLOC_BYTES.store(0, Ordering::Relaxed);
+    DEALLOC_COUNT.store(0, Ordering::Relaxed);
+    DEALLOC_BYTES.store(0, Ordering::Relaxed);
+}
+
+#[cfg(feature = "alloc-count")]
+fn alloc_counts() -> (usize, usize, usize, usize) {
+    (
+        ALLOC_COUNT.load(Ordering::Relaxed),
+        ALLOC_BYTES.load(Ordering::Relaxed),
+        DEALLOC_COUNT.load(Ordering::Relaxed),
+        DEALLOC_BYTES.load(Ordering::Relaxed),
+    )
+}
 
 struct PerfCorpus {
     tweets: Vec<Tweet>,
@@ -122,6 +180,49 @@ fn build_indexed_state(with_embeddings: bool) -> Result<IndexedState> {
         vector_index,
         temp: temp_dir,
     })
+}
+
+fn usize_to_f32(value: usize) -> f32 {
+    f32::from(u16::try_from(value).unwrap_or(u16::MAX))
+}
+
+fn make_rrf_inputs(size: usize) -> (Vec<SearchResult>, Vec<VectorSearchResult>) {
+    let mut lexical = Vec::with_capacity(size);
+    let mut semantic = Vec::with_capacity(size);
+
+    for i in 0..size {
+        let result_type = match i % 4 {
+            0 => SearchResultType::Tweet,
+            1 => SearchResultType::Like,
+            2 => SearchResultType::DirectMessage,
+            _ => SearchResultType::GrokMessage,
+        };
+        let doc_type = match result_type {
+            SearchResultType::Tweet => "tweet",
+            SearchResultType::Like => "like",
+            SearchResultType::DirectMessage => "dm",
+            SearchResultType::GrokMessage => "grok",
+        };
+        let doc_id = format!("doc{doc_type}_{i}");
+
+        lexical.push(SearchResult {
+            result_type,
+            id: doc_id.clone(),
+            text: "bench text".to_string(),
+            created_at: Utc::now(),
+            score: usize_to_f32(size.saturating_sub(i) + 1),
+            highlights: Vec::new(),
+            metadata: serde_json::Value::Null,
+        });
+
+        semantic.push(VectorSearchResult {
+            doc_id,
+            doc_type: doc_type.to_string(),
+            score: usize_to_f32(size.saturating_sub(i) + 1) / 10.0,
+        });
+    }
+
+    (lexical, semantic)
 }
 
 fn query_embedding(query: &str) -> Result<Vec<f32>> {
@@ -620,6 +721,37 @@ fn bench_vector_index_load_from_storage(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_rrf_fuse_only(c: &mut Criterion) {
+    let sizes = [100usize, 1000usize];
+    let mut group = c.benchmark_group("rrf_fuse");
+    group.measurement_time(Duration::from_secs(10));
+    group.sample_size(50);
+
+    for size in sizes {
+        let (lexical, semantic) = make_rrf_inputs(size);
+
+        #[cfg(feature = "alloc-count")]
+        {
+            reset_alloc_counts();
+            let fused = rrf_fuse(&lexical, &semantic, 50, 0);
+            black_box(&fused);
+            let (allocs, alloc_bytes, deallocs, dealloc_bytes) = alloc_counts();
+            eprintln!(
+                "rrf_fuse allocs size={size}: allocs={allocs} bytes={alloc_bytes} deallocs={deallocs} dealloc_bytes={dealloc_bytes}"
+            );
+        }
+
+        group.bench_with_input(BenchmarkId::new("rrf_fuse_only", size), &size, |b, _| {
+            b.iter(|| {
+                let fused = rrf_fuse(&lexical, &semantic, 50, 0);
+                black_box(fused.len());
+            });
+        });
+    }
+
+    group.finish();
+}
+
 fn bench_vector_index_load_from_file(c: &mut Criterion) {
     let state = match build_indexed_state(true) {
         Ok(state) => state,
@@ -662,7 +794,8 @@ criterion_group!(
         bench_hybrid_search_warm,
         bench_lexical_search,
         bench_semantic_search,
-        bench_search_pagination
+        bench_search_pagination,
+        bench_rrf_fuse_only
 );
 
 criterion_group!(

@@ -96,6 +96,7 @@ criterion = { version = "0.5", features = ["html_reports"] }
 
 [features]
 parallel-search = []
+alloc-count = []
 
 [[bench]]
 name = "search_perf"
