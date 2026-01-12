@@ -3921,7 +3921,10 @@ mod cache_tests {
         // Verify type counts are tracked
         let meta = cache.meta().context("meta should be set")?;
         assert_eq!(meta.embedding_count, embedding_count);
-        assert!(!meta.type_counts.is_empty(), "type_counts should be populated");
+        assert!(
+            !meta.type_counts.is_empty(),
+            "type_counts should be populated"
+        );
 
         // Verify search still works
         let query = vec![0.1, 0.2, 0.3];
@@ -3960,7 +3963,10 @@ mod cache_tests {
             Ok(loaded_now)
         });
         let loaded_now_thread = handle.join().expect("thread should complete")?;
-        assert!(!loaded_now_thread, "Load from thread: loaded_now should be false");
+        assert!(
+            !loaded_now_thread,
+            "Load from thread: loaded_now should be false"
+        );
 
         Ok(())
     }

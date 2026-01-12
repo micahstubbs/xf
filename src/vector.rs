@@ -268,6 +268,28 @@ pub fn write_vector_index(
         });
     }
 
+    // Determine dimension from first embedding (bytes / 2 since F16)
+    let embedding_bytes = embeddings[0].2.len();
+    ensure!(
+        embedding_bytes > 0 && embedding_bytes % 2 == 0,
+        "invalid embedding byte length: {embedding_bytes}"
+    );
+
+    // Validate embeddings before writing to avoid silent mislabeling.
+    for (doc_id, doc_type, embedding_f16) in &embeddings {
+        if encode_doc_type(doc_type).is_none() {
+            return Err(anyhow::anyhow!(
+                "unknown embedding doc_type '{doc_type}' for doc_id '{doc_id}'"
+            ));
+        }
+        if embedding_f16.len() != embedding_bytes {
+            return Err(anyhow::anyhow!(
+                "embedding byte length mismatch for doc_id '{doc_id}' (type '{doc_type}'): expected {embedding_bytes}, got {}",
+                embedding_f16.len()
+            ));
+        }
+    }
+
     // Sort deterministically: by doc_type code, then by doc_id
     embeddings.sort_by(|a, b| {
         let type_a = encode_doc_type(&a.1).unwrap_or(255);
@@ -275,8 +297,6 @@ pub fn write_vector_index(
         type_a.cmp(&type_b).then_with(|| a.0.cmp(&b.0))
     });
 
-    // Determine dimension from first embedding (bytes / 2 since F16)
-    let embedding_bytes = embeddings[0].2.len();
     let dimension = embedding_bytes / 2; // F16 = 2 bytes per float
     let record_count = embeddings.len() as u64;
 
@@ -293,7 +313,9 @@ pub fn write_vector_index(
     for (doc_id, doc_type, embedding_f16) in &embeddings {
         offsets.push(current_offset);
 
-        let doc_type_code = encode_doc_type(doc_type).unwrap_or(0);
+        let doc_type_code = encode_doc_type(doc_type).ok_or_else(|| {
+            anyhow::anyhow!("unknown embedding doc_type '{doc_type}' for doc_id '{doc_id}'")
+        })?;
         let doc_id_bytes = doc_id.as_bytes();
         let doc_id_len = u16::try_from(doc_id_bytes.len())
             .map_err(|_| anyhow::anyhow!("doc_id exceeds maximum length of 65535 bytes"))?;
