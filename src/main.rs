@@ -24,7 +24,7 @@ use xf::cli;
 use xf::config::Config;
 use xf::date_parser;
 use xf::embedder::Embedder;
-use xf::hash_embedder::HashEmbedder;
+use xf::hash_embedder::{DEFAULT_DIMENSION, HashEmbedder};
 use xf::hybrid::{self, SearchMode};
 use xf::repl;
 use xf::search;
@@ -1061,7 +1061,7 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
         })
     };
 
-    // Load vector index for semantic/hybrid search (cached across runs)
+    // Load vector index for semantic/hybrid search (cached per process)
     let vector_index = if matches!(args.mode, SearchMode::Semantic | SearchMode::Hybrid) {
         let index = load_vector_index_cached(&storage, &db_path)?;
         if matches!(args.mode, SearchMode::Semantic)
@@ -1377,7 +1377,7 @@ fn load_vector_index_cached(storage: &Storage, db_path: &Path) -> Result<&'stati
     info!("Loading embeddings into VectorIndex (first search)...");
     let start = Instant::now();
     let embeddings = storage.load_all_embeddings()?;
-    let mut index = VectorIndex::new(384); // HashEmbedder dimension
+    let mut index = VectorIndex::new(DEFAULT_DIMENSION);
     let mut type_counts: HashMap<String, usize> = HashMap::new();
     let mut embedding_count = 0_usize;
 
