@@ -1,358 +1,594 @@
-//! Performance benchmarks for xf.
-//!
-//! Benchmarks cover:
-//! - Search operations (single term, phrase, complex boolean)
-//! - Indexing operations (tweets, likes, DMs)
-//! - Storage operations (writes, reads, FTS queries)
+//! Performance benchmarks for xf using the standardized perf corpus.
 //!
 //! Run with: `cargo bench --bench search_perf`
 
+use anyhow::{Context, Result, anyhow};
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use std::path::PathBuf;
+use std::sync::OnceLock;
 use std::time::Duration;
 use tempfile::TempDir;
 
-use xf::model::{Like, Tweet};
-use xf::search::SearchEngine;
-use xf::storage::Storage;
+use xf::canonicalize::canonicalize_for_embedding;
+use xf::embedder::Embedder;
+use xf::hash_embedder::HashEmbedder;
+use xf::hybrid::{candidate_count, rrf_fuse};
+use xf::model::{DmConversation, GrokMessage, Like, Tweet};
+use xf::stats_analytics::{ContentStats, EngagementStats, TemporalStats};
+use xf::vector::VectorIndex;
+use xf::{ArchiveParser, SearchEngine, Storage};
 
-/// Generate synthetic tweet data for benchmarking
-fn generate_test_tweets(count: usize) -> Vec<Tweet> {
-    let sample_texts = [
-        "Just finished reading an amazing book about Rust programming!",
-        "The weather today is absolutely beautiful, perfect for a walk.",
-        "Working on a new machine learning project using Python and TensorFlow.",
-        "Can't believe how fast this new search engine is! Sub-millisecond queries!",
-        "Exploring the latest features in async Rust - the ecosystem is maturing nicely.",
-        "Had a great coffee at the local cafe this morning. Highly recommend!",
-        "The concert last night was incredible. Best live performance I've seen.",
-        "Just deployed a new microservice architecture using Kubernetes.",
-        "Learning about distributed systems and consensus algorithms today.",
-        "The sunset from my balcony is breathtaking right now.",
-    ];
+struct PerfCorpus {
+    tweets: Vec<Tweet>,
+    likes: Vec<Like>,
+    dms: Vec<DmConversation>,
+    grok: Vec<GrokMessage>,
+}
 
-    let hashtags_pool = ["rust", "programming", "tech", "coding", "software", "dev"];
+fn perf_corpus_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/perf_corpus")
+}
 
-    (0..count)
-        .map(|i| {
-            let text_idx = i % sample_texts.len();
-            let hashtag_idx = i % hashtags_pool.len();
+fn load_perf_corpus() -> Result<&'static PerfCorpus> {
+    static CORPUS: OnceLock<std::result::Result<PerfCorpus, String>> = OnceLock::new();
+    let corpus = CORPUS.get_or_init(|| {
+        let root = perf_corpus_root();
+        let parser = ArchiveParser::new(root);
+        let tweets = parser
+            .parse_tweets()
+            .map_err(|e| format!("parse tweets: {e}"))?;
+        let likes = parser
+            .parse_likes()
+            .map_err(|e| format!("parse likes: {e}"))?;
+        let dms = parser
+            .parse_direct_messages()
+            .map_err(|e| format!("parse dms: {e}"))?;
+        let grok = parser
+            .parse_grok_messages()
+            .map_err(|e| format!("parse grok: {e}"))?;
 
-            let days = i64::try_from(count - i).unwrap_or(i64::MAX);
-            let favorites = i64::try_from(i % 100).unwrap_or(0);
-            let retweets = i64::try_from(i % 50).unwrap_or(0);
-
-            Tweet {
-                id: format!("{}", 1_000_000_000usize + i),
-                created_at: chrono::Utc::now() - chrono::Duration::days(days),
-                full_text: format!("{} #{}", sample_texts[text_idx], hashtags_pool[hashtag_idx]),
-                source: Some("benchmark".to_string()),
-                favorite_count: favorites,
-                retweet_count: retweets,
-                lang: Some("en".to_string()),
-                in_reply_to_status_id: None,
-                in_reply_to_user_id: None,
-                in_reply_to_screen_name: None,
-                is_retweet: false,
-                hashtags: vec![hashtags_pool[hashtag_idx].to_string()],
-                user_mentions: vec![],
-                urls: vec![],
-                media: vec![],
-            }
+        Ok(PerfCorpus {
+            tweets,
+            likes,
+            dms,
+            grok,
         })
-        .collect()
+    });
+
+    corpus.as_ref().map_err(|err| anyhow!(err.clone()))
 }
 
-/// Generate synthetic like data for benchmarking
-fn generate_test_likes(count: usize) -> Vec<Like> {
-    let sample_texts = [
-        "This is a liked tweet about technology and innovation.",
-        "Great insights on software development best practices.",
-        "Interesting perspective on the future of AI.",
-        "Love this take on functional programming paradigms.",
-        "Excellent thread on system design principles.",
-    ];
-
-    (0..count)
-        .map(|i| Like {
-            tweet_id: format!("{}", 2_000_000_000usize + i),
-            full_text: Some(sample_texts[i % sample_texts.len()].to_string()),
-            expanded_url: Some(format!(
-                "https://x.com/user/status/{}",
-                2_000_000_000usize + i
-            )),
-        })
-        .collect()
+struct IndexedState {
+    engine: SearchEngine,
+    storage: Storage,
+    vector_index: Option<VectorIndex>,
+    _temp: TempDir,
 }
 
-/// Create a search engine with indexed test data
-fn create_benchmark_search_engine(tweet_count: usize) -> (SearchEngine, TempDir) {
-    let temp_dir = TempDir::new().expect("Failed to create temp directory");
-    let engine = SearchEngine::open(temp_dir.path()).expect("Failed to create search engine");
+fn build_indexed_state(with_embeddings: bool) -> Result<IndexedState> {
+    let corpus = load_perf_corpus()?;
 
-    let tweets = generate_test_tweets(tweet_count);
-    let mut writer = engine.writer(50_000_000).expect("Failed to create writer");
-    engine
-        .index_tweets(&mut writer, &tweets)
-        .expect("Failed to index tweets");
-    writer.commit().expect("Failed to commit");
-    engine.reload().expect("Failed to reload");
-
-    (engine, temp_dir)
-}
-
-/// Create a storage instance with test data
-fn create_benchmark_storage(tweet_count: usize) -> (Storage, TempDir) {
-    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let temp_dir = TempDir::new().context("temp dir")?;
     let db_path = temp_dir.path().join("bench.db");
-    let mut storage = Storage::open(&db_path).expect("Failed to create storage");
+    let index_path = temp_dir.path().join("index");
+    std::fs::create_dir_all(&index_path).context("create index dir")?;
 
-    let tweets = generate_test_tweets(tweet_count);
+    let mut storage = Storage::open(&db_path).context("open storage")?;
+    let engine = SearchEngine::open(&index_path).context("open search engine")?;
+    let mut writer = engine.writer(100_000_000).context("create writer")?;
+
     storage
-        .store_tweets(&tweets)
-        .expect("Failed to store tweets");
+        .store_tweets(&corpus.tweets)
+        .context("store tweets")?;
+    engine
+        .index_tweets(&mut writer, &corpus.tweets)
+        .context("index tweets")?;
 
-    (storage, temp_dir)
-}
+    storage.store_likes(&corpus.likes).context("store likes")?;
+    engine
+        .index_likes(&mut writer, &corpus.likes)
+        .context("index likes")?;
 
-// ============================================================================
-// Search Benchmarks
-// ============================================================================
+    storage
+        .store_dm_conversations(&corpus.dms)
+        .context("store dms")?;
+    engine
+        .index_dms(&mut writer, &corpus.dms)
+        .context("index dms")?;
 
-fn bench_search_single_term(c: &mut Criterion) {
-    let (engine, _temp) = create_benchmark_search_engine(10_000);
+    storage
+        .store_grok_messages(&corpus.grok)
+        .context("store grok")?;
+    engine
+        .index_grok_messages(&mut writer, &corpus.grok)
+        .context("index grok")?;
 
-    let mut group = c.benchmark_group("search_single_term");
-    group.measurement_time(Duration::from_secs(10));
-    group.sample_size(100);
+    writer.commit().context("commit index")?;
+    engine.reload().context("reload searcher")?;
 
-    // Benchmark different result limits
-    for limit in &[10, 50, 100, 500] {
-        group.throughput(Throughput::Elements(1));
-        group.bench_with_input(BenchmarkId::from_parameter(limit), limit, |b, &limit| {
-            b.iter(|| engine.search(black_box("rust"), None, black_box(limit)));
-        });
+    if with_embeddings {
+        xf::generate_embeddings(&storage, false).context("generate embeddings")?;
     }
 
-    group.finish();
+    let vector_index = if with_embeddings {
+        Some(VectorIndex::load_from_storage(&storage).context("load vector index")?)
+    } else {
+        None
+    };
+
+    Ok(IndexedState {
+        engine,
+        storage,
+        vector_index,
+        _temp: temp_dir,
+    })
 }
 
-fn bench_search_phrase(c: &mut Criterion) {
-    let (engine, _temp) = create_benchmark_search_engine(10_000);
-
-    let mut group = c.benchmark_group("search_phrase");
-    group.measurement_time(Duration::from_secs(10));
-    group.sample_size(100);
-
-    let phrases = [
-        "machine learning",
-        "search engine",
-        "Rust programming",
-        "distributed systems",
-    ];
-
-    for phrase in &phrases {
-        group.bench_with_input(BenchmarkId::from_parameter(phrase), phrase, |b, phrase| {
-            b.iter(|| engine.search(black_box(&format!("\"{phrase}\"")), None, 100));
-        });
-    }
-
-    group.finish();
-}
-
-fn bench_search_complex_boolean(c: &mut Criterion) {
-    let (engine, _temp) = create_benchmark_search_engine(10_000);
-
-    let mut group = c.benchmark_group("search_complex");
-    group.measurement_time(Duration::from_secs(10));
-    group.sample_size(100);
-
-    let queries = [
-        ("and_query", "rust AND programming"),
-        ("or_query", "rust OR python"),
-        ("not_query", "programming NOT python"),
-        ("mixed", "(rust OR python) AND learning"),
-    ];
-
-    for (name, query) in &queries {
-        group.bench_with_input(BenchmarkId::from_parameter(name), query, |b, query| {
-            b.iter(|| engine.search(black_box(query), None, 100));
-        });
-    }
-
-    group.finish();
-}
-
-fn bench_search_with_type_filter(c: &mut Criterion) {
-    let (engine, _temp) = create_benchmark_search_engine(10_000);
-
-    let mut group = c.benchmark_group("search_filtered");
-    group.measurement_time(Duration::from_secs(10));
-    group.sample_size(100);
-
-    // Search with type filter
-    group.bench_function("with_tweet_filter", |b| {
-        b.iter(|| engine.search(black_box("rust"), Some(&[xf::search::DocType::Tweet]), 100));
-    });
-
-    // Search without filter for comparison
-    group.bench_function("without_filter", |b| {
-        b.iter(|| engine.search(black_box("rust"), None, 100));
-    });
-
-    group.finish();
+fn query_embedding(query: &str) -> Result<Vec<f32>> {
+    let embedder = HashEmbedder::default();
+    let canonical = canonicalize_for_embedding(query);
+    embedder
+        .embed(&canonical)
+        .map_err(|e| anyhow!("embed query: {e}"))
 }
 
 // ============================================================================
-// Indexing Benchmarks
+// Search Benchmarks (perf corpus)
 // ============================================================================
 
-fn bench_indexing_tweets(c: &mut Criterion) {
-    let mut group = c.benchmark_group("indexing_tweets");
-    group.measurement_time(Duration::from_secs(15));
-    group.sample_size(50);
+fn bench_hybrid_search_cold(c: &mut Criterion) {
+    let state = match build_indexed_state(true) {
+        Ok(state) => state,
+        Err(err) => {
+            eprintln!("bench_hybrid_search_cold setup failed: {err}");
+            return;
+        }
+    };
+    let query = "rust";
+    let limit = 20;
+    let offset = 0;
+    let candidates = candidate_count(limit, offset);
+    let query_vec = match query_embedding(query) {
+        Ok(vec) => vec,
+        Err(err) => {
+            eprintln!("bench_hybrid_search_cold embed failed: {err}");
+            return;
+        }
+    };
 
-    for count in &[100, 1000, 5000] {
-        let tweets = generate_test_tweets(*count);
-
-        let count_u64 = u64::try_from(*count).unwrap_or(u64::MAX);
-        group.throughput(Throughput::Elements(count_u64));
-        group.bench_with_input(BenchmarkId::from_parameter(count), &tweets, |b, tweets| {
-            b.iter_with_setup(
-                || {
-                    let temp_dir = TempDir::new().unwrap();
-                    let engine = SearchEngine::open(temp_dir.path()).unwrap();
-                    let writer = engine.writer(50_000_000).unwrap();
-                    (engine, writer, temp_dir)
-                },
-                |(engine, mut writer, _temp)| {
-                    engine.index_tweets(&mut writer, black_box(tweets)).unwrap();
-                    writer.commit().unwrap();
-                },
-            );
-        });
-    }
-
-    group.finish();
-}
-
-fn bench_indexing_likes(c: &mut Criterion) {
-    let mut group = c.benchmark_group("indexing_likes");
-    group.measurement_time(Duration::from_secs(15));
-    group.sample_size(50);
-
-    for count in &[100, 1000, 5000] {
-        let likes = generate_test_likes(*count);
-
-        let count_u64 = u64::try_from(*count).unwrap_or(u64::MAX);
-        group.throughput(Throughput::Elements(count_u64));
-        group.bench_with_input(BenchmarkId::from_parameter(count), &likes, |b, likes| {
-            b.iter_with_setup(
-                || {
-                    let temp_dir = TempDir::new().unwrap();
-                    let engine = SearchEngine::open(temp_dir.path()).unwrap();
-                    let writer = engine.writer(50_000_000).unwrap();
-                    (engine, writer, temp_dir)
-                },
-                |(engine, mut writer, _temp)| {
-                    engine.index_likes(&mut writer, black_box(likes)).unwrap();
-                    writer.commit().unwrap();
-                },
-            );
-        });
-    }
-
-    group.finish();
-}
-
-// ============================================================================
-// Storage Benchmarks
-// ============================================================================
-
-fn bench_storage_write_tweets(c: &mut Criterion) {
-    let mut group = c.benchmark_group("storage_write");
-    group.measurement_time(Duration::from_secs(15));
-    group.sample_size(50);
-
-    for count in &[100, 1000, 5000] {
-        let tweets = generate_test_tweets(*count);
-
-        let count_u64 = u64::try_from(*count).unwrap_or(u64::MAX);
-        group.throughput(Throughput::Elements(count_u64));
-        group.bench_with_input(BenchmarkId::from_parameter(count), &tweets, |b, tweets| {
-            b.iter_with_setup(
-                || {
-                    let temp_dir = TempDir::new().unwrap();
-                    let db_path = temp_dir.path().join("bench.db");
-                    let storage = Storage::open(&db_path).unwrap();
-                    (storage, temp_dir)
-                },
-                |(mut storage, _temp)| {
-                    storage.store_tweets(black_box(tweets)).unwrap();
-                },
-            );
-        });
-    }
-
-    group.finish();
-}
-
-fn bench_storage_read_tweet(c: &mut Criterion) {
-    let (storage, _temp) = create_benchmark_storage(10_000);
-
-    let mut group = c.benchmark_group("storage_read");
-    group.measurement_time(Duration::from_secs(10));
-    group.sample_size(100);
-
-    // Read existing tweet
-    group.bench_function("existing_tweet", |b| {
-        b.iter(|| storage.get_tweet(black_box("1000005000")));
-    });
-
-    // Read non-existing tweet
-    group.bench_function("missing_tweet", |b| {
-        b.iter(|| storage.get_tweet(black_box("9999999999")));
-    });
-
-    group.finish();
-}
-
-fn bench_storage_fts_search(c: &mut Criterion) {
-    let (storage, _temp) = create_benchmark_storage(10_000);
-
-    let mut group = c.benchmark_group("storage_fts");
-    group.measurement_time(Duration::from_secs(10));
-    group.sample_size(100);
-
-    // FTS search
-    group.bench_function("fts_simple", |b| {
-        b.iter(|| storage.search_tweets(black_box("rust"), 100));
-    });
-
-    group.finish();
-}
-
-// ============================================================================
-// Scalability Benchmarks
-// ============================================================================
-
-fn bench_search_scalability(c: &mut Criterion) {
-    let mut group = c.benchmark_group("search_scalability");
-    group.measurement_time(Duration::from_secs(20));
+    let mut group = c.benchmark_group("search_hybrid_cold");
+    group.measurement_time(Duration::from_secs(12));
     group.sample_size(30);
 
-    // Test search performance at different index sizes
-    for size in &[1_000, 5_000, 10_000, 50_000] {
-        let (engine, _temp) = create_benchmark_search_engine(*size);
+    group.bench_function("cold", |b| {
+        b.iter(|| match VectorIndex::load_from_storage(&state.storage) {
+            Ok(vector_index) => {
+                let lexical = state
+                    .engine
+                    .search(black_box(query), None, candidates)
+                    .unwrap_or_default();
+                let semantic = vector_index.search_top_k(&query_vec, candidates, None);
+                let fused = rrf_fuse(&lexical, &semantic, limit, offset);
+                black_box(fused.len());
+            }
+            Err(err) => {
+                eprintln!("bench_hybrid_search_cold load failed: {err}");
+                black_box(0usize);
+            }
+        });
+    });
 
+    group.finish();
+}
+
+fn bench_hybrid_search_warm(c: &mut Criterion) {
+    let state = match build_indexed_state(true) {
+        Ok(state) => state,
+        Err(err) => {
+            eprintln!("bench_hybrid_search_warm setup failed: {err}");
+            return;
+        }
+    };
+    let query = "rust";
+    let limit = 20;
+    let offset = 0;
+    let candidates = candidate_count(limit, offset);
+    let query_vec = match query_embedding(query) {
+        Ok(vec) => vec,
+        Err(err) => {
+            eprintln!("bench_hybrid_search_warm embed failed: {err}");
+            return;
+        }
+    };
+    let Some(vector_index) = state.vector_index.as_ref() else {
+        eprintln!("bench_hybrid_search_warm missing vector index");
+        return;
+    };
+
+    let mut group = c.benchmark_group("search_hybrid_warm");
+    group.measurement_time(Duration::from_secs(12));
+    group.sample_size(50);
+
+    group.bench_function("warm", |b| {
+        b.iter(|| {
+            let lexical = state
+                .engine
+                .search(black_box(query), None, candidates)
+                .unwrap_or_default();
+            let semantic = vector_index.search_top_k(&query_vec, candidates, None);
+            let fused = rrf_fuse(&lexical, &semantic, limit, offset);
+            black_box(fused.len());
+        });
+    });
+
+    group.finish();
+}
+
+fn bench_lexical_search(c: &mut Criterion) {
+    let state = match build_indexed_state(false) {
+        Ok(state) => state,
+        Err(err) => {
+            eprintln!("bench_lexical_search setup failed: {err}");
+            return;
+        }
+    };
+
+    let mut group = c.benchmark_group("search_lexical");
+    group.measurement_time(Duration::from_secs(10));
+    group.sample_size(100);
+
+    for limit in &[20, 100] {
         group.throughput(Throughput::Elements(1));
-        group.bench_with_input(
-            BenchmarkId::new("index_size", size),
-            &engine,
-            |b, engine| {
-                b.iter(|| engine.search(black_box("rust"), None, 100));
+        group.bench_with_input(BenchmarkId::from_parameter(limit), limit, |b, &limit| {
+            b.iter(|| {
+                let results = state
+                    .engine
+                    .search(black_box("machine"), None, limit)
+                    .unwrap_or_default();
+                black_box(results.len());
+            });
+        });
+    }
+
+    group.finish();
+}
+
+fn bench_semantic_search(c: &mut Criterion) {
+    let state = match build_indexed_state(true) {
+        Ok(state) => state,
+        Err(err) => {
+            eprintln!("bench_semantic_search setup failed: {err}");
+            return;
+        }
+    };
+    let Some(vector_index) = state.vector_index.as_ref() else {
+        eprintln!("bench_semantic_search missing vector index");
+        return;
+    };
+    let query_vec = match query_embedding("machine learning") {
+        Ok(vec) => vec,
+        Err(err) => {
+            eprintln!("bench_semantic_search embed failed: {err}");
+            return;
+        }
+    };
+
+    let mut group = c.benchmark_group("search_semantic");
+    group.measurement_time(Duration::from_secs(10));
+    group.sample_size(80);
+
+    for limit in &[20, 100] {
+        group.throughput(Throughput::Elements(1));
+        group.bench_with_input(BenchmarkId::from_parameter(limit), limit, |b, &limit| {
+            b.iter(|| {
+                let results = vector_index.search_top_k(&query_vec, limit, None);
+                black_box(results.len());
+            });
+        });
+    }
+
+    group.finish();
+}
+
+fn bench_search_pagination(c: &mut Criterion) {
+    let state = match build_indexed_state(true) {
+        Ok(state) => state,
+        Err(err) => {
+            eprintln!("bench_search_pagination setup failed: {err}");
+            return;
+        }
+    };
+    let Some(vector_index) = state.vector_index.as_ref() else {
+        eprintln!("bench_search_pagination missing vector index");
+        return;
+    };
+    let query = "rust";
+    let limit = 20;
+    let offset = 40;
+    let candidates = candidate_count(limit, offset);
+    let query_vec = match query_embedding(query) {
+        Ok(vec) => vec,
+        Err(err) => {
+            eprintln!("bench_search_pagination embed failed: {err}");
+            return;
+        }
+    };
+
+    let mut group = c.benchmark_group("search_pagination");
+    group.measurement_time(Duration::from_secs(10));
+    group.sample_size(80);
+
+    group.bench_function("hybrid_offset", |b| {
+        b.iter(|| {
+            let lexical = state
+                .engine
+                .search(black_box(query), None, candidates)
+                .unwrap_or_default();
+            let semantic = vector_index.search_top_k(&query_vec, candidates, None);
+            let fused = rrf_fuse(&lexical, &semantic, limit, offset);
+            black_box(fused.len());
+        });
+    });
+
+    group.finish();
+}
+
+// ============================================================================
+// Indexing Benchmarks (perf corpus)
+// ============================================================================
+
+#[allow(clippy::too_many_lines)]
+fn bench_full_index(c: &mut Criterion) {
+    let corpus = match load_perf_corpus() {
+        Ok(corpus) => corpus,
+        Err(err) => {
+            eprintln!("bench_full_index load failed: {err}");
+            return;
+        }
+    };
+
+    let mut group = c.benchmark_group("index_full");
+    group.measurement_time(Duration::from_secs(20));
+    group.sample_size(10);
+
+    let dm_messages: usize = corpus.dms.iter().map(|c| c.messages.len()).sum();
+    let total_docs = corpus.tweets.len() + corpus.likes.len() + dm_messages + corpus.grok.len();
+    group.throughput(Throughput::Elements(
+        u64::try_from(total_docs).unwrap_or(u64::MAX),
+    ));
+
+    group.bench_function("full_index", |b| {
+        b.iter_with_setup(
+            || {
+                let temp_dir = match TempDir::new() {
+                    Ok(dir) => dir,
+                    Err(err) => {
+                        eprintln!("bench_full_index temp dir failed: {err}");
+                        return None;
+                    }
+                };
+                let db_path = temp_dir.path().join("bench.db");
+                let index_path = temp_dir.path().join("index");
+                if let Err(err) = std::fs::create_dir_all(&index_path) {
+                    eprintln!("bench_full_index create index dir failed: {err}");
+                    return None;
+                }
+                Some((temp_dir, db_path, index_path))
+            },
+            |state| {
+                let Some((_temp_dir, db_path, index_path)) = state else {
+                    return;
+                };
+                let mut storage = match Storage::open(&db_path) {
+                    Ok(storage) => storage,
+                    Err(err) => {
+                        eprintln!("bench_full_index open storage failed: {err}");
+                        return;
+                    }
+                };
+                let engine = match SearchEngine::open(&index_path) {
+                    Ok(engine) => engine,
+                    Err(err) => {
+                        eprintln!("bench_full_index open search engine failed: {err}");
+                        return;
+                    }
+                };
+                let mut writer = match engine.writer(100_000_000) {
+                    Ok(writer) => writer,
+                    Err(err) => {
+                        eprintln!("bench_full_index create writer failed: {err}");
+                        return;
+                    }
+                };
+
+                if storage.store_tweets(&corpus.tweets).is_err() {
+                    eprintln!("bench_full_index store tweets failed");
+                    return;
+                }
+                if engine.index_tweets(&mut writer, &corpus.tweets).is_err() {
+                    eprintln!("bench_full_index index tweets failed");
+                    return;
+                }
+
+                if storage.store_likes(&corpus.likes).is_err() {
+                    eprintln!("bench_full_index store likes failed");
+                    return;
+                }
+                if engine.index_likes(&mut writer, &corpus.likes).is_err() {
+                    eprintln!("bench_full_index index likes failed");
+                    return;
+                }
+
+                if storage.store_dm_conversations(&corpus.dms).is_err() {
+                    eprintln!("bench_full_index store dms failed");
+                    return;
+                }
+                if engine.index_dms(&mut writer, &corpus.dms).is_err() {
+                    eprintln!("bench_full_index index dms failed");
+                    return;
+                }
+
+                if storage.store_grok_messages(&corpus.grok).is_err() {
+                    eprintln!("bench_full_index store grok failed");
+                    return;
+                }
+                if engine
+                    .index_grok_messages(&mut writer, &corpus.grok)
+                    .is_err()
+                {
+                    eprintln!("bench_full_index index grok failed");
+                    return;
+                }
+
+                if writer.commit().is_err() {
+                    eprintln!("bench_full_index commit failed");
+                    return;
+                }
+                if engine.reload().is_err() {
+                    eprintln!("bench_full_index reload failed");
+                    return;
+                }
+
+                if xf::generate_embeddings(&storage, false).is_err() {
+                    eprintln!("bench_full_index generate embeddings failed");
+                    return;
+                }
+                black_box(engine.doc_count());
             },
         );
-    }
+    });
+
+    group.finish();
+}
+
+fn bench_embedding_generation(c: &mut Criterion) {
+    let state = match build_indexed_state(false) {
+        Ok(state) => state,
+        Err(err) => {
+            eprintln!("bench_embedding_generation setup failed: {err}");
+            return;
+        }
+    };
+
+    let mut group = c.benchmark_group("embedding_generation");
+    group.measurement_time(Duration::from_secs(12));
+    group.sample_size(20);
+
+    group.bench_function("hash_embedder", |b| {
+        b.iter(|| {
+            if state.storage.clear_embeddings().is_err() {
+                eprintln!("bench_embedding_generation clear embeddings failed");
+            }
+            if xf::generate_embeddings(&state.storage, false).is_err() {
+                eprintln!("bench_embedding_generation generate embeddings failed");
+            }
+        });
+    });
+
+    group.finish();
+}
+
+fn bench_fts_indexing(c: &mut Criterion) {
+    let mut state = match build_indexed_state(false) {
+        Ok(state) => state,
+        Err(err) => {
+            eprintln!("bench_fts_indexing setup failed: {err}");
+            return;
+        }
+    };
+
+    let mut group = c.benchmark_group("fts_indexing");
+    group.measurement_time(Duration::from_secs(12));
+    group.sample_size(30);
+
+    group.bench_function("rebuild_fts", |b| {
+        b.iter(|| {
+            if state.storage.rebuild_fts_tables().is_err() {
+                eprintln!("bench_fts_indexing rebuild fts failed");
+            }
+        });
+    });
+
+    group.finish();
+}
+
+// ============================================================================
+// Stats Benchmarks (perf corpus)
+// ============================================================================
+
+fn bench_stats_basic(c: &mut Criterion) {
+    let state = match build_indexed_state(false) {
+        Ok(state) => state,
+        Err(err) => {
+            eprintln!("bench_stats_basic setup failed: {err}");
+            return;
+        }
+    };
+
+    let mut group = c.benchmark_group("stats_basic");
+    group.measurement_time(Duration::from_secs(8));
+    group.sample_size(100);
+
+    group.bench_function("stats", |b| {
+        b.iter(|| {
+            if let Ok(archive_stats) = state.storage.get_stats() {
+                black_box(archive_stats);
+            } else {
+                eprintln!("bench_stats_basic stats failed");
+            }
+        });
+    });
+
+    group.finish();
+}
+
+fn bench_stats_detailed(c: &mut Criterion) {
+    let state = match build_indexed_state(false) {
+        Ok(state) => state,
+        Err(err) => {
+            eprintln!("bench_stats_detailed setup failed: {err}");
+            return;
+        }
+    };
+
+    let mut group = c.benchmark_group("stats_detailed");
+    group.measurement_time(Duration::from_secs(10));
+    group.sample_size(50);
+
+    group.bench_function("stats_detailed", |b| {
+        b.iter(|| {
+            let archive_stats = match state.storage.get_stats() {
+                Ok(value) => value,
+                Err(err) => {
+                    eprintln!("bench_stats_detailed stats failed: {err}");
+                    return;
+                }
+            };
+            let temporal = match TemporalStats::compute(&state.storage) {
+                Ok(value) => value,
+                Err(err) => {
+                    eprintln!("bench_stats_detailed temporal failed: {err}");
+                    return;
+                }
+            };
+            let engagement = match EngagementStats::compute(&state.storage, 5) {
+                Ok(value) => value,
+                Err(err) => {
+                    eprintln!("bench_stats_detailed engagement failed: {err}");
+                    return;
+                }
+            };
+            let content = match ContentStats::compute(&state.storage, 5) {
+                Ok(value) => value,
+                Err(err) => {
+                    eprintln!("bench_stats_detailed content failed: {err}");
+                    return;
+                }
+            };
+
+            black_box((archive_stats, temporal, engagement, content));
+        });
+    });
 
     group.finish();
 }
@@ -363,47 +599,30 @@ fn bench_search_scalability(c: &mut Criterion) {
 
 criterion_group!(
     name = search_benches;
-    config = Criterion::default()
-        .significance_level(0.05)
-        .noise_threshold(0.02);
+    config = Criterion::default().significance_level(0.05).noise_threshold(0.02);
     targets =
-        bench_search_single_term,
-        bench_search_phrase,
-        bench_search_complex_boolean,
-        bench_search_with_type_filter
+        bench_hybrid_search_cold,
+        bench_hybrid_search_warm,
+        bench_lexical_search,
+        bench_semantic_search,
+        bench_search_pagination
 );
 
 criterion_group!(
     name = indexing_benches;
-    config = Criterion::default()
-        .significance_level(0.05);
+    config = Criterion::default().significance_level(0.05);
     targets =
-        bench_indexing_tweets,
-        bench_indexing_likes
+        bench_full_index,
+        bench_embedding_generation,
+        bench_fts_indexing
 );
 
 criterion_group!(
-    name = storage_benches;
-    config = Criterion::default()
-        .significance_level(0.05);
+    name = stats_benches;
+    config = Criterion::default().significance_level(0.05);
     targets =
-        bench_storage_write_tweets,
-        bench_storage_read_tweet,
-        bench_storage_fts_search
+        bench_stats_basic,
+        bench_stats_detailed
 );
 
-criterion_group!(
-    name = scalability_benches;
-    config = Criterion::default()
-        .significance_level(0.05)
-        .sample_size(20);
-    targets =
-        bench_search_scalability
-);
-
-criterion_main!(
-    search_benches,
-    indexing_benches,
-    storage_benches,
-    scalability_benches
-);
+criterion_main!(search_benches, indexing_benches, stats_benches);
