@@ -55,6 +55,22 @@ struct CacheMeta {
     type_counts: HashMap<String, usize>,
 }
 
+impl CacheMeta {
+    fn is_stale(&self, storage: &Storage, db_path: &Path) -> Result<bool> {
+        let db_mtime = db_path
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .context("read database mtime")?;
+        if db_mtime != self.db_mtime {
+            return Ok(true);
+        }
+
+        let current_count =
+            usize::try_from(storage.embedding_count()?).context("convert embedding count")?;
+        Ok(current_count != self.embedding_count)
+    }
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -1364,6 +1380,15 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
 
 fn load_vector_index_cached(storage: &Storage, db_path: &Path) -> Result<&'static VectorIndex> {
     if let Some(index) = VECTOR_INDEX.get() {
+        if let Some(meta) = VECTOR_INDEX_META.get() {
+            match meta.is_stale(storage, db_path) {
+                Ok(true) => {
+                    warn!("VectorIndex cache may be stale; restart xf to reload embeddings.");
+                }
+                Ok(false) => {}
+                Err(err) => warn!("VectorIndex cache staleness check failed: {err}"),
+            }
+        }
         return Ok(index);
     }
 
