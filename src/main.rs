@@ -1392,6 +1392,11 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
     let search_elapsed = search_start.elapsed();
 
     if results.is_empty() {
+        if matches!(cli.format, OutputFormat::Json | OutputFormat::JsonPretty) {
+            println!("[]");
+            return Ok(());
+        }
+
         println!(
             "{} for \"{}\"\n",
             "No results found".yellow(),
