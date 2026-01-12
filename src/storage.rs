@@ -15,7 +15,7 @@ use std::collections::{HashSet, VecDeque};
 use std::path::Path;
 use tracing::info;
 
-const SCHEMA_VERSION: i32 = 2;
+const SCHEMA_VERSION: i32 = 3;
 // SQLite default limit on host parameters is usually 999 or 32766.
 // We use a safe batch size to avoid "too many SQL variables" errors.
 const SQLITE_BATCH_SIZE: usize = 900;
@@ -115,10 +115,9 @@ impl Storage {
                 current_version, SCHEMA_VERSION
             );
 
-            // For Version 2, we introduced `content_hash` to the embeddings table.
-            // Since this is a derived data table, the safest migration is to drop and recreate it
-            // to ensure the schema matches our expectations.
-            if current_version < 2 {
+            // Embeddings are derived data. For schema updates we drop/recreate to
+            // guarantee a clean, consistent layout.
+            if current_version < 3 {
                 self.conn.execute("DROP TABLE IF EXISTS embeddings", [])?;
             }
 
@@ -284,11 +283,12 @@ impl Storage {
 
             -- Embeddings for semantic search
             CREATE TABLE IF NOT EXISTS embeddings (
-                doc_id TEXT PRIMARY KEY,
+                doc_id TEXT NOT NULL,
                 doc_type TEXT NOT NULL,
                 embedding BLOB NOT NULL,
                 content_hash BLOB,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (doc_id, doc_type)
             );
             CREATE INDEX IF NOT EXISTS idx_embeddings_type ON embeddings(doc_type);
             CREATE INDEX IF NOT EXISTS idx_embeddings_hash ON embeddings(content_hash);
@@ -1929,7 +1929,7 @@ impl Storage {
         Ok(count)
     }
 
-    /// Get an embedding by document ID.
+    /// Get an embedding by document ID and type.
     ///
     /// Returns the embedding as f32 values (converted from stored F16).
     ///
@@ -1940,12 +1940,12 @@ impl Storage {
     /// # Panics
     ///
     /// Panics if stored embedding bytes are not aligned to 2-byte F16 chunks.
-    pub fn get_embedding(&self, doc_id: &str) -> Result<Option<Vec<f32>>> {
+    pub fn get_embedding(&self, doc_id: &str, doc_type: &str) -> Result<Option<Vec<f32>>> {
         use half::f16;
 
         let result: rusqlite::Result<Vec<u8>> = self.conn.query_row(
-            "SELECT embedding FROM embeddings WHERE doc_id = ?",
-            params![doc_id],
+            "SELECT embedding FROM embeddings WHERE doc_id = ? AND doc_type = ?",
+            params![doc_id, doc_type],
             |row| row.get(0),
         );
 
@@ -1973,10 +1973,10 @@ impl Storage {
     /// # Errors
     ///
     /// Returns an error if the database query fails.
-    pub fn get_embedding_hash(&self, doc_id: &str) -> Result<Option<[u8; 32]>> {
+    pub fn get_embedding_hash(&self, doc_id: &str, doc_type: &str) -> Result<Option<[u8; 32]>> {
         let result: rusqlite::Result<Option<Vec<u8>>> = self.conn.query_row(
-            "SELECT content_hash FROM embeddings WHERE doc_id = ?",
-            params![doc_id],
+            "SELECT content_hash FROM embeddings WHERE doc_id = ? AND doc_type = ?",
+            params![doc_id, doc_type],
             |row| row.get(0),
         );
 
@@ -1996,6 +1996,9 @@ impl Storage {
     /// Get an embedding by content hash.
     ///
     /// Returns None if no embedding with the given hash exists.
+    ///
+    /// Content hashes are global; embeddings can be reused across types when the
+    /// canonicalized text is identical.
     ///
     /// # Errors
     ///
@@ -2936,6 +2939,78 @@ mod tests {
         let storage = Storage::open_memory().unwrap();
         let version = storage.get_schema_version();
         assert_eq!(version, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn test_migrate_embeddings_schema_v3() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r"
+            PRAGMA foreign_keys = ON;
+            CREATE TABLE meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+            INSERT INTO meta (key, value) VALUES ('schema_version', '2');
+            CREATE TABLE embeddings (
+                doc_id TEXT PRIMARY KEY,
+                doc_type TEXT NOT NULL,
+                embedding BLOB NOT NULL,
+                content_hash BLOB,
+                created_at TEXT NOT NULL
+            );
+            ",
+        )
+        .unwrap();
+
+        let storage = Storage { conn };
+        storage.migrate().unwrap();
+
+        let version = storage.get_schema_version();
+        assert_eq!(version, SCHEMA_VERSION);
+
+        let schema_sql: String = storage
+            .conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='embeddings'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(schema_sql.contains("PRIMARY KEY (doc_id, doc_type)"));
+    }
+
+    #[test]
+    fn test_embedding_lookup_is_type_aware() {
+        let storage = Storage::open_memory().unwrap();
+
+        let emb_tweet = vec![0.1_f32, 0.2];
+        let emb_like = vec![0.3_f32, 0.4];
+        let hash_tweet = [1_u8; 32];
+        let hash_like = [2_u8; 32];
+
+        storage
+            .store_embedding("123", "tweet", &emb_tweet, Some(&hash_tweet))
+            .unwrap();
+        storage
+            .store_embedding("123", "like", &emb_like, Some(&hash_like))
+            .unwrap();
+
+        let got_tweet = storage.get_embedding("123", "tweet").unwrap();
+        let got_like = storage.get_embedding("123", "like").unwrap();
+        let got_missing = storage.get_embedding("123", "dm").unwrap();
+
+        assert_eq!(got_tweet, Some(emb_tweet));
+        assert_eq!(got_like, Some(emb_like));
+        assert_eq!(got_missing, None);
+
+        let hash_tweet_got = storage.get_embedding_hash("123", "tweet").unwrap();
+        let hash_like_got = storage.get_embedding_hash("123", "like").unwrap();
+        let hash_missing = storage.get_embedding_hash("123", "dm").unwrap();
+
+        assert_eq!(hash_tweet_got, Some(hash_tweet));
+        assert_eq!(hash_like_got, Some(hash_like));
+        assert_eq!(hash_missing, None);
     }
 
     #[test]

@@ -1057,7 +1057,7 @@ fn generate_embeddings(storage: &Storage, show_progress: bool) -> Result<()> {
             let hash = content_hash(&canonical);
 
             // Skip if this doc already has the same content hash.
-            if let Some(existing_hash) = storage.get_embedding_hash(doc_id)? {
+            if let Some(existing_hash) = storage.get_embedding_hash(doc_id, doc_type)? {
                 if existing_hash == hash {
                     skipped_count += 1;
                     if let Some(ref pb) = pb {
