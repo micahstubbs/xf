@@ -25,9 +25,17 @@ use assert_cmd::Command;
 use assert_cmd::cargo::cargo_bin_cmd;
 use predicates::prelude::*;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 use tempfile::TempDir;
+use xf::canonicalize::canonicalize_for_embedding;
+use xf::embedder::Embedder;
+use xf::hash_embedder::HashEmbedder;
+use xf::hybrid;
+use xf::model::SearchResult;
+use xf::search::{DocLookup, DocType, SearchEngine};
+use xf::storage::Storage;
+use xf::vector::VectorIndex;
 
 // =============================================================================
 // Test Utilities
@@ -105,6 +113,145 @@ fn create_empty_archive() -> (TempDir, PathBuf) {
 /// Get the xf command ready for testing
 fn xf_cmd() -> Command {
     cargo_bin_cmd!("xf")
+}
+
+fn parse_search_results(output: &std::process::Output) -> Vec<SearchResult> {
+    assert!(
+        output.status.success(),
+        "xf search failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let missing_json_message = format!(
+        "Expected JSON output, got: {stdout}\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json_start = stdout
+        .char_indices()
+        .find(|(_, ch)| *ch == '[' || *ch == '{')
+        .map(|(idx, _)| idx)
+        .expect(&missing_json_message);
+
+    let json_slice = &stdout[json_start..];
+    let parse_message = format!(
+        "Failed to parse JSON output\nstdout: {stdout}\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_str(json_slice).expect(&parse_message)
+}
+
+fn format_id_scores(results: &[SearchResult]) -> String {
+    results
+        .iter()
+        .map(|result| format!("{}:{:.6}", result.id, result.score))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn format_id_scores_pairs(pairs: &[(String, f32)]) -> String {
+    pairs
+        .iter()
+        .map(|(id, score)| format!("{id}:{score:.6}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn expected_semantic_results(
+    db_path: &Path,
+    index_path: &Path,
+    query: &str,
+    limit: usize,
+    doc_types: &[DocType],
+) -> Vec<SearchResult> {
+    let storage = Storage::open(db_path).expect("Failed to open storage");
+    let search_engine = SearchEngine::open(index_path).expect("Failed to open search index");
+    let vector_index =
+        VectorIndex::load_from_storage(&storage).expect("Failed to load vector index");
+
+    let canonical_query = canonicalize_for_embedding(query);
+    assert!(
+        !canonical_query.is_empty(),
+        "Canonical query should not be empty"
+    );
+
+    let embedder = HashEmbedder::default();
+    let query_embedding = embedder
+        .embed(&canonical_query)
+        .expect("Failed to embed query");
+
+    let type_strs: Vec<&str> = doc_types.iter().map(|t| t.as_str()).collect();
+    let semantic_hits = vector_index.search_top_k(
+        &query_embedding,
+        limit.saturating_mul(hybrid::CANDIDATE_MULTIPLIER),
+        Some(&type_strs),
+    );
+
+    let lookups: Vec<_> = semantic_hits
+        .iter()
+        .map(|hit| DocLookup::with_type(&hit.doc_id, &hit.doc_type))
+        .collect();
+    let fetched = search_engine
+        .get_by_ids(&lookups)
+        .expect("Failed to fetch semantic results");
+
+    let mut results = Vec::new();
+    for (hit, result) in semantic_hits.into_iter().zip(fetched) {
+        if let Some(mut result) = result {
+            result.score = hit.score;
+            results.push(result);
+        }
+    }
+
+    if results.len() > limit {
+        results.truncate(limit);
+    }
+
+    results
+}
+
+fn expected_hybrid_scores(
+    db_path: &Path,
+    index_path: &Path,
+    query: &str,
+    limit: usize,
+    offset: usize,
+    doc_types: &[DocType],
+) -> Vec<(String, f32)> {
+    let storage = Storage::open(db_path).expect("Failed to open storage");
+    let search_engine = SearchEngine::open(index_path).expect("Failed to open search index");
+    let vector_index =
+        VectorIndex::load_from_storage(&storage).expect("Failed to load vector index");
+
+    let canonical_query = canonicalize_for_embedding(query);
+    let embedder = HashEmbedder::default();
+    let candidate_count = hybrid::candidate_count(limit, offset);
+
+    let lexical_results = search_engine
+        .search(query, Some(doc_types), candidate_count)
+        .expect("Failed to run lexical search");
+
+    let semantic_results = if canonical_query.is_empty() {
+        Vec::new()
+    } else {
+        let query_embedding = embedder
+            .embed(&canonical_query)
+            .expect("Failed to embed query");
+        let type_strs: Vec<&str> = doc_types.iter().map(|t| t.as_str()).collect();
+        vector_index.search_top_k(&query_embedding, candidate_count, Some(&type_strs))
+    };
+
+    let fused = hybrid::rrf_fuse(
+        &lexical_results,
+        &semantic_results,
+        limit.saturating_add(offset),
+        0,
+    );
+
+    fused
+        .into_iter()
+        .map(|hit| (hit.doc_id, hit.score))
+        .collect()
 }
 
 // =============================================================================
@@ -759,6 +906,146 @@ fn test_search_json_output() {
     }
 
     test_log!("test_search_json_output completed in {:?}", start.elapsed());
+}
+
+#[test]
+fn test_search_semantic_score_semantics() {
+    test_log!("Starting test_search_semantic_score_semantics");
+    let start = Instant::now();
+
+    let (_archive_temp, _output_dir, db_path, index_path) = create_indexed_archive();
+    let query = "rust";
+    let limit = 3usize;
+    let doc_types = [DocType::Tweet];
+
+    let mut cmd = xf_cmd();
+    let output = cmd
+        .arg("search")
+        .arg(query)
+        .arg("--mode")
+        .arg("semantic")
+        .arg("--types")
+        .arg("tweet")
+        .arg("--limit")
+        .arg(limit.to_string())
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&db_path)
+        .arg("--index")
+        .arg(&index_path)
+        .output()
+        .expect("Failed to run command");
+
+    let results = parse_search_results(&output);
+    let expected_results =
+        expected_semantic_results(&db_path, &index_path, query, limit, &doc_types);
+
+    assert!(
+        !expected_results.is_empty(),
+        "Expected semantic results to be non-empty"
+    );
+
+    let actual_ids: Vec<_> = results.iter().map(|r| r.id.clone()).collect();
+    let expected_ids: Vec<_> = expected_results.iter().map(|r| r.id.clone()).collect();
+    assert_eq!(
+        actual_ids,
+        expected_ids,
+        "Semantic result ids mismatch\nactual: {}\nexpected: {}",
+        format_id_scores(&results),
+        format_id_scores(&expected_results)
+    );
+
+    for (idx, (actual, expected_result)) in results.iter().zip(expected_results.iter()).enumerate()
+    {
+        let delta = (actual.score - expected_result.score).abs();
+        assert!(
+            delta <= 1e-6,
+            "Semantic score mismatch at idx {idx} id {}: actual {:.6} expected {:.6}\nactual: {}\nexpected: {}",
+            actual.id,
+            actual.score,
+            expected_result.score,
+            format_id_scores(&results),
+            format_id_scores(&expected_results)
+        );
+    }
+
+    test_log!(
+        "test_search_semantic_score_semantics completed in {:?}",
+        start.elapsed()
+    );
+}
+
+#[test]
+fn test_search_hybrid_score_semantics() {
+    test_log!("Starting test_search_hybrid_score_semantics");
+    let start = Instant::now();
+
+    let (_archive_temp, _output_dir, db_path, index_path) = create_indexed_archive();
+    let query = "rust";
+    let limit = 3usize;
+    let offset = 0usize;
+    let doc_types = [DocType::Tweet];
+
+    let mut cmd = xf_cmd();
+    let output = cmd
+        .arg("search")
+        .arg(query)
+        .arg("--mode")
+        .arg("hybrid")
+        .arg("--types")
+        .arg("tweet")
+        .arg("--limit")
+        .arg(limit.to_string())
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&db_path)
+        .arg("--index")
+        .arg(&index_path)
+        .output()
+        .expect("Failed to run command");
+
+    let results = parse_search_results(&output);
+    let expected = expected_hybrid_scores(&db_path, &index_path, query, limit, offset, &doc_types);
+
+    assert!(
+        !expected.is_empty(),
+        "Expected hybrid results to be non-empty"
+    );
+
+    let actual_pairs: Vec<(String, f32)> =
+        results.iter().map(|r| (r.id.clone(), r.score)).collect();
+    let actual_ids: Vec<_> = actual_pairs.iter().map(|(id, _)| id.clone()).collect();
+    let expected_ids: Vec<_> = expected.iter().map(|(id, _)| id.clone()).collect();
+
+    assert_eq!(
+        actual_ids,
+        expected_ids,
+        "Hybrid result ids mismatch\nactual: {}\nexpected: {}",
+        format_id_scores_pairs(&actual_pairs),
+        format_id_scores_pairs(&expected)
+    );
+
+    for (idx, ((actual_id, actual_score), (_, expected_score))) in
+        actual_pairs.iter().zip(expected.iter()).enumerate()
+    {
+        let delta = (*actual_score - *expected_score).abs();
+        assert!(
+            delta <= 1e-6,
+            "Hybrid score mismatch at idx {idx} id {}: actual {:.6} expected {:.6}\nactual: {}\nexpected: {}",
+            actual_id,
+            actual_score,
+            expected_score,
+            format_id_scores_pairs(&actual_pairs),
+            format_id_scores_pairs(&expected)
+        );
+    }
+
+    test_log!(
+        "test_search_hybrid_score_semantics completed in {:?}",
+        start.elapsed()
+    );
 }
 
 // =============================================================================
