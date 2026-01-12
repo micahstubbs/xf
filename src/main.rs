@@ -164,8 +164,7 @@ fn print_quickstart() {
         "{}",
         pad(&format!(
             "   {}",
-            "unzip ~/Downloads/twitter-2026-01-09-*.zip -d /data/projects/my_twitter_data"
-                .bright_green()
+            "unzip ~/Downloads/twitter-*.zip -d ~/my_twitter_data".bright_green()
         ))
     );
     println!("{}", pad(""));
@@ -959,28 +958,6 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
     let search_engine = SearchEngine::open(&index_path)?;
     let storage = Storage::open(&db_path)?;
 
-    // Load vector index for semantic/hybrid search
-    let vector_index = if matches!(args.mode, SearchMode::Semantic | SearchMode::Hybrid) {
-        let embeddings = storage.load_all_embeddings()?;
-        if embeddings.is_empty() && matches!(args.mode, SearchMode::Semantic) {
-            anyhow::bail!(
-                "{}",
-                format_error(
-                    "No embeddings found",
-                    "Semantic search requires embeddings. Your archive may need re-indexing.",
-                    &["Run 'xf index <archive_path> --force' to rebuild with embeddings"],
-                )
-            );
-        }
-        let mut index = VectorIndex::new(384); // HashEmbedder dimension
-        for (doc_id, doc_type, embedding) in embeddings {
-            index.add(doc_id, doc_type, embedding);
-        }
-        Some(index)
-    } else {
-        None
-    };
-
     // Convert data types to search doc types
     let doc_types: Option<Vec<search::DocType>> = if args.context {
         Some(vec![search::DocType::DirectMessage])
@@ -1002,6 +979,40 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
                     .collect(),
             )
         })
+    };
+
+    // Load vector index for semantic/hybrid search
+    let vector_index = if matches!(args.mode, SearchMode::Semantic | SearchMode::Hybrid) {
+        let embeddings =
+            if let Some(types) = doc_types.as_ref() {
+                let mut filtered = Vec::new();
+                for doc_type in types {
+                    let embeddings = storage.load_embeddings_by_type(doc_type.as_str())?;
+                    filtered.extend(embeddings.into_iter().map(|(doc_id, embedding)| {
+                        (doc_id, doc_type.as_str().to_string(), embedding)
+                    }));
+                }
+                filtered
+            } else {
+                storage.load_all_embeddings()?
+            };
+        if embeddings.is_empty() && matches!(args.mode, SearchMode::Semantic) {
+            anyhow::bail!(
+                "{}",
+                format_error(
+                    "No embeddings found",
+                    "Semantic search requires embeddings. Your archive may need re-indexing.",
+                    &["Run 'xf index <archive_path> --force' to rebuild with embeddings"],
+                )
+            );
+        }
+        let mut index = VectorIndex::new(384); // HashEmbedder dimension
+        for (doc_id, doc_type, embedding) in embeddings {
+            index.add(doc_id, doc_type, embedding);
+        }
+        Some(index)
+    } else {
+        None
     };
 
     let since = match args.since.as_deref() {
@@ -1079,10 +1090,13 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
                     type_strs.as_deref(),
                 );
 
-                // Look up full results from search engine by doc_id
+                // Look up full results from search engine by doc_id + type
                 let mut results = Vec::new();
                 for hit in semantic_hits {
-                    if let Ok(Some(result)) = search_engine.get_by_id(&hit.doc_id) {
+                    if let Ok(Some(mut result)) =
+                        search_engine.get_by_id_and_type(&hit.doc_id, &hit.doc_type)
+                    {
+                        result.score = hit.score;
                         results.push(result);
                     }
                 }
@@ -1133,11 +1147,18 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
             let mut results = Vec::new();
             for hit in fused {
                 // Prefer lexical result (has full data)
-                if let Some(result) = hit.lexical {
+                if let Some(mut result) = hit.lexical {
+                    result.score = hit.score;
                     results.push(result);
                 } else {
-                    // Look up from search engine
-                    if let Ok(Some(result)) = search_engine.get_by_id(&hit.doc_id) {
+                    // Look up from search engine using doc_type when available
+                    let lookup = if hit.doc_type.is_empty() {
+                        search_engine.get_by_id(&hit.doc_id)
+                    } else {
+                        search_engine.get_by_id_and_type(&hit.doc_id, &hit.doc_type)
+                    };
+                    if let Ok(Some(mut result)) = lookup {
+                        result.score = hit.score;
                         results.push(result);
                     }
                 }
