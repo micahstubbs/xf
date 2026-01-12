@@ -11,7 +11,8 @@ use indicatif::{ProgressBar, ProgressStyle};
 use rayon::ThreadPoolBuilder;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
-use std::io::{self, IsTerminal};
+use std::fs::{self, File};
+use std::io::{self, IsTerminal, BufReader};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use tracing::{Level, info, warn};
@@ -66,6 +67,7 @@ fn main() -> Result<()> {
             print_quickstart();
             Ok(())
         }
+        Some(Commands::Import(args)) => cmd_import(&cli, args),
         Some(Commands::Index(args)) => cmd_index(&cli, args),
         Some(Commands::Search(args)) => cmd_search(&cli, args),
         Some(Commands::Stats(args)) => cmd_stats(&cli, args),
@@ -382,6 +384,255 @@ fn get_index_path(cli: &Cli) -> PathBuf {
     }
     let config = Config::load();
     config.index_path()
+}
+
+/// Import an X data archive from a zip file.
+///
+/// Extracts the archive to a standard location and optionally indexes it.
+#[allow(clippy::too_many_lines)]
+fn cmd_import(cli: &Cli, args: &cli::ImportArgs) -> Result<()> {
+    // Validate zip file exists
+    if !args.zip_file.exists() {
+        anyhow::bail!(
+            "{}",
+            format_error(
+                "Zip file not found",
+                &format!("The file '{}' does not exist.", args.zip_file.display()),
+                &[
+                    "Check the path for typos",
+                    "Download your data from x.com/settings/download_your_data",
+                ],
+            )
+        );
+    }
+
+    // Determine output directory
+    let output_dir = args.output.clone().unwrap_or_else(|| {
+        dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("my_x_history")
+    });
+
+    // Check if output already exists
+    if output_dir.exists() && !args.force {
+        anyhow::bail!(
+            "{}",
+            format_error(
+                "Directory already exists",
+                &format!("'{}' already exists.", output_dir.display()),
+                &[
+                    "Use --force to overwrite",
+                    "Choose a different output with -o <path>",
+                ],
+            )
+        );
+    }
+
+    println!();
+    println!(
+        "{}",
+        "Importing X data archive...".bold().bright_cyan()
+    );
+    println!();
+
+    // Create progress bar for extraction
+    let pb = ProgressBar::new_spinner();
+    pb.set_style(
+        ProgressStyle::default_spinner()
+            .template("{spinner:.cyan} {msg}")
+            .unwrap(),
+    );
+    pb.enable_steady_tick(Duration::from_millis(80));
+    pb.set_message(format!(
+        "Extracting {}...",
+        args.zip_file.file_name().unwrap_or_default().to_string_lossy()
+    ));
+
+    // Open and extract zip file
+    let file = File::open(&args.zip_file)
+        .with_context(|| format!("Failed to open '{}'", args.zip_file.display()))?;
+    let reader = BufReader::new(file);
+    let mut archive = zip::ZipArchive::new(reader)
+        .with_context(|| format!("Failed to read zip file '{}'", args.zip_file.display()))?;
+
+    // Create output directory
+    if args.force && output_dir.exists() {
+        fs::remove_dir_all(&output_dir)?;
+    }
+    fs::create_dir_all(&output_dir)?;
+
+    // Extract files
+    let total_files = archive.len();
+    let mut extracted_size: u64 = 0;
+
+    for i in 0..total_files {
+        let mut file = archive.by_index(i)?;
+        let outpath = match file.enclosed_name() {
+            Some(path) => output_dir.join(path),
+            None => continue,
+        };
+
+        if file.is_dir() {
+            fs::create_dir_all(&outpath)?;
+        } else {
+            if let Some(parent) = outpath.parent() {
+                if !parent.exists() {
+                    fs::create_dir_all(parent)?;
+                }
+            }
+            let mut outfile = File::create(&outpath)?;
+            io::copy(&mut file, &mut outfile)?;
+            extracted_size += file.size();
+        }
+
+        if i % 100 == 0 {
+            pb.set_message(format!(
+                "Extracting... ({}/{} files)",
+                i + 1,
+                total_files
+            ));
+        }
+    }
+
+    pb.finish_and_clear();
+
+    // Format extracted size
+    let size_str = if extracted_size > 1_000_000_000 {
+        format!("{:.1} GB", extracted_size as f64 / 1_000_000_000.0)
+    } else if extracted_size > 1_000_000 {
+        format!("{:.1} MB", extracted_size as f64 / 1_000_000.0)
+    } else {
+        format!("{:.1} KB", extracted_size as f64 / 1_000.0)
+    };
+
+    println!(
+        "  {} Extracted to {}",
+        "✓".green().bold(),
+        output_dir.display().to_string().cyan()
+    );
+    println!(
+        "    {} {} in {} files",
+        "→".dimmed(),
+        size_str.bold(),
+        total_files
+    );
+    println!();
+
+    // Index unless --no-index
+    if args.no_index {
+        println!(
+            "  {} Skipping indexing (--no-index)",
+            "·".dimmed()
+        );
+        println!();
+        println!(
+            "  Run {} to index later.",
+            format!("xf index {}", output_dir.display()).bright_green()
+        );
+    } else {
+        // Create index args and call cmd_index
+        let index_args = cli::IndexArgs {
+            archive_path: Some(output_dir.clone()),
+            force: true, // Always force since this is a fresh import
+            only: None,
+            skip: None,
+            jobs: 0,
+        };
+
+        cmd_index(cli, &index_args)?;
+
+        // Print welcome box with stats
+        print_import_welcome(&output_dir, cli)?;
+    }
+
+    println!();
+    Ok(())
+}
+
+/// Print a beautiful welcome box after successful import.
+fn print_import_welcome(_archive_path: &PathBuf, cli: &Cli) -> Result<()> {
+    let db_path = get_db_path(cli);
+    let storage = Storage::open(&db_path)?;
+
+    // Get stats
+    let stats = storage.get_stats()?;
+
+    let date_range = match (stats.first_tweet_date, stats.last_tweet_date) {
+        (Some(first), Some(_last)) => format!("since {}", first.format("%b %Y")),
+        _ => String::new(),
+    };
+
+    println!();
+
+    // Box drawing
+    let h = "─";
+    let tl = "╭";
+    let tr = "╮";
+    let bl = "╰";
+    let br = "╯";
+    let v = "│";
+    let width = 48;
+    let inner = width - 2;
+
+    let hline = format!("{}{}{}", tl, h.repeat(inner), tr).bright_cyan();
+    let bline = format!("{}{}{}", bl, h.repeat(inner), br).bright_cyan();
+
+    let pad = |text: &str| -> String {
+        let visible_len = console::measure_text_width(text);
+        let padding = inner.saturating_sub(visible_len).saturating_sub(2);
+        format!("{} {}{}{}", v.bright_cyan(), text, " ".repeat(padding), v.bright_cyan())
+    };
+
+    println!("{hline}");
+    println!("{}", pad(""));
+    println!("{}", pad(&format!("  {}", "Welcome to your X archive!".bold().bright_magenta())));
+    println!("{}", pad(""));
+
+    if stats.tweets_count > 0 {
+        println!(
+            "{}",
+            pad(&format!(
+                "  Tweets:    {:>6}  {}",
+                format_number(stats.tweets_count).bold(),
+                date_range.dimmed()
+            ))
+        );
+    }
+    if stats.likes_count > 0 {
+        println!(
+            "{}",
+            pad(&format!("  Likes:     {:>6}", format_number(stats.likes_count).bold()))
+        );
+    }
+    if stats.dms_count > 0 {
+        println!(
+            "{}",
+            pad(&format!(
+                "  DMs:       {:>6}  {}",
+                format_number(stats.dms_count).bold(),
+                format!("in {} conversations", stats.dm_conversations_count).dimmed()
+            ))
+        );
+    }
+    if stats.grok_messages_count > 0 {
+        println!(
+            "{}",
+            pad(&format!("  Grok:      {:>6}", format_number(stats.grok_messages_count).bold()))
+        );
+    }
+
+    println!("{}", pad(""));
+    println!(
+        "{}",
+        pad(&format!(
+            "  Try: {}",
+            "xf search \"your first tweet\"".bright_green()
+        ))
+    );
+    println!("{}", pad(""));
+    println!("{bline}");
+
+    Ok(())
 }
 
 #[allow(clippy::too_many_lines)]

@@ -70,6 +70,9 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
+    /// Import and index an X data archive from a zip file
+    Import(ImportArgs),
+
     /// Index an X data archive
     Index(IndexArgs),
 
@@ -102,6 +105,29 @@ pub enum Commands {
 
     /// Launch interactive REPL mode
     Shell(ShellArgs),
+}
+
+#[derive(Args, Debug)]
+#[command(after_help = r#"Examples:
+  xf import ~/Downloads/twitter-2026-01-09-abc123.zip
+  xf import archive.zip -o ~/my_x_data
+  xf import archive.zip --no-index
+"#)]
+pub struct ImportArgs {
+    /// Path to the X data archive zip file
+    pub zip_file: PathBuf,
+
+    /// Extract to this directory (default: ~/my_x_history)
+    #[arg(long, short = 'o')]
+    pub output: Option<PathBuf>,
+
+    /// Extract only, don't index
+    #[arg(long)]
+    pub no_index: bool,
+
+    /// Overwrite existing extraction
+    #[arg(long, short = 'F')]
+    pub force: bool,
 }
 
 #[derive(Args, Debug)]
