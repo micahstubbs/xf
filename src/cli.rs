@@ -117,7 +117,7 @@ pub struct ImportArgs {
     /// Path to the X data archive zip file
     pub zip_file: PathBuf,
 
-    /// Extract to this directory (default: ~/my_x_history)
+    /// Extract to this directory (default: `~/my_x_history`)
     #[arg(long, short = 'o')]
     pub output: Option<PathBuf>,
 
