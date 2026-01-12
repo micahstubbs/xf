@@ -5,7 +5,7 @@ window.YTD.manifest.part0 = {
     "displayName": "Performance Test User"
   },
   "archiveInfo": {
-    "sizeBytes": "9297326",
+    "sizeBytes": "9297325",
     "generationDate": "2026-01-01T12:00:00.000Z",
     "isPartialArchive": false,
     "maxPartSizeBytes": "53687091200"

@@ -5,11 +5,11 @@
   "files": {
     "manifest.js": {
       "records": 1,
-      "sha256": "2670a336988581e1eff8a4fecf2768a12367c631da8e48e267ee69b2b1360342"
+      "sha256": "a2a369653e614ca9d6536cc4448bcb34d653ad382eb560a5c4de5338cd0057d8"
     },
     "tweets.js": {
       "records": 10000,
-      "sha256": "c2d42792f99c74bb596c3528544a3463224c152e738bae8630a53d6b7765c663"
+      "sha256": "082df8b6546cf8ab06c6a4706273825041e6e6e72e3d81ab4ebef5d1b5c25ceb"
     },
     "like.js": {
       "records": 5000,

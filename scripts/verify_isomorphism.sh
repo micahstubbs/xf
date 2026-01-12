@@ -61,7 +61,7 @@ TEST_INDEX="$TEMP_DIR/test_index"
 
 # Index the corpus
 echo "Indexing test corpus..."
-XF_DB="$TEST_DB" XF_INDEX="$TEST_INDEX" $XF --quiet --no-color index "$CORPUS_DIR" 2>/dev/null || {
+XF_DB="$TEST_DB" XF_INDEX="$TEST_INDEX" $XF index "$CORPUS_DIR" --quiet 2>/dev/null || {
     echo -e "${RED}Failed to index corpus${NC}"
     exit 1
 }
@@ -131,7 +131,7 @@ run_and_check() {
     local error_file="$TEMP_DIR/$name.stderr"
 
     echo -n "Running: xf $*... "
-    XF_DB="$TEST_DB" XF_INDEX="$TEST_INDEX" $XF --quiet --no-color "$@" > "$output_file" 2> "$error_file" || true
+    XF_DB="$TEST_DB" XF_INDEX="$TEST_INDEX" NO_COLOR=1 $XF "$@" > "$output_file" 2> "$error_file" || true
 
     check_golden "$name" "$output_file"
 }
