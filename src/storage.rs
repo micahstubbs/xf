@@ -2075,6 +2075,72 @@ impl Storage {
         Ok(map)
     }
 
+    /// Load content hashes for a specific set of document IDs and types.
+    ///
+    /// Returns a map keyed by `doc_id` -> `doc_type` -> `content_hash` for the
+    /// provided lookups that exist in the embeddings table.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database query fails or stored hashes are invalid.
+    pub fn load_embedding_hashes_for_docs(
+        &self,
+        lookups: &[(String, String)],
+    ) -> Result<HashMap<String, HashMap<String, [u8; 32]>>> {
+        if lookups.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let mut map: HashMap<String, HashMap<String, [u8; 32]>> = HashMap::new();
+        let chunk_size = SQLITE_BATCH_SIZE / 2;
+
+        for chunk in lookups.chunks(chunk_size.max(1)) {
+            let mut sql = String::from(
+                "SELECT doc_id, doc_type, content_hash FROM embeddings WHERE content_hash IS NOT NULL AND (",
+            );
+            for i in 0..chunk.len() {
+                if i > 0 {
+                    sql.push_str(" OR ");
+                }
+                sql.push_str("(doc_id = ? AND doc_type = ?)");
+            }
+            sql.push(')');
+
+            let mut stmt = self.conn.prepare(&sql)?;
+            let params = rusqlite::params_from_iter(
+                chunk
+                    .iter()
+                    .flat_map(|(doc_id, doc_type)| [doc_id.as_str(), doc_type.as_str()]),
+            );
+            let rows = stmt.query_map(params, |row| {
+                let doc_id: String = row.get(0)?;
+                let doc_type: String = row.get(1)?;
+                let bytes: Vec<u8> = row.get(2)?;
+                let hash: [u8; 32] = match bytes.as_slice().try_into() {
+                    Ok(hash) => hash,
+                    Err(_) => {
+                        return Err(rusqlite::Error::FromSqlConversionFailure(
+                            bytes.len(),
+                            rusqlite::types::Type::Blob,
+                            Box::new(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                "Invalid content_hash length",
+                            )),
+                        ));
+                    }
+                };
+                Ok((doc_id, doc_type, hash))
+            })?;
+
+            for row in rows {
+                let (doc_id, doc_type, hash) = row?;
+                map.entry(doc_id).or_default().insert(doc_type, hash);
+            }
+        }
+
+        Ok(map)
+    }
+
     /// Load embeddings by content hash in batches.
     ///
     /// # Errors
@@ -3174,6 +3240,69 @@ mod tests {
             hashes_by_doc
                 .get("999")
                 .and_then(|by_type| by_type.get("dm")),
+            None
+        );
+    }
+
+    #[test]
+    fn test_load_embedding_hashes_for_docs_subset() {
+        let storage = Storage::open_memory().unwrap();
+
+        let emb_tweet = vec![0.1_f32, 0.2];
+        let emb_like = vec![0.3_f32, 0.4];
+        let hash_tweet = [11_u8; 32];
+        let hash_like = [12_u8; 32];
+
+        storage
+            .store_embedding("alpha", "tweet", &emb_tweet, Some(&hash_tweet))
+            .unwrap();
+        storage
+            .store_embedding("beta", "like", &emb_like, Some(&hash_like))
+            .unwrap();
+
+        let lookups = vec![
+            ("alpha".to_string(), "tweet".to_string()),
+            ("beta".to_string(), "like".to_string()),
+            ("missing".to_string(), "dm".to_string()),
+        ];
+        let hashes = storage.load_embedding_hashes_for_docs(&lookups).unwrap();
+
+        assert_eq!(
+            hashes.get("alpha").and_then(|by_type| by_type.get("tweet")),
+            Some(&hash_tweet)
+        );
+        assert_eq!(
+            hashes.get("beta").and_then(|by_type| by_type.get("like")),
+            Some(&hash_like)
+        );
+        assert_eq!(hashes.get("missing"), None);
+    }
+
+    #[test]
+    fn test_load_embedding_hashes_for_docs_chunking() {
+        let storage = Storage::open_memory().unwrap();
+
+        let emb = vec![0.5_f32, 0.6];
+        let hash = [33_u8; 32];
+        storage
+            .store_embedding("doc-0", "tweet", &emb, Some(&hash))
+            .unwrap();
+
+        let chunk_size = SQLITE_BATCH_SIZE / 2;
+        let mut lookups: Vec<(String, String)> = Vec::with_capacity(chunk_size + 2);
+        for i in 0..=chunk_size {
+            lookups.push((format!("doc-{i}"), "tweet".to_string()));
+        }
+
+        let hashes = storage.load_embedding_hashes_for_docs(&lookups).unwrap();
+        assert_eq!(
+            hashes.get("doc-0").and_then(|by_type| by_type.get("tweet")),
+            Some(&hash)
+        );
+        assert_eq!(
+            hashes
+                .get(&format!("doc-{chunk_size}"))
+                .and_then(|by_type| by_type.get("tweet")),
             None
         );
     }
