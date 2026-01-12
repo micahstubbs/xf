@@ -255,16 +255,26 @@ fn validate_js_wrapped_json(path: &Path) -> crate::Result<(usize, Vec<String>)> 
         fs::read_to_string(path).map_err(|e| crate::XfError::path_error("read", path, e))?;
 
     // Strip JS wrapper: window.YTD.tweets.part0 = [...]
-    let json_start = content.find('[').ok_or_else(|| {
+    let mut parts = content.splitn(2, '=');
+    let _prefix = parts.next().ok_or_else(|| {
         crate::XfError::parse_error(
             path.display().to_string(),
-            "No JSON array found".to_string(),
+            "Invalid JS wrapper (missing prefix)".to_string(),
         )
     })?;
-    let json = &content[json_start..];
+    let json_part = parts.next().ok_or_else(|| {
+        crate::XfError::parse_error(
+            path.display().to_string(),
+            "Invalid JS wrapper (missing '=')".to_string(),
+        )
+    })?;
+    let mut json_str = json_part.trim();
+    if let Some(stripped) = json_str.strip_suffix(';') {
+        json_str = stripped.trim_end();
+    }
 
     // Parse as generic JSON array
-    let items: Vec<serde_json::Value> = serde_json::from_str(json).map_err(|e| {
+    let items: Vec<serde_json::Value> = serde_json::from_str(json_str).map_err(|e| {
         crate::XfError::parse_error(path.display().to_string(), format!("Invalid JSON: {e}"))
     })?;
 
