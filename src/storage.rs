@@ -1021,7 +1021,9 @@ impl Storage {
                 name: "Schema version".to_string(),
                 status: CheckStatus::Error,
                 message: format!("schema_version={current}, expected={SCHEMA_VERSION}"),
-                suggestion: Some("Run 'xf index --force' to rebuild the database.".to_string()),
+                suggestion: Some(
+                    "Run 'xf index --force' to rebuild the database and embeddings.".to_string(),
+                ),
             }
         }
     }
@@ -3021,6 +3023,44 @@ mod tests {
         assert_eq!(hash_tweet_got, Some(hash_tweet));
         assert_eq!(hash_like_got, Some(hash_like));
         assert_eq!(hash_missing, None);
+    }
+
+    #[test]
+    fn test_load_embeddings_by_type_avoids_collisions() {
+        let storage = Storage::open_memory().unwrap();
+
+        let emb_tweet = vec![0.11_f32, 0.22];
+        let emb_like = vec![0.33_f32, 0.44];
+        let hash_tweet = [3_u8; 32];
+        let hash_like = [4_u8; 32];
+
+        storage
+            .store_embedding("42", "tweet", &emb_tweet, Some(&hash_tweet))
+            .unwrap();
+        storage
+            .store_embedding("42", "like", &emb_like, Some(&hash_like))
+            .unwrap();
+
+        let all = storage.load_all_embeddings().unwrap();
+        assert_eq!(all.len(), 2);
+
+        let tweets = storage.load_embeddings_by_type("tweet").unwrap();
+        assert_eq!(tweets.len(), 1);
+        assert_eq!(tweets[0].0, "42");
+
+        let likes = storage.load_embeddings_by_type("like").unwrap();
+        assert_eq!(likes.len(), 1);
+        assert_eq!(likes[0].0, "42");
+
+        let assert_vec_approx = |left: &[f32], right: &[f32]| {
+            assert_eq!(left.len(), right.len());
+            for (a, b) in left.iter().zip(right.iter()) {
+                assert!((a - b).abs() < 1e-3, "expected {b} ~= {a}");
+            }
+        };
+
+        assert_vec_approx(&tweets[0].1, &emb_tweet);
+        assert_vec_approx(&likes[0].1, &emb_like);
     }
 
     #[test]
