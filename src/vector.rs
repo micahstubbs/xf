@@ -6,9 +6,139 @@
 
 use crate::embedder::dot_product_simd;
 use crate::storage::Storage;
-use anyhow::Result;
+use anyhow::{Result, ensure};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
+use std::str;
+
+#[allow(dead_code)]
+const VECTOR_INDEX_MAGIC: [u8; 4] = *b"XFVI";
+#[allow(dead_code)]
+const VECTOR_INDEX_VERSION: u16 = 1;
+#[allow(dead_code)]
+const VECTOR_INDEX_HEADER_LEN: usize = 32;
+#[allow(dead_code)]
+const VECTOR_INDEX_DOC_TYPE_ENCODING: u8 = 0;
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy)]
+struct VectorIndexHeader {
+    version: u16,
+    doc_type_encoding: u8,
+    dimension: u32,
+    record_count: u64,
+    offsets_start: u64,
+}
+
+#[allow(dead_code)]
+fn parse_vector_index_header(bytes: &[u8]) -> Result<VectorIndexHeader> {
+    ensure!(
+        bytes.len() >= VECTOR_INDEX_HEADER_LEN,
+        "vector index header truncated"
+    );
+    ensure!(
+        bytes[0..4] == VECTOR_INDEX_MAGIC,
+        "vector index magic mismatch"
+    );
+
+    let version = u16::from_le_bytes([bytes[4], bytes[5]]);
+    let doc_type_encoding = bytes[6];
+    let dimension = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
+    let record_count = u64::from_le_bytes([
+        bytes[12], bytes[13], bytes[14], bytes[15], bytes[16], bytes[17], bytes[18], bytes[19],
+    ]);
+    let offsets_start = u64::from_le_bytes([
+        bytes[20], bytes[21], bytes[22], bytes[23], bytes[24], bytes[25], bytes[26], bytes[27],
+    ]);
+
+    Ok(VectorIndexHeader {
+        version,
+        doc_type_encoding,
+        dimension,
+        record_count,
+        offsets_start,
+    })
+}
+
+#[allow(dead_code)]
+fn validate_doc_type(value: u8) -> Result<()> {
+    ensure!(value <= 3, "invalid doc_type encoding");
+    Ok(())
+}
+
+#[allow(dead_code)]
+fn validate_vector_index_layout(bytes: &[u8]) -> Result<()> {
+    let header = parse_vector_index_header(bytes)?;
+
+    ensure!(
+        header.version == VECTOR_INDEX_VERSION,
+        "unsupported vector index version"
+    );
+    ensure!(
+        header.doc_type_encoding == VECTOR_INDEX_DOC_TYPE_ENCODING,
+        "unsupported doc_type encoding"
+    );
+    ensure!(header.dimension > 0, "embedding dimension must be non-zero");
+    let offsets_start = usize::try_from(header.offsets_start)
+        .map_err(|_| anyhow::anyhow!("offsets start overflow"))?;
+    ensure!(
+        offsets_start >= VECTOR_INDEX_HEADER_LEN,
+        "offsets start precedes header"
+    );
+
+    let offsets_bytes = header
+        .record_count
+        .checked_mul(8)
+        .ok_or_else(|| anyhow::anyhow!("offset table size overflow"))?;
+    let offsets_end = header
+        .offsets_start
+        .checked_add(offsets_bytes)
+        .ok_or_else(|| anyhow::anyhow!("offset table end overflow"))?;
+    let offsets_end =
+        usize::try_from(offsets_end).map_err(|_| anyhow::anyhow!("offset table end overflow"))?;
+    ensure!(
+        offsets_end <= bytes.len(),
+        "offset table exceeds file length"
+    );
+
+    let offsets_slice = &bytes[offsets_start..offsets_end];
+    let record_base = offsets_end;
+    let embedding_len = header.dimension as usize * 2;
+
+    let mut last_offset = None;
+    for chunk in offsets_slice.chunks_exact(8) {
+        let offset = usize::try_from(u64::from_le_bytes([
+            chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
+        ]))
+        .map_err(|_| anyhow::anyhow!("record offset overflow"))?;
+
+        ensure!(offset >= record_base, "record offset precedes data section");
+        ensure!(offset < bytes.len(), "record offset out of bounds");
+        if let Some(prev) = last_offset {
+            ensure!(offset >= prev, "record offsets not sorted");
+        }
+        last_offset = Some(offset);
+
+        let record = &bytes[offset..];
+        ensure!(record.len() >= 4, "record truncated");
+        let doc_type = record[0];
+        validate_doc_type(doc_type)?;
+        let doc_id_len = u16::from_le_bytes([record[2], record[3]]) as usize;
+        ensure!(doc_id_len > 0, "doc_id length must be non-zero");
+
+        let header_len = 4usize;
+        let total_len = header_len
+            .checked_add(doc_id_len)
+            .and_then(|v| v.checked_add(embedding_len))
+            .ok_or_else(|| anyhow::anyhow!("record length overflow"))?;
+        ensure!(record.len() >= total_len, "record length exceeds file");
+
+        let doc_id_bytes = &record[header_len..header_len + doc_id_len];
+        str::from_utf8(doc_id_bytes).map_err(|_| anyhow::anyhow!("doc_id is not valid UTF-8"))?;
+    }
+
+    Ok(())
+}
 
 /// Result of a vector search.
 #[derive(Debug, Clone)]
@@ -271,6 +401,136 @@ mod tests {
             .collect();
         l2_normalize(&mut vec);
         vec
+    }
+
+    fn build_vector_index_bytes(dimension: u32, records: &[(u8, &str)]) -> Vec<u8> {
+        let offsets_start = VECTOR_INDEX_HEADER_LEN as u64;
+        let offsets_len = records.len() * 8;
+        let records_start = offsets_start + offsets_len as u64;
+
+        let mut offsets: Vec<u64> = Vec::with_capacity(records.len());
+        let mut record_bytes: Vec<u8> = Vec::new();
+        let mut current_offset = records_start;
+
+        for (doc_type, doc_id) in records {
+            offsets.push(current_offset);
+            let doc_id_bytes = doc_id.as_bytes();
+            let doc_id_len = u16::try_from(doc_id_bytes.len()).expect("doc_id length fits u16");
+            let embedding_len = dimension as usize * 2;
+
+            record_bytes.push(*doc_type);
+            record_bytes.push(0);
+            record_bytes.extend_from_slice(&doc_id_len.to_le_bytes());
+            record_bytes.extend_from_slice(doc_id_bytes);
+            record_bytes.extend(std::iter::repeat_n(0u8, embedding_len));
+
+            let record_len = 4 + doc_id_bytes.len() + embedding_len;
+            current_offset = current_offset
+                .checked_add(record_len as u64)
+                .expect("record offset overflow");
+        }
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&VECTOR_INDEX_MAGIC);
+        bytes.extend_from_slice(&VECTOR_INDEX_VERSION.to_le_bytes());
+        bytes.push(VECTOR_INDEX_DOC_TYPE_ENCODING);
+        bytes.push(0);
+        bytes.extend_from_slice(&dimension.to_le_bytes());
+        bytes.extend_from_slice(&(records.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&offsets_start.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+
+        for offset in offsets {
+            bytes.extend_from_slice(&offset.to_le_bytes());
+        }
+        bytes.extend_from_slice(&record_bytes);
+
+        bytes
+    }
+
+    #[test]
+    fn test_vector_index_layout_validation_ok() {
+        let bytes = build_vector_index_bytes(3, &[(0, "doc1"), (1, "doc2")]);
+        validate_vector_index_layout(&bytes).unwrap();
+    }
+
+    #[test]
+    fn test_vector_index_layout_invalid_magic() {
+        let mut bytes = build_vector_index_bytes(3, &[(0, "doc1")]);
+        bytes[0] = b'Z';
+        assert!(validate_vector_index_layout(&bytes).is_err());
+    }
+
+    #[test]
+    fn test_vector_index_layout_invalid_offsets() {
+        let mut bytes = build_vector_index_bytes(3, &[(0, "doc1")]);
+        let offsets_start = u64::from_le_bytes([
+            bytes[20], bytes[21], bytes[22], bytes[23], bytes[24], bytes[25], bytes[26], bytes[27],
+        ]);
+        let bad_offset = offsets_start + 8 + 10_000;
+        let start = VECTOR_INDEX_HEADER_LEN;
+        bytes[start..start + 8].copy_from_slice(&bad_offset.to_le_bytes());
+        assert!(validate_vector_index_layout(&bytes).is_err());
+    }
+
+    #[test]
+    fn test_vector_index_layout_invalid_doc_type() {
+        let mut bytes = build_vector_index_bytes(3, &[(0, "doc1")]);
+        let record_offset = usize::try_from(u64::from_le_bytes([
+            bytes[VECTOR_INDEX_HEADER_LEN],
+            bytes[VECTOR_INDEX_HEADER_LEN + 1],
+            bytes[VECTOR_INDEX_HEADER_LEN + 2],
+            bytes[VECTOR_INDEX_HEADER_LEN + 3],
+            bytes[VECTOR_INDEX_HEADER_LEN + 4],
+            bytes[VECTOR_INDEX_HEADER_LEN + 5],
+            bytes[VECTOR_INDEX_HEADER_LEN + 6],
+            bytes[VECTOR_INDEX_HEADER_LEN + 7],
+        ]))
+        .unwrap();
+        bytes[record_offset] = 9;
+        assert!(validate_vector_index_layout(&bytes).is_err());
+    }
+
+    #[test]
+    fn test_vector_index_layout_invalid_doc_id_len() {
+        let mut bytes = build_vector_index_bytes(3, &[(0, "doc1")]);
+        let record_offset = usize::try_from(u64::from_le_bytes([
+            bytes[VECTOR_INDEX_HEADER_LEN],
+            bytes[VECTOR_INDEX_HEADER_LEN + 1],
+            bytes[VECTOR_INDEX_HEADER_LEN + 2],
+            bytes[VECTOR_INDEX_HEADER_LEN + 3],
+            bytes[VECTOR_INDEX_HEADER_LEN + 4],
+            bytes[VECTOR_INDEX_HEADER_LEN + 5],
+            bytes[VECTOR_INDEX_HEADER_LEN + 6],
+            bytes[VECTOR_INDEX_HEADER_LEN + 7],
+        ]))
+        .unwrap();
+        let doc_id_len_offset = record_offset + 2;
+        bytes[doc_id_len_offset..doc_id_len_offset + 2].copy_from_slice(&u16::MAX.to_le_bytes());
+        assert!(validate_vector_index_layout(&bytes).is_err());
+    }
+
+    #[test]
+    fn test_vector_index_layout_invalid_utf8() {
+        let mut bytes = build_vector_index_bytes(3, &[(0, "doc1")]);
+        let record_offset = usize::try_from(u64::from_le_bytes([
+            bytes[VECTOR_INDEX_HEADER_LEN],
+            bytes[VECTOR_INDEX_HEADER_LEN + 1],
+            bytes[VECTOR_INDEX_HEADER_LEN + 2],
+            bytes[VECTOR_INDEX_HEADER_LEN + 3],
+            bytes[VECTOR_INDEX_HEADER_LEN + 4],
+            bytes[VECTOR_INDEX_HEADER_LEN + 5],
+            bytes[VECTOR_INDEX_HEADER_LEN + 6],
+            bytes[VECTOR_INDEX_HEADER_LEN + 7],
+        ]))
+        .unwrap();
+        let doc_id_len =
+            u16::from_le_bytes([bytes[record_offset + 2], bytes[record_offset + 3]]) as usize;
+        let doc_id_offset = record_offset + 4;
+        if doc_id_len > 0 {
+            bytes[doc_id_offset] = 0xFF;
+        }
+        assert!(validate_vector_index_layout(&bytes).is_err());
     }
 
     #[test]

@@ -160,6 +160,53 @@ Key features:
 - FTS5 for backup search capability
 - Efficient batch inserts
 
+### vector.rs - Vector Search + File Format (planned)
+
+The persistent vector index will use a compact, versioned binary format to
+preserve exact embeddings and deterministic iteration order.
+
+#### Binary Layout (Little-Endian)
+
+Header (fixed 32 bytes):
+
+| Offset | Size | Field | Description |
+|--------|------|-------|-------------|
+| 0 | 4 | magic | `XFVI` |
+| 4 | 2 | version | `1` |
+| 6 | 1 | doc_type_encoding | `0` = enum |
+| 7 | 1 | reserved | `0` |
+| 8 | 4 | dimension | Embedding dimension |
+| 12 | 8 | record_count | Number of records |
+| 20 | 8 | offsets_start | Byte offset to offsets table |
+| 28 | 4 | reserved | `0` |
+
+Offsets table:
+
+```
+u64 offsets[record_count]  // absolute byte offsets to each record
+```
+
+Record layout (variable length):
+
+| Field | Size | Notes |
+|-------|------|-------|
+| doc_type | 1 | enum (0 tweet, 1 like, 2 dm, 3 grok) |
+| reserved | 1 | `0` |
+| doc_id_len | 2 | u16 byte length |
+| doc_id | N | UTF-8 bytes |
+| embedding | 2*dimension | raw f16 bytes, little-endian |
+
+#### Validation Rules
+
+- Magic must match `XFVI`.
+- Version must be supported.
+- `dimension > 0`.
+- `offsets_start` must be >= header length.
+- Offsets table must fit in file.
+- Record offsets must be sorted, in-bounds, and point into data section.
+- Each record must fit within file bounds and have valid UTF-8 `doc_id`.
+- `doc_type` must be in the enum range.
+
 ## Design Decisions
 
 ### Why Both Tantivy and SQLite?
