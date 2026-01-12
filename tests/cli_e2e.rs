@@ -1090,6 +1090,7 @@ fn test_search_semantic_score_semantics() {
         .arg(limit.to_string())
         .arg("--format")
         .arg("json")
+        .arg("--quiet") // Suppress INFO logs that pollute JSON output
         .arg("--db")
         .arg(&db_path)
         .arg("--index")
@@ -1159,6 +1160,7 @@ fn test_search_hybrid_score_semantics() {
         .arg(limit.to_string())
         .arg("--format")
         .arg("json")
+        .arg("--quiet") // Suppress INFO logs that pollute JSON output
         .arg("--db")
         .arg(&db_path)
         .arg("--index")
@@ -1231,11 +1233,14 @@ fn test_missing_required_args() {
     test_log!("Starting test_missing_required_args");
     let start = Instant::now();
 
-    // Index without archive path
+    // Index with non-existent archive path should fail
     let mut cmd = xf_cmd();
-    cmd.arg("index").assert().failure();
+    cmd.arg("index")
+        .arg("/nonexistent/path/to/archive")
+        .assert()
+        .failure();
 
-    // Search without query
+    // Search without query should fail
     let mut cmd = xf_cmd();
     cmd.arg("search").assert().failure();
 
