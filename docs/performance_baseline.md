@@ -2,11 +2,11 @@
 
 ## Latest Results (Release Build)
 
-Date: 2026-01-12T17:30:00Z (UTC)
+Date: 2026-01-12T17:55:36Z (UTC)
 
 ### Environment
 
-- Commit: `c5b1f1bd083f30b80f66ac7062bbbbd18a4fb392`
+- Commit: `51394d8c825301a409361c502bc6fab122be76f8`
 - Binary: `./target/release/xf` (release build with LTO + opt-level=z)
 - OS: Linux threadripperje 6.17.0-8-generic x86_64
 - CPU: AMD Ryzen Threadripper PRO 5975WX 32-Cores (64 threads)
@@ -27,9 +27,16 @@ Date: 2026-01-12T17:30:00Z (UTC)
 
 | Command | p50 | p95 | p99 |
 | --- | ---:| ---:| ---:|
-| `xf search "rust" --limit 100` (hybrid) | 69.5 ms | 74.6 ms | 74.6 ms |
-| `xf search "rust" --mode lexical --limit 100` | 9.9 ms | 11.2 ms | 11.2 ms |
-| `xf search "rust" --mode semantic --limit 100` | 72.3 ms | 75.0 ms | 75.0 ms |
+| `xf search "rust" --limit 100` (hybrid) | 67.0 ms | 69.1 ms | 70.62 ms |
+| `xf search "machine" --mode lexical --limit 100` | 13.0 ms | 15.05 ms | 15.81 ms |
+| `xf search "stress" --mode semantic --limit 100` | 77.5 ms | 115.15 ms | 117.43 ms |
+
+### Type-Filtered Search (DM only, 20 runs, warm cache)
+
+| Command | p50 | p95 | p99 |
+| --- | ---:| ---:| ---:|
+| `xf search "rust" --limit 100 --types dm` (hybrid) | 67.0 ms | 70.1 ms | 71.62 ms |
+| `xf search "stress" --mode semantic --limit 100 --types dm` | 68.0 ms | 72.05 ms | 72.81 ms |
 
 ### Indexing Baseline (Release Build, 5 runs)
 
@@ -54,19 +61,25 @@ Date: 2026-01-12T17:30:00Z (UTC)
 **Hybrid Search:**
 - Elapsed time: 0.06s
 - User time: 0.03s
-- System time: 0.03s
-- Max RSS: 47,772 KB (~46.7 MB)
+- System time: 0.02s
+- Max RSS: 48,824 KB (~47.7 MB)
+
+**Hybrid Search (--types dm):**
+- Elapsed time: 0.05s
+- User time: 0.02s
+- System time: 0.02s
+- Max RSS: 49,312 KB (~48.2 MB) (+488 kB vs no filter)
 
 ### Performance vs Targets
 
 | Metric | Target | Actual | Status |
 | --- | --- | --- | --- |
-| Hybrid search latency | <50ms | 69.5ms (p50) | Above target |
-| Lexical search latency | <20ms | 9.9ms (p50) | **PASS** |
-| Semantic search latency | <30ms | 72.3ms (p50) | Above target |
+| Hybrid search latency | <50ms | 67.0ms (p50) | Above target |
+| Lexical search latency | <20ms | 13.0ms (p50) | **PASS** |
+| Semantic search latency | <30ms | 77.5ms (p50) | Above target |
 | Indexing 17.5K docs | <120s | 0.82s | **PASS** |
 | Memory (indexing) | <200MB | 92.3 MB | **PASS** |
-| Memory (search) | <200MB | 46.7 MB | **PASS** |
+| Memory (search) | <200MB | 47.7 MB | **PASS** |
 
 ### Type-Filtered Search (xf-80)
 
