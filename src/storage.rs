@@ -11,7 +11,7 @@ use crate::{format_bytes_i64, format_number};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, params};
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use tracing::info;
 
@@ -2034,6 +2034,117 @@ impl Storage {
         }
     }
 
+    /// Load existing content hashes keyed by document ID and type.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database query fails or stored hashes are invalid.
+    pub fn load_embedding_hashes_by_doc(
+        &self,
+    ) -> Result<HashMap<String, HashMap<String, [u8; 32]>>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT doc_id, doc_type, content_hash FROM embeddings WHERE content_hash IS NOT NULL",
+        )?;
+
+        let rows = stmt.query_map([], |row| {
+            let doc_id: String = row.get(0)?;
+            let doc_type: String = row.get(1)?;
+            let bytes: Vec<u8> = row.get(2)?;
+            let hash: [u8; 32] = match bytes.as_slice().try_into() {
+                Ok(hash) => hash,
+                Err(_) => {
+                    return Err(rusqlite::Error::FromSqlConversionFailure(
+                        bytes.len(),
+                        rusqlite::types::Type::Blob,
+                        Box::new(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "Invalid content_hash length",
+                        )),
+                    ));
+                }
+            };
+            Ok((doc_id, doc_type, hash))
+        })?;
+
+        let mut map: HashMap<String, HashMap<String, [u8; 32]>> = HashMap::new();
+        for row in rows {
+            let (doc_id, doc_type, hash) = row?;
+            map.entry(doc_id).or_default().insert(doc_type, hash);
+        }
+
+        Ok(map)
+    }
+
+    /// Load embeddings by content hash in batches.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database query fails or stored embeddings are invalid.
+    ///
+    /// # Panics
+    ///
+    /// Panics if stored embedding bytes are not aligned to 2-byte F16 chunks.
+    pub fn load_embeddings_by_hashes(
+        &self,
+        hashes: &[[u8; 32]],
+    ) -> Result<HashMap<[u8; 32], Vec<f32>>> {
+        use half::f16;
+
+        if hashes.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let mut results: HashMap<[u8; 32], Vec<f32>> = HashMap::new();
+
+        for chunk in hashes.chunks(SQLITE_BATCH_SIZE) {
+            let mut sql = String::from(
+                "SELECT content_hash, embedding FROM embeddings WHERE content_hash IN (",
+            );
+            for i in 0..chunk.len() {
+                if i > 0 {
+                    sql.push(',');
+                }
+                sql.push('?');
+            }
+            sql.push(')');
+
+            let mut stmt = self.conn.prepare(&sql)?;
+            let params = rusqlite::params_from_iter(chunk.iter().map(<[u8; 32]>::as_slice));
+            let rows = stmt.query_map(params, |row| {
+                let hash_bytes: Vec<u8> = row.get(0)?;
+                let hash: [u8; 32] = match hash_bytes.as_slice().try_into() {
+                    Ok(hash) => hash,
+                    Err(_) => {
+                        return Err(rusqlite::Error::FromSqlConversionFailure(
+                            hash_bytes.len(),
+                            rusqlite::types::Type::Blob,
+                            Box::new(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                "Invalid content_hash length",
+                            )),
+                        ));
+                    }
+                };
+                let bytes: Vec<u8> = row.get(1)?;
+                let floats: Vec<f32> = bytes
+                    .chunks_exact(2)
+                    .map(|chunk| {
+                        let arr: [u8; 2] = chunk.try_into().unwrap();
+                        f16::from_le_bytes(arr).to_f32()
+                    })
+                    .collect();
+                Ok((hash, floats))
+            })?;
+
+            for row in rows {
+                let (hash, embedding) = row?;
+                results.entry(hash).or_insert(embedding);
+            }
+        }
+
+        Ok(results)
+    }
+
     /// Load all embeddings for vector search.
     ///
     /// Returns tuples of (`doc_id`, `doc_type`, embedding).
@@ -3023,6 +3134,79 @@ mod tests {
         assert_eq!(hash_tweet_got, Some(hash_tweet));
         assert_eq!(hash_like_got, Some(hash_like));
         assert_eq!(hash_missing, None);
+    }
+
+    #[test]
+    fn test_load_embedding_hashes_by_doc_matches_get() {
+        let storage = Storage::open_memory().unwrap();
+
+        let emb_tweet = vec![0.9_f32, 0.8];
+        let emb_like = vec![0.7_f32, 0.6];
+        let hash_tweet = [5_u8; 32];
+        let hash_like = [6_u8; 32];
+
+        storage
+            .store_embedding("999", "tweet", &emb_tweet, Some(&hash_tweet))
+            .unwrap();
+        storage
+            .store_embedding("999", "like", &emb_like, Some(&hash_like))
+            .unwrap();
+
+        let hashes_by_doc = storage.load_embedding_hashes_by_doc().unwrap();
+        let tweet_hash = hashes_by_doc
+            .get("999")
+            .and_then(|by_type| by_type.get("tweet"))
+            .copied();
+        let like_hash = hashes_by_doc
+            .get("999")
+            .and_then(|by_type| by_type.get("like"))
+            .copied();
+
+        assert_eq!(
+            tweet_hash,
+            storage.get_embedding_hash("999", "tweet").unwrap()
+        );
+        assert_eq!(
+            like_hash,
+            storage.get_embedding_hash("999", "like").unwrap()
+        );
+        assert_eq!(
+            hashes_by_doc
+                .get("999")
+                .and_then(|by_type| by_type.get("dm")),
+            None
+        );
+    }
+
+    #[test]
+    fn test_load_embeddings_by_hashes() {
+        let storage = Storage::open_memory().unwrap();
+
+        let emb_tweet = vec![0.12_f32, 0.34];
+        let emb_like = vec![0.56_f32, 0.78];
+        let hash_tweet = [7_u8; 32];
+        let hash_like = [8_u8; 32];
+
+        storage
+            .store_embedding("321", "tweet", &emb_tweet, Some(&hash_tweet))
+            .unwrap();
+        storage
+            .store_embedding("321", "like", &emb_like, Some(&hash_like))
+            .unwrap();
+
+        let hashes = vec![hash_tweet, hash_like, [9_u8; 32]];
+        let embeddings = storage.load_embeddings_by_hashes(&hashes).unwrap();
+        assert_eq!(embeddings.len(), 2);
+
+        let assert_vec_approx = |left: &[f32], right: &[f32]| {
+            assert_eq!(left.len(), right.len());
+            for (a, b) in left.iter().zip(right.iter()) {
+                assert!((a - b).abs() < 1e-3, "expected {b} ~= {a}");
+            }
+        };
+
+        assert_vec_approx(embeddings.get(&hash_tweet).unwrap(), &emb_tweet);
+        assert_vec_approx(embeddings.get(&hash_like).unwrap(), &emb_like);
     }
 
     #[test]

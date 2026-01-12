@@ -1020,6 +1020,15 @@ fn generate_embeddings(storage: &Storage, show_progress: bool) -> Result<()> {
         return Ok(());
     }
 
+    let existing_hashes_by_doc = storage.load_embedding_hashes_by_doc()?;
+    let mut existing_hashes: HashSet<[u8; 32]> = HashSet::new();
+    for by_type in existing_hashes_by_doc.values() {
+        for hash in by_type.values() {
+            existing_hashes.insert(*hash);
+        }
+    }
+    let mut embedding_cache: HashMap<[u8; 32], Vec<f32>> = HashMap::new();
+
     // Create progress bar
     let pb = if show_progress {
         let pb = ProgressBar::new(docs.len() as u64);
@@ -1041,6 +1050,7 @@ fn generate_embeddings(storage: &Storage, show_progress: bool) -> Result<()> {
 
     for chunk in docs.chunks(BATCH_SIZE) {
         let mut batch: Vec<EmbedRecord> = Vec::new();
+        let mut candidates: Vec<(String, String, String, [u8; 32])> = Vec::new();
 
         for (doc_id, text, doc_type) in chunk {
             // Canonicalize text
@@ -1057,8 +1067,11 @@ fn generate_embeddings(storage: &Storage, show_progress: bool) -> Result<()> {
             let hash = content_hash(&canonical);
 
             // Skip if this doc already has the same content hash.
-            if let Some(existing_hash) = storage.get_embedding_hash(doc_id, doc_type)? {
-                if existing_hash == hash {
+            if let Some(existing_hash) = existing_hashes_by_doc
+                .get(doc_id)
+                .and_then(|by_type| by_type.get(doc_type))
+            {
+                if existing_hash == &hash {
                     skipped_count += 1;
                     if let Some(ref pb) = pb {
                         pb.inc(1);
@@ -1067,30 +1080,49 @@ fn generate_embeddings(storage: &Storage, show_progress: bool) -> Result<()> {
                 }
             }
 
+            candidates.push((doc_id.clone(), doc_type.clone(), canonical, hash));
+            if let Some(ref pb) = pb {
+                pb.inc(1);
+            }
+        }
+
+        let mut needed_hashes: Vec<[u8; 32]> = Vec::new();
+        for (_, _, _, hash) in &candidates {
+            if existing_hashes.contains(hash) && !embedding_cache.contains_key(hash) {
+                needed_hashes.push(*hash);
+            }
+        }
+
+        if !needed_hashes.is_empty() {
+            let fetched = storage.load_embeddings_by_hashes(&needed_hashes)?;
+            for (hash, embedding) in fetched {
+                embedding_cache.insert(hash, embedding);
+            }
+        }
+
+        for (doc_id, doc_type, canonical, hash) in candidates {
             // Reuse an existing embedding if identical content exists.
-            if let Some(existing_embedding) = storage.get_embedding_by_hash(&hash)? {
+            if let Some(existing_embedding) = embedding_cache.get(&hash) {
                 batch.push((
                     doc_id.clone(),
                     doc_type.clone(),
-                    existing_embedding,
+                    existing_embedding.clone(),
                     Some(hash),
                 ));
                 reused_count += 1;
-            } else {
-                // Generate embedding
-                match embedder.embed(&canonical) {
-                    Ok(embedding) => {
-                        batch.push((doc_id.clone(), doc_type.clone(), embedding, Some(hash)));
-                    }
-                    Err(e) => {
-                        warn!("Failed to embed doc {}: {}", doc_id, e);
-                        skipped_count += 1;
-                    }
-                }
+                continue;
             }
 
-            if let Some(ref pb) = pb {
-                pb.inc(1);
+            // Generate embedding
+            match embedder.embed(&canonical) {
+                Ok(embedding) => {
+                    embedding_cache.insert(hash, embedding.clone());
+                    batch.push((doc_id.clone(), doc_type.clone(), embedding, Some(hash)));
+                }
+                Err(e) => {
+                    warn!("Failed to embed doc {}: {}", doc_id, e);
+                    skipped_count += 1;
+                }
             }
         }
 
