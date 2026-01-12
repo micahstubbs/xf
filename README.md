@@ -292,6 +292,35 @@ window.YTD.tweets.part0 = [
 
 `xf` knows how to parse this format and extract all your content.
 
+### ⚠️ Important: What's NOT in Your Archive
+
+Your X data archive only contains **your own data**—content you created or directly interacted with. This is a limitation of X's export, not xf.
+
+**What IS included:**
+| Data Type | Description |
+|-----------|-------------|
+| Your tweets | Everything you posted (including replies you made to others) |
+| Your likes | Tweets you liked (with full text if available) |
+| Your DMs | Direct message conversations you participated in |
+| Your Grok chats | Conversations with Grok AI |
+| Followers/Following | Lists of accounts (usernames only, not their tweets) |
+
+**What is NOT included:**
+| Data Type | Why It's Missing |
+|-----------|------------------|
+| **Replies to your tweets** | Other people's replies are *their* data, not yours |
+| **Quote tweets of you** | Same reason—belongs to whoever quoted you |
+| **Mentions of you** | Tweets mentioning @you are owned by others |
+| **Others' tweets** | You only get tweets you liked, not random tweets you viewed |
+| **Analytics/impressions** | Detailed view counts aren't in the standard export |
+
+**Why this matters:** If you're hoping to find "what did people say in response to my tweet about X?"—that data isn't in your archive. You'd need to use the X API or third-party tools to fetch replies in real-time.
+
+**What you CAN do:**
+- Search your own replies to others: `xf search "query" --replies-only`
+- Find conversations in your DMs: `xf search "topic" --types dm --context`
+- See tweets you engaged with via likes: `xf search "topic" --types like`
+
 ## Installation
 
 ### Quick Install (Recommended)
