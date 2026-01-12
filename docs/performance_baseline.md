@@ -68,6 +68,32 @@ Date: 2026-01-12T17:30:00Z (UTC)
 | Memory (indexing) | <200MB | 92.3 MB | **PASS** |
 | Memory (search) | <200MB | 46.7 MB | **PASS** |
 
+### Type-Filtered Search (xf-80)
+
+Type filtering allows searching specific document types (tweet, dm, like, grok).
+
+**Hybrid Search with --types filter (20 runs, warm cache):**
+
+| Filter | p50 | p95 | p99 |
+| --- | ---:| ---:| ---:|
+| No filter (all types) | 67.2 ms | 72.2 ms | 73.8 ms |
+| --types tweet | 70.4 ms | 74.9 ms | 77.0 ms |
+| --types dm | 67.6 ms | 74.8 ms | 78.7 ms |
+| --types like | 67.5 ms | 72.8 ms | 73.0 ms |
+| --types grok | 66.3 ms | 68.9 ms | 69.1 ms |
+
+**Semantic Search with --types filter (20 runs, warm cache):**
+
+| Filter | p50 | p95 | p99 |
+| --- | ---:| ---:| ---:|
+| No filter (all types) | 72.2 ms | 76.6 ms | 76.8 ms |
+| --types tweet | 67.8 ms | 71.7 ms | 74.3 ms |
+| --types dm | 63.3 ms | 65.3 ms | 66.4 ms |
+| --types like | 65.3 ms | 101.7 ms | 109.9 ms |
+| --types grok | 65.7 ms | 79.4 ms | 92.9 ms |
+
+**Observation:** Type filtering does not significantly reduce search latency. The vector index currently loads all embeddings regardless of type filter, then filters results. Future optimization could pre-filter embeddings by type to reduce memory scanning.
+
 ### Notes
 
 - Hybrid and semantic search are still above the 50ms target. The bottleneck appears to be vector index loading from SQLite on each search. Further optimization with persistent mmap'd vector index may be needed.
@@ -75,6 +101,7 @@ Date: 2026-01-12T17:30:00Z (UTC)
 - Indexing is extremely fast (sub-1s) and well under the 120s target.
 - Memory usage is reasonable at ~92 MB for indexing and ~47 MB for search.
 - CPU parallelization during indexing is effective (256% CPU utilization on multi-core).
+- Type filtering does not currently improve latency - embeddings are loaded fully then filtered.
 
 ---
 

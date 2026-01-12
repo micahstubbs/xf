@@ -784,6 +784,165 @@ fn bench_vector_index_load_from_file(c: &mut Criterion) {
 }
 
 // ============================================================================
+// Type-Filtered Search Benchmarks (xf-80)
+// ============================================================================
+
+fn bench_type_filtered_hybrid_search(c: &mut Criterion) {
+    use xf::search::DocType;
+
+    let state = match build_indexed_state(true) {
+        Ok(state) => state,
+        Err(err) => {
+            eprintln!("bench_type_filtered_hybrid_search setup failed: {err}");
+            return;
+        }
+    };
+    let Some(vector_index) = state.vector_index.as_ref() else {
+        eprintln!("bench_type_filtered_hybrid_search missing vector index");
+        return;
+    };
+    let query = "rust";
+    let limit = 20;
+    let offset = 0;
+    let candidates = candidate_count(limit, offset);
+    let query_vec = match query_embedding(query) {
+        Ok(vec) => vec,
+        Err(err) => {
+            eprintln!("bench_type_filtered_hybrid_search embed failed: {err}");
+            return;
+        }
+    };
+
+    let mut group = c.benchmark_group("type_filtered_hybrid");
+    group.measurement_time(Duration::from_secs(10));
+    group.sample_size(50);
+
+    let vec_types_tweet: &[&str] = &["tweet"];
+    let vec_types_dm: &[&str] = &["dm"];
+    let vec_types_grok: &[&str] = &["grok"];
+    let doc_types_tweet: &[DocType] = &[DocType::Tweet];
+    let doc_types_dm: &[DocType] = &[DocType::DirectMessage];
+    let doc_types_grok: &[DocType] = &[DocType::GrokMessage];
+
+    // No filter (baseline)
+    group.bench_function("no_filter", |b| {
+        b.iter(|| {
+            let lexical = state
+                .engine
+                .search(black_box(query), None, candidates)
+                .unwrap_or_default();
+            let semantic = vector_index.search_top_k(&query_vec, candidates, None);
+            let fused = rrf_fuse(&lexical, &semantic, limit, offset);
+            black_box(fused.len());
+        });
+    });
+
+    // Tweet only
+    group.bench_function("tweet_only", |b| {
+        b.iter(|| {
+            let lexical = state
+                .engine
+                .search(black_box(query), Some(doc_types_tweet), candidates)
+                .unwrap_or_default();
+            let semantic = vector_index.search_top_k(&query_vec, candidates, Some(vec_types_tweet));
+            let fused = rrf_fuse(&lexical, &semantic, limit, offset);
+            black_box(fused.len());
+        });
+    });
+
+    // DM only
+    group.bench_function("dm_only", |b| {
+        b.iter(|| {
+            let lexical = state
+                .engine
+                .search(black_box(query), Some(doc_types_dm), candidates)
+                .unwrap_or_default();
+            let semantic = vector_index.search_top_k(&query_vec, candidates, Some(vec_types_dm));
+            let fused = rrf_fuse(&lexical, &semantic, limit, offset);
+            black_box(fused.len());
+        });
+    });
+
+    // Grok only
+    group.bench_function("grok_only", |b| {
+        b.iter(|| {
+            let lexical = state
+                .engine
+                .search(black_box(query), Some(doc_types_grok), candidates)
+                .unwrap_or_default();
+            let semantic = vector_index.search_top_k(&query_vec, candidates, Some(vec_types_grok));
+            let fused = rrf_fuse(&lexical, &semantic, limit, offset);
+            black_box(fused.len());
+        });
+    });
+
+    group.finish();
+}
+
+fn bench_type_filtered_semantic_search(c: &mut Criterion) {
+    let state = match build_indexed_state(true) {
+        Ok(state) => state,
+        Err(err) => {
+            eprintln!("bench_type_filtered_semantic_search setup failed: {err}");
+            return;
+        }
+    };
+    let Some(vector_index) = state.vector_index.as_ref() else {
+        eprintln!("bench_type_filtered_semantic_search missing vector index");
+        return;
+    };
+    let query_vec = match query_embedding("machine learning") {
+        Ok(vec) => vec,
+        Err(err) => {
+            eprintln!("bench_type_filtered_semantic_search embed failed: {err}");
+            return;
+        }
+    };
+
+    let mut group = c.benchmark_group("type_filtered_semantic");
+    group.measurement_time(Duration::from_secs(10));
+    group.sample_size(80);
+
+    let types_tweet: &[&str] = &["tweet"];
+    let types_dm: &[&str] = &["dm"];
+    let types_grok: &[&str] = &["grok"];
+
+    // No filter (baseline)
+    group.bench_function("no_filter", |b| {
+        b.iter(|| {
+            let results = vector_index.search_top_k(&query_vec, 20, None);
+            black_box(results.len());
+        });
+    });
+
+    // Tweet only
+    group.bench_function("tweet_only", |b| {
+        b.iter(|| {
+            let results = vector_index.search_top_k(&query_vec, 20, Some(types_tweet));
+            black_box(results.len());
+        });
+    });
+
+    // DM only
+    group.bench_function("dm_only", |b| {
+        b.iter(|| {
+            let results = vector_index.search_top_k(&query_vec, 20, Some(types_dm));
+            black_box(results.len());
+        });
+    });
+
+    // Grok only
+    group.bench_function("grok_only", |b| {
+        b.iter(|| {
+            let results = vector_index.search_top_k(&query_vec, 20, Some(types_grok));
+            black_box(results.len());
+        });
+    });
+
+    group.finish();
+}
+
+// ============================================================================
 // Criterion Groups
 // ============================================================================
 
@@ -797,6 +956,14 @@ criterion_group!(
         bench_semantic_search,
         bench_search_pagination,
         bench_rrf_fuse_only
+);
+
+criterion_group!(
+    name = type_filtered_benches;
+    config = Criterion::default().significance_level(0.05);
+    targets =
+        bench_type_filtered_hybrid_search,
+        bench_type_filtered_semantic_search
 );
 
 criterion_group!(
@@ -826,6 +993,7 @@ criterion_group!(
 
 criterion_main!(
     search_benches,
+    type_filtered_benches,
     indexing_benches,
     stats_benches,
     vector_index_benches
