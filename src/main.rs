@@ -39,13 +39,98 @@ use xf::{
     format_relative_date, format_short_id,
 };
 
+/// Cache container for the `VectorIndex`.
+struct VectorIndexCache {
+    index: OnceLock<VectorIndex>,
+    meta: OnceLock<CacheMeta>,
+    init_lock: Mutex<()>,
+}
+
+impl VectorIndexCache {
+    const fn new() -> Self {
+        Self {
+            index: OnceLock::new(),
+            meta: OnceLock::new(),
+            init_lock: Mutex::new(()),
+        }
+    }
+
+    fn meta(&self) -> Option<&CacheMeta> {
+        self.meta.get()
+    }
+
+    #[cfg(test)]
+    fn index(&self) -> Option<&VectorIndex> {
+        self.index.get()
+    }
+
+    fn warn_if_stale(&self, storage: &Storage, db_path: &Path) {
+        let Some(meta) = self.meta.get() else {
+            return;
+        };
+        match meta.is_stale(storage, db_path) {
+            Ok(true) => warn!("VectorIndex cache may be stale; restart xf to reload embeddings."),
+            Ok(false) => {}
+            Err(err) => warn!("VectorIndex cache staleness check failed: {err}"),
+        }
+    }
+
+    fn load<'a>(&'a self, storage: &Storage, db_path: &Path) -> Result<(&'a VectorIndex, bool)> {
+        if let Some(index) = self.index.get() {
+            self.warn_if_stale(storage, db_path);
+            return Ok((index, false));
+        }
+
+        let _guard = self
+            .init_lock
+            .lock()
+            .map_err(|err| anyhow::anyhow!("lock vector index initialization: {err}"))?;
+        if let Some(index) = self.index.get() {
+            self.warn_if_stale(storage, db_path);
+            return Ok((index, false));
+        }
+
+        info!("Loading embeddings into VectorIndex (first search)...");
+        let start = Instant::now();
+        let embeddings = storage.load_all_embeddings()?;
+        let mut index = VectorIndex::new(DEFAULT_DIMENSION);
+        let mut type_counts: HashMap<String, usize> = HashMap::new();
+        let mut embedding_count = 0_usize;
+
+        for (doc_id, doc_type, embedding) in embeddings {
+            embedding_count += 1;
+            *type_counts.entry(doc_type.clone()).or_insert(0) += 1;
+            index.add(doc_id, doc_type, embedding);
+        }
+
+        let db_mtime = db_path
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .context("read database mtime")?;
+        let meta = CacheMeta {
+            db_mtime,
+            embedding_count,
+            type_counts,
+        };
+        let _ = self.meta.set(meta);
+
+        let _ = self.index.set(index);
+        info!(
+            "VectorIndex loaded: {} embeddings in {:?}",
+            embedding_count,
+            start.elapsed()
+        );
+
+        self.index
+            .get()
+            .map(|idx| (idx, true))
+            .ok_or_else(|| anyhow::anyhow!("VectorIndex cache not initialized"))
+    }
+}
+
 /// Global cached `VectorIndex` for semantic search.
 /// Initialized on first search, reused for subsequent searches.
-static VECTOR_INDEX: OnceLock<VectorIndex> = OnceLock::new();
-static VECTOR_INDEX_INIT_LOCK: Mutex<()> = Mutex::new(());
-
-/// Metadata for cache invalidation detection.
-static VECTOR_INDEX_META: OnceLock<CacheMeta> = OnceLock::new();
+static VECTOR_INDEX_CACHE: VectorIndexCache = VectorIndexCache::new();
 
 #[derive(Debug, Clone)]
 struct CacheMeta {
@@ -1379,64 +1464,12 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
 }
 
 fn load_vector_index_cached(storage: &Storage, db_path: &Path) -> Result<&'static VectorIndex> {
-    if let Some(index) = VECTOR_INDEX.get() {
-        if let Some(meta) = VECTOR_INDEX_META.get() {
-            match meta.is_stale(storage, db_path) {
-                Ok(true) => {
-                    warn!("VectorIndex cache may be stale; restart xf to reload embeddings.");
-                }
-                Ok(false) => {}
-                Err(err) => warn!("VectorIndex cache staleness check failed: {err}"),
-            }
-        }
-        return Ok(index);
-    }
-
-    let _guard = VECTOR_INDEX_INIT_LOCK
-        .lock()
-        .map_err(|err| anyhow::anyhow!("lock vector index initialization: {err}"))?;
-    if let Some(index) = VECTOR_INDEX.get() {
-        return Ok(index);
-    }
-
-    info!("Loading embeddings into VectorIndex (first search)...");
-    let start = Instant::now();
-    let embeddings = storage.load_all_embeddings()?;
-    let mut index = VectorIndex::new(DEFAULT_DIMENSION);
-    let mut type_counts: HashMap<String, usize> = HashMap::new();
-    let mut embedding_count = 0_usize;
-
-    for (doc_id, doc_type, embedding) in embeddings {
-        embedding_count += 1;
-        *type_counts.entry(doc_type.clone()).or_insert(0) += 1;
-        index.add(doc_id, doc_type, embedding);
-    }
-
-    let db_mtime = db_path
-        .metadata()
-        .and_then(|meta| meta.modified())
-        .context("read database mtime")?;
-    let meta = CacheMeta {
-        db_mtime,
-        embedding_count,
-        type_counts,
-    };
-    let _ = VECTOR_INDEX_META.set(meta);
-
-    let _ = VECTOR_INDEX.set(index);
-    info!(
-        "VectorIndex loaded: {} embeddings in {:?}",
-        embedding_count,
-        start.elapsed()
-    );
-
-    VECTOR_INDEX
-        .get()
-        .ok_or_else(|| anyhow::anyhow!("VectorIndex cache not initialized"))
+    let (index, _loaded_now) = VECTOR_INDEX_CACHE.load(storage, db_path)?;
+    Ok(index)
 }
 
 fn has_embeddings_for_types(doc_types: Option<&[search::DocType]>) -> bool {
-    let Some(meta) = VECTOR_INDEX_META.get() else {
+    let Some(meta) = VECTOR_INDEX_CACHE.meta() else {
         return true;
     };
     if meta.embedding_count == 0 {
@@ -3506,12 +3539,14 @@ fn cmd_shell(cli: &Cli, args: &cli::ShellArgs) -> Result<()> {
 }
 
 #[cfg(test)]
-mod cache_invalidation_tests {
+mod cache_tests {
     use super::CacheMeta;
     use super::Storage;
+    use super::VectorIndexCache;
     use anyhow::{Context, Result};
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
+    use std::sync::Arc;
     use std::time::SystemTime;
     use tempfile::tempdir;
 
@@ -3590,6 +3625,50 @@ mod cache_invalidation_tests {
             type_counts: HashMap::new(),
         };
         assert!(meta.is_stale(&storage, &missing_path).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn test_vector_index_initializes_once() -> Result<()> {
+        let (_dir, db_path, storage) = create_storage()?;
+        store_sample_embedding(&storage, "doc-1")?;
+        let cache = VectorIndexCache::new();
+        let (first, loaded_first) = cache.load(&storage, &db_path)?;
+        let (second, loaded_second) = cache.load(&storage, &db_path)?;
+        assert!(loaded_first);
+        assert!(!loaded_second);
+        assert!(std::ptr::eq(first, second));
+        Ok(())
+    }
+
+    #[test]
+    fn test_vector_index_handles_empty_embeddings() -> Result<()> {
+        let (_dir, db_path, storage) = create_storage()?;
+        let cache = VectorIndexCache::new();
+        let (_index, loaded) = cache.load(&storage, &db_path)?;
+        assert!(loaded);
+        let meta = cache.meta().context("cache meta missing")?;
+        assert_eq!(meta.embedding_count, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn test_concurrent_cache_access_after_init() -> Result<()> {
+        let (_dir, db_path, storage) = create_storage()?;
+        store_sample_embedding(&storage, "doc-1")?;
+        let cache = Arc::new(VectorIndexCache::new());
+        let _ = cache.load(&storage, &db_path)?;
+
+        let mut handles = Vec::new();
+        for _ in 0..4 {
+            let cache = Arc::clone(&cache);
+            handles.push(std::thread::spawn(move || cache.index().is_some()));
+        }
+
+        for handle in handles {
+            assert!(handle.join().unwrap_or(false));
+        }
+
         Ok(())
     }
 }
