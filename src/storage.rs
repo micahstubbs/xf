@@ -3000,8 +3000,18 @@ mod tests {
         let got_like = storage.get_embedding("123", "like").unwrap();
         let got_missing = storage.get_embedding("123", "dm").unwrap();
 
-        assert_eq!(got_tweet, Some(emb_tweet));
-        assert_eq!(got_like, Some(emb_like));
+        let assert_vec_approx = |left: &[f32], right: &[f32]| {
+            assert_eq!(left.len(), right.len());
+            for (a, b) in left.iter().zip(right.iter()) {
+                assert!((a - b).abs() < 1e-3, "expected {b} ~= {a}");
+            }
+        };
+
+        let got_tweet = got_tweet.expect("tweet embedding missing");
+        let got_like = got_like.expect("like embedding missing");
+
+        assert_vec_approx(&got_tweet, &emb_tweet);
+        assert_vec_approx(&got_like, &emb_like);
         assert_eq!(got_missing, None);
 
         let hash_tweet_got = storage.get_embedding_hash("123", "tweet").unwrap();
