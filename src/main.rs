@@ -12,7 +12,7 @@ use rayon::ThreadPoolBuilder;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
-use std::io::{self, IsTerminal, BufReader};
+use std::io::{self, BufReader, IsTerminal};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use tracing::{Level, info, warn};
@@ -33,8 +33,8 @@ use xf::{
     ArchiveParser, ArchiveStats, CONTENT_DIVIDER_WIDTH, Cli, Commands, DataType, ExportFormat,
     ExportTarget, HEADER_DIVIDER_WIDTH, ListTarget, OutputFormat, SearchEngine, SearchResult,
     SearchResultType, SearchType, SortOrder, Storage, TweetUrl, VALID_CONFIG_KEYS,
-    VALID_OUTPUT_FIELDS, csv_escape_text, find_closest_match, format_duration, format_error,
-    format_number, format_number_u64, format_number_usize, format_optional_date,
+    VALID_OUTPUT_FIELDS, csv_escape_text, find_closest_match, format_bytes, format_duration,
+    format_error, format_number, format_number_u64, format_number_usize, format_optional_date,
     format_relative_date, format_short_id,
 };
 
@@ -429,10 +429,7 @@ fn cmd_import(cli: &Cli, args: &cli::ImportArgs) -> Result<()> {
     }
 
     println!();
-    println!(
-        "{}",
-        "Importing X data archive...".bold().bright_cyan()
-    );
+    println!("{}", "Importing X data archive...".bold().bright_cyan());
     println!();
 
     // Create progress bar for extraction
@@ -445,7 +442,10 @@ fn cmd_import(cli: &Cli, args: &cli::ImportArgs) -> Result<()> {
     pb.enable_steady_tick(Duration::from_millis(80));
     pb.set_message(format!(
         "Extracting {}...",
-        args.zip_file.file_name().unwrap_or_default().to_string_lossy()
+        args.zip_file
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
     ));
 
     // Open and extract zip file
@@ -486,24 +486,14 @@ fn cmd_import(cli: &Cli, args: &cli::ImportArgs) -> Result<()> {
         }
 
         if i % 100 == 0 {
-            pb.set_message(format!(
-                "Extracting... ({}/{} files)",
-                i + 1,
-                total_files
-            ));
+            pb.set_message(format!("Extracting... ({}/{} files)", i + 1, total_files));
         }
     }
 
     pb.finish_and_clear();
 
     // Format extracted size
-    let size_str = if extracted_size > 1_000_000_000 {
-        format!("{:.1} GB", extracted_size as f64 / 1_000_000_000.0)
-    } else if extracted_size > 1_000_000 {
-        format!("{:.1} MB", extracted_size as f64 / 1_000_000.0)
-    } else {
-        format!("{:.1} KB", extracted_size as f64 / 1_000.0)
-    };
+    let size_str = format_bytes(extracted_size);
 
     println!(
         "  {} Extracted to {}",
@@ -520,10 +510,7 @@ fn cmd_import(cli: &Cli, args: &cli::ImportArgs) -> Result<()> {
 
     // Index unless --no-index
     if args.no_index {
-        println!(
-            "  {} Skipping indexing (--no-index)",
-            "·".dimmed()
-        );
+        println!("  {} Skipping indexing (--no-index)", "·".dimmed());
         println!();
         println!(
             "  Run {} to index later.",
@@ -579,13 +566,26 @@ fn print_import_welcome(_archive_path: &PathBuf, cli: &Cli) -> Result<()> {
 
     let pad = |text: &str| -> String {
         let visible_len = console::measure_text_width(text);
-        let padding = inner.saturating_sub(visible_len).saturating_sub(2);
-        format!("{} {}{}{}", v.bright_cyan(), text, " ".repeat(padding), v.bright_cyan())
+        // inner = width - 2 (for the two │ chars), minus 1 for the leading space
+        let padding = inner.saturating_sub(visible_len).saturating_sub(1);
+        format!(
+            "{} {}{}{}",
+            v.bright_cyan(),
+            text,
+            " ".repeat(padding),
+            v.bright_cyan()
+        )
     };
 
     println!("{hline}");
     println!("{}", pad(""));
-    println!("{}", pad(&format!("  {}", "Welcome to your X archive!".bold().bright_magenta())));
+    println!(
+        "{}",
+        pad(&format!(
+            "  {}",
+            "Welcome to your X archive!".bold().bright_magenta()
+        ))
+    );
     println!("{}", pad(""));
 
     if stats.tweets_count > 0 {
@@ -601,7 +601,10 @@ fn print_import_welcome(_archive_path: &PathBuf, cli: &Cli) -> Result<()> {
     if stats.likes_count > 0 {
         println!(
             "{}",
-            pad(&format!("  Likes:     {:>6}", format_number(stats.likes_count).bold()))
+            pad(&format!(
+                "  Likes:     {:>6}",
+                format_number(stats.likes_count).bold()
+            ))
         );
     }
     if stats.dms_count > 0 {
@@ -617,7 +620,10 @@ fn print_import_welcome(_archive_path: &PathBuf, cli: &Cli) -> Result<()> {
     if stats.grok_messages_count > 0 {
         println!(
             "{}",
-            pad(&format!("  Grok:      {:>6}", format_number(stats.grok_messages_count).bold()))
+            pad(&format!(
+                "  Grok:      {:>6}",
+                format_number(stats.grok_messages_count).bold()
+            ))
         );
     }
 
