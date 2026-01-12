@@ -1968,21 +1968,7 @@ fn cmd_stats(cli: &Cli, args: &cli::StatsArgs) -> Result<()> {
     }
 
     let storage = Storage::open(&db_path)?;
-    let counts = storage.get_all_counts()?;
-    let stats = ArchiveStats {
-        tweets_count: counts.tweets_count,
-        likes_count: counts.likes_count,
-        dms_count: counts.dms_count,
-        dm_conversations_count: counts.dm_conversations_count,
-        followers_count: counts.followers_count,
-        following_count: counts.following_count,
-        blocks_count: counts.blocks_count,
-        mutes_count: counts.mutes_count,
-        grok_messages_count: counts.grok_messages_count,
-        first_tweet_date: counts.first_tweet_date,
-        last_tweet_date: counts.last_tweet_date,
-        index_built_at: Utc::now(),
-    };
+    let stats = storage.get_stats()?;
 
     // --detailed shows all analytics (temporal + engagement + content)
     let show_temporal = args.temporal || args.detailed;

@@ -168,6 +168,9 @@ impl Config {
         // Override from environment variables
         config.apply_env_overrides();
 
+        // Expand ~ in configured paths after all overrides are applied
+        config.expand_tilde_paths();
+
         debug!("Configuration loaded: {:?}", config);
         config
     }
@@ -180,8 +183,9 @@ impl Config {
         }
 
         match std::fs::read_to_string(path) {
-            Ok(content) => match toml::from_str(&content) {
-                Ok(config) => {
+            Ok(content) => match toml::from_str::<Self>(&content) {
+                Ok(mut config) => {
+                    config.expand_tilde_paths();
                     info!("Loaded config from: {}", path.display());
                     Some(config)
                 }
@@ -251,6 +255,12 @@ impl Config {
                 self.indexing.threads = n;
             }
         }
+    }
+
+    fn expand_tilde_paths(&mut self) {
+        self.paths.db = self.paths.db.clone().map(expand_tilde_path);
+        self.paths.index = self.paths.index.clone().map(expand_tilde_path);
+        self.paths.archive = self.paths.archive.clone().map(expand_tilde_path);
     }
 
     /// Merge another config into this one (other takes precedence).
@@ -333,6 +343,21 @@ impl Config {
     pub fn default_config_content() -> String {
         let config = Self::default();
         toml::to_string_pretty(&config).unwrap_or_default()
+    }
+}
+
+fn expand_tilde_path(path: PathBuf) -> PathBuf {
+    let path_str = path.to_string_lossy();
+    if path_str == "~" {
+        return dirs::home_dir().unwrap_or(path);
+    }
+    let rest = path_str
+        .strip_prefix("~/")
+        .or_else(|| path_str.strip_prefix("~\\"));
+
+    match (rest, dirs::home_dir()) {
+        (Some(suffix), Some(home)) => home.join(suffix),
+        _ => path,
     }
 }
 

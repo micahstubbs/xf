@@ -722,6 +722,7 @@ impl Storage {
     /// Returns an error if statistics queries fail.
     pub fn get_stats(&self) -> Result<ArchiveStats> {
         let counts = self.get_all_counts()?;
+        let index_built_at = self.get_index_built_at()?.unwrap_or_else(Utc::now);
 
         Ok(ArchiveStats {
             tweets_count: counts.tweets_count,
@@ -735,8 +736,27 @@ impl Storage {
             grok_messages_count: counts.grok_messages_count,
             first_tweet_date: counts.first_tweet_date,
             last_tweet_date: counts.last_tweet_date,
-            index_built_at: Utc::now(),
+            index_built_at,
         })
+    }
+
+    /// Get the index build timestamp from the archive metadata, if present.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the query fails.
+    pub fn get_index_built_at(&self) -> Result<Option<DateTime<Utc>>> {
+        let result: std::result::Result<String, _> = self.conn.query_row(
+            "SELECT indexed_at FROM archive_info WHERE id = 1",
+            [],
+            |row| row.get(0),
+        );
+
+        match result {
+            Ok(ts) => Ok(parse_rfc3339_opt(Some(ts))),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(err) => Err(err.into()),
+        }
     }
 
     /// Get all archive counts and tweet date bounds in a single query.
