@@ -13,8 +13,9 @@ use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{self, BufReader, IsTerminal};
-use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant, SystemTime};
 use tracing::{Level, info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -37,6 +38,22 @@ use xf::{
     format_error, format_number, format_number_u64, format_number_usize, format_optional_date,
     format_relative_date, format_short_id,
 };
+
+/// Global cached `VectorIndex` for semantic search.
+/// Initialized on first search, reused for subsequent searches.
+static VECTOR_INDEX: OnceLock<VectorIndex> = OnceLock::new();
+static VECTOR_INDEX_INIT_LOCK: Mutex<()> = Mutex::new(());
+
+/// Metadata for cache invalidation detection.
+static VECTOR_INDEX_META: OnceLock<CacheMeta> = OnceLock::new();
+
+#[derive(Debug, Clone)]
+struct CacheMeta {
+    #[allow(dead_code)]
+    db_mtime: SystemTime,
+    embedding_count: usize,
+    type_counts: HashMap<String, usize>,
+}
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -1044,22 +1061,12 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
         })
     };
 
-    // Load vector index for semantic/hybrid search
+    // Load vector index for semantic/hybrid search (cached across runs)
     let vector_index = if matches!(args.mode, SearchMode::Semantic | SearchMode::Hybrid) {
-        let embeddings =
-            if let Some(types) = doc_types.as_ref() {
-                let mut filtered = Vec::new();
-                for doc_type in types {
-                    let embeddings = storage.load_embeddings_by_type(doc_type.as_str())?;
-                    filtered.extend(embeddings.into_iter().map(|(doc_id, embedding)| {
-                        (doc_id, doc_type.as_str().to_string(), embedding)
-                    }));
-                }
-                filtered
-            } else {
-                storage.load_all_embeddings()?
-            };
-        if embeddings.is_empty() && matches!(args.mode, SearchMode::Semantic) {
+        let index = load_vector_index_cached(&storage, &db_path)?;
+        if matches!(args.mode, SearchMode::Semantic)
+            && !has_embeddings_for_types(doc_types.as_deref())
+        {
             anyhow::bail!(
                 "{}",
                 format_error(
@@ -1068,10 +1075,6 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
                     &["Run 'xf index <archive_path> --force' to rebuild with embeddings"],
                 )
             );
-        }
-        let mut index = VectorIndex::new(384); // HashEmbedder dimension
-        for (doc_id, doc_type, embedding) in embeddings {
-            index.add(doc_id, doc_type, embedding);
         }
         Some(index)
     } else {
@@ -1132,8 +1135,7 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
         SearchMode::Semantic => {
             // Semantic-only search using vector similarity
             let vector_index = vector_index
-                .as_ref()
-                .expect("vector index required for semantic");
+                .ok_or_else(|| anyhow::anyhow!("vector index required for semantic"))?;
             let embedder = HashEmbedder::default();
             let canonical_query = canonicalize_for_embedding(&args.query);
 
@@ -1193,7 +1195,7 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
 
             // Get semantic results (if embeddings exist and query canonicalizes)
             let semantic_results = get_semantic_results(
-                vector_index.as_ref(),
+                vector_index,
                 &embedder,
                 &canonical_query,
                 doc_types.as_deref(),
@@ -1358,6 +1360,75 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn load_vector_index_cached(storage: &Storage, db_path: &Path) -> Result<&'static VectorIndex> {
+    if let Some(index) = VECTOR_INDEX.get() {
+        return Ok(index);
+    }
+
+    let _guard = VECTOR_INDEX_INIT_LOCK
+        .lock()
+        .map_err(|err| anyhow::anyhow!("lock vector index initialization: {err}"))?;
+    if let Some(index) = VECTOR_INDEX.get() {
+        return Ok(index);
+    }
+
+    info!("Loading embeddings into VectorIndex (first search)...");
+    let start = Instant::now();
+    let embeddings = storage.load_all_embeddings()?;
+    let mut index = VectorIndex::new(384); // HashEmbedder dimension
+    let mut type_counts: HashMap<String, usize> = HashMap::new();
+    let mut embedding_count = 0_usize;
+
+    for (doc_id, doc_type, embedding) in embeddings {
+        embedding_count += 1;
+        *type_counts.entry(doc_type.clone()).or_insert(0) += 1;
+        index.add(doc_id, doc_type, embedding);
+    }
+
+    let db_mtime = db_path
+        .metadata()
+        .and_then(|meta| meta.modified())
+        .context("read database mtime")?;
+    let meta = CacheMeta {
+        db_mtime,
+        embedding_count,
+        type_counts,
+    };
+    let _ = VECTOR_INDEX_META.set(meta);
+
+    let _ = VECTOR_INDEX.set(index);
+    info!(
+        "VectorIndex loaded: {} embeddings in {:?}",
+        embedding_count,
+        start.elapsed()
+    );
+
+    VECTOR_INDEX
+        .get()
+        .ok_or_else(|| anyhow::anyhow!("VectorIndex cache not initialized"))
+}
+
+fn has_embeddings_for_types(doc_types: Option<&[search::DocType]>) -> bool {
+    let Some(meta) = VECTOR_INDEX_META.get() else {
+        return true;
+    };
+    if meta.embedding_count == 0 {
+        return false;
+    }
+
+    let Some(types) = doc_types else {
+        return true;
+    };
+
+    types.iter().any(|doc_type| {
+        meta.type_counts
+            .get(doc_type.as_str())
+            .copied()
+            .unwrap_or(0)
+            > 0
+    })
 }
 
 /// Get semantic search results from the vector index.
