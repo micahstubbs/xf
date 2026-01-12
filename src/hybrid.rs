@@ -27,6 +27,19 @@ use clap::ValueEnum;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct DocKey {
+    id: String,
+    doc_type: String,
+}
+
+impl DocKey {
+    #[allow(clippy::missing_const_for_fn)]
+    fn new(id: String, doc_type: String) -> Self {
+        Self { id, doc_type }
+    }
+}
+
 /// RRF constant K. Empirically, K=60 works well for most use cases.
 const RRF_K: f32 = 60.0;
 
@@ -121,38 +134,36 @@ pub fn rrf_fuse(
         return Vec::new();
     }
 
-    let mut scores: HashMap<String, HybridScore> = HashMap::new();
-    let mut lexical_results: HashMap<String, SearchResult> = HashMap::new();
-    let mut doc_types: HashMap<String, String> = HashMap::new();
+    let mut scores: HashMap<DocKey, HybridScore> = HashMap::new();
+    let mut lexical_results: HashMap<DocKey, SearchResult> = HashMap::new();
 
     // Process lexical results (rank 0, 1, 2, ...)
     for (rank, hit) in lexical.iter().enumerate() {
-        let entry = scores.entry(hit.id.clone()).or_default();
+        let doc_type = hit.result_type.to_string();
+        let key = DocKey::new(hit.id.clone(), doc_type.clone());
+        let entry = scores.entry(key.clone()).or_default();
         entry.rrf += 1.0 / (RRF_K + rank as f32 + 1.0);
         entry.lexical_rank = Some(rank);
-        lexical_results.insert(hit.id.clone(), hit.clone());
-        doc_types.insert(hit.id.clone(), hit.result_type.to_string());
+        lexical_results.insert(key, hit.clone());
     }
 
     // Process semantic results (rank 0, 1, 2, ...)
     for (rank, hit) in semantic.iter().enumerate() {
-        let entry = scores.entry(hit.doc_id.clone()).or_default();
+        let key = DocKey::new(hit.doc_id.clone(), hit.doc_type.clone());
+        let entry = scores.entry(key).or_default();
         entry.rrf += 1.0 / (RRF_K + rank as f32 + 1.0);
         entry.semantic_rank = Some(rank);
-        doc_types
-            .entry(hit.doc_id.clone())
-            .or_insert_with(|| hit.doc_type.clone());
     }
 
     // Convert to fused hits
     let mut fused: Vec<FusedHit> = scores
         .into_iter()
-        .map(|(doc_id, score)| {
+        .map(|(key, score)| {
             let in_both = score.lexical_rank.is_some() && score.semantic_rank.is_some();
             FusedHit {
-                doc_type: doc_types.get(&doc_id).cloned().unwrap_or_default(),
-                lexical: lexical_results.remove(&doc_id),
-                doc_id,
+                doc_type: key.doc_type.clone(),
+                lexical: lexical_results.remove(&key),
+                doc_id: key.id,
                 score: score.rrf,
                 in_both,
             }
@@ -172,6 +183,7 @@ pub fn rrf_fuse(
             })
             // Level 3: Document ID (ascending) for determinism
             .then_with(|| a.doc_id.cmp(&b.doc_id))
+            .then_with(|| a.doc_type.cmp(&b.doc_type))
     });
 
     // Apply offset and limit
@@ -198,9 +210,9 @@ mod tests {
     use crate::model::SearchResultType;
     use chrono::Utc;
 
-    fn make_lexical_hit(id: &str, score: f32) -> SearchResult {
+    fn make_lexical_hit(id: &str, score: f32, result_type: SearchResultType) -> SearchResult {
         SearchResult {
-            result_type: SearchResultType::Tweet,
+            result_type,
             id: id.to_string(),
             text: format!("Text for {id}"),
             created_at: Utc::now(),
@@ -210,10 +222,10 @@ mod tests {
         }
     }
 
-    fn make_semantic_hit(doc_id: &str, score: f32) -> VectorSearchResult {
+    fn make_semantic_hit(doc_id: &str, score: f32, doc_type: &str) -> VectorSearchResult {
         VectorSearchResult {
             doc_id: doc_id.to_string(),
-            doc_type: "tweet".to_string(),
+            doc_type: doc_type.to_string(),
             score,
         }
     }
@@ -221,14 +233,14 @@ mod tests {
     #[test]
     fn test_rrf_basic() {
         let lexical = vec![
-            make_lexical_hit("A", 10.0),
-            make_lexical_hit("B", 8.0),
-            make_lexical_hit("C", 6.0),
+            make_lexical_hit("A", 10.0, SearchResultType::Tweet),
+            make_lexical_hit("B", 8.0, SearchResultType::Tweet),
+            make_lexical_hit("C", 6.0, SearchResultType::Tweet),
         ];
         let semantic = vec![
-            make_semantic_hit("A", 0.9),
-            make_semantic_hit("D", 0.8),
-            make_semantic_hit("B", 0.7),
+            make_semantic_hit("A", 0.9, "tweet"),
+            make_semantic_hit("D", 0.8, "tweet"),
+            make_semantic_hit("B", 0.7, "tweet"),
         ];
 
         let fused = rrf_fuse(&lexical, &semantic, 10, 0);
@@ -244,8 +256,8 @@ mod tests {
 
     #[test]
     fn test_rrf_scoring() {
-        let lexical = vec![make_lexical_hit("A", 10.0)]; // rank 0
-        let semantic = vec![make_semantic_hit("A", 0.9)]; // rank 0
+        let lexical = vec![make_lexical_hit("A", 10.0, SearchResultType::Tweet)]; // rank 0
+        let semantic = vec![make_semantic_hit("A", 0.9, "tweet")]; // rank 0
 
         let fused = rrf_fuse(&lexical, &semantic, 10, 0);
 
@@ -257,7 +269,10 @@ mod tests {
     #[test]
     fn test_rrf_single_source() {
         // Only lexical results
-        let lexical = vec![make_lexical_hit("A", 10.0), make_lexical_hit("B", 8.0)];
+        let lexical = vec![
+            make_lexical_hit("A", 10.0, SearchResultType::Tweet),
+            make_lexical_hit("B", 8.0, SearchResultType::Tweet),
+        ];
         let semantic: Vec<VectorSearchResult> = vec![];
 
         let fused = rrf_fuse(&lexical, &semantic, 10, 0);
@@ -274,9 +289,9 @@ mod tests {
     #[test]
     fn test_rrf_limit() {
         let lexical = vec![
-            make_lexical_hit("A", 10.0),
-            make_lexical_hit("B", 8.0),
-            make_lexical_hit("C", 6.0),
+            make_lexical_hit("A", 10.0, SearchResultType::Tweet),
+            make_lexical_hit("B", 8.0, SearchResultType::Tweet),
+            make_lexical_hit("C", 6.0, SearchResultType::Tweet),
         ];
         let semantic: Vec<VectorSearchResult> = vec![];
 
@@ -288,9 +303,9 @@ mod tests {
     #[test]
     fn test_rrf_offset() {
         let lexical = vec![
-            make_lexical_hit("A", 10.0),
-            make_lexical_hit("B", 8.0),
-            make_lexical_hit("C", 6.0),
+            make_lexical_hit("A", 10.0, SearchResultType::Tweet),
+            make_lexical_hit("B", 8.0, SearchResultType::Tweet),
+            make_lexical_hit("C", 6.0, SearchResultType::Tweet),
         ];
         let semantic: Vec<VectorSearchResult> = vec![];
 
@@ -312,8 +327,8 @@ mod tests {
 
     #[test]
     fn test_rrf_zero_limit() {
-        let lexical = vec![make_lexical_hit("A", 10.0)];
-        let semantic = vec![make_semantic_hit("A", 0.9)];
+        let lexical = vec![make_lexical_hit("A", 10.0, SearchResultType::Tweet)];
+        let semantic = vec![make_semantic_hit("A", 0.9, "tweet")];
 
         let fused = rrf_fuse(&lexical, &semantic, 0, 0);
 
@@ -323,9 +338,9 @@ mod tests {
     #[test]
     fn test_rrf_deterministic() {
         let lexical = vec![
-            make_lexical_hit("A", 5.0),
-            make_lexical_hit("B", 5.0),
-            make_lexical_hit("C", 5.0),
+            make_lexical_hit("A", 5.0, SearchResultType::Tweet),
+            make_lexical_hit("B", 5.0, SearchResultType::Tweet),
+            make_lexical_hit("C", 5.0, SearchResultType::Tweet),
         ];
         let semantic: Vec<VectorSearchResult> = vec![];
 
@@ -345,12 +360,12 @@ mod tests {
     fn test_rrf_both_bonus() {
         // Same RRF score, but "both" should rank higher
         let lexical = vec![
-            make_lexical_hit("solo_lex", 10.0), // rank 0
-            make_lexical_hit("both", 5.0),      // rank 1
+            make_lexical_hit("solo_lex", 10.0, SearchResultType::Tweet), // rank 0
+            make_lexical_hit("both", 5.0, SearchResultType::Tweet),      // rank 1
         ];
         let semantic = vec![
-            make_semantic_hit("solo_sem", 0.9), // rank 0
-            make_semantic_hit("both", 0.5),     // rank 1
+            make_semantic_hit("solo_sem", 0.9, "tweet"), // rank 0
+            make_semantic_hit("both", 0.5, "tweet"),     // rank 1
         ];
 
         let fused = rrf_fuse(&lexical, &semantic, 10, 0);
@@ -389,5 +404,21 @@ mod tests {
         assert_eq!(candidate_count(10, 0), 30); // 10 * 3
         assert_eq!(candidate_count(10, 5), 45); // (10 + 5) * 3
         assert_eq!(candidate_count(0, 0), 0);
+    }
+
+    #[test]
+    fn test_rrf_separates_types_with_same_id() {
+        let lexical = vec![
+            make_lexical_hit("42", 10.0, SearchResultType::Tweet),
+            make_lexical_hit("42", 9.0, SearchResultType::Like),
+        ];
+        let semantic = vec![make_semantic_hit("42", 0.8, "like")];
+
+        let fused = rrf_fuse(&lexical, &semantic, 10, 0);
+        let matching: Vec<_> = fused.iter().filter(|hit| hit.doc_id == "42").collect();
+
+        assert_eq!(matching.len(), 2);
+        assert!(matching.iter().any(|hit| hit.doc_type == "tweet"));
+        assert!(matching.iter().any(|hit| hit.doc_type == "like"));
     }
 }
