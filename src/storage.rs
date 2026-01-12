@@ -3031,6 +3031,96 @@ mod tests {
     }
 
     #[test]
+    fn test_get_all_counts_empty_db() {
+        let storage = Storage::open_memory().unwrap();
+
+        let counts = storage.get_all_counts().unwrap();
+        assert_eq!(counts.tweets_count, 0);
+        assert_eq!(counts.likes_count, 0);
+        assert_eq!(counts.dms_count, 0);
+        assert_eq!(counts.dm_conversations_count, 0);
+        assert_eq!(counts.followers_count, 0);
+        assert_eq!(counts.following_count, 0);
+        assert_eq!(counts.blocks_count, 0);
+        assert_eq!(counts.mutes_count, 0);
+        assert_eq!(counts.grok_messages_count, 0);
+        assert_eq!(counts.first_tweet_date, None);
+        assert_eq!(counts.last_tweet_date, None);
+    }
+
+    #[test]
+    fn test_get_all_counts_only_dms() {
+        let mut storage = Storage::open_memory().unwrap();
+
+        storage
+            .store_dm_conversations(&[DmConversation {
+                conversation_id: "conv1".to_string(),
+                messages: vec![create_test_dm("dm1", "Hello")],
+            }])
+            .unwrap();
+
+        let counts = storage.get_all_counts().unwrap();
+        assert_eq!(counts.tweets_count, 0);
+        assert_eq!(counts.likes_count, 0);
+        assert_eq!(counts.dms_count, 1);
+        assert_eq!(counts.dm_conversations_count, 1);
+        assert_eq!(counts.followers_count, 0);
+        assert_eq!(counts.following_count, 0);
+        assert_eq!(counts.blocks_count, 0);
+        assert_eq!(counts.mutes_count, 0);
+        assert_eq!(counts.grok_messages_count, 0);
+        assert_eq!(counts.first_tweet_date, None);
+        assert_eq!(counts.last_tweet_date, None);
+    }
+
+    #[test]
+    fn test_get_all_counts_only_tweets() {
+        let mut storage = Storage::open_memory().unwrap();
+
+        storage
+            .store_tweets(&[
+                create_test_tweet("1", "Only tweet one"),
+                create_test_tweet("2", "Only tweet two"),
+            ])
+            .unwrap();
+
+        let counts = storage.get_all_counts().unwrap();
+        assert_eq!(counts.tweets_count, 2);
+        assert_eq!(counts.likes_count, 0);
+        assert_eq!(counts.dms_count, 0);
+        assert_eq!(counts.dm_conversations_count, 0);
+        assert_eq!(counts.followers_count, 0);
+        assert_eq!(counts.following_count, 0);
+        assert_eq!(counts.blocks_count, 0);
+        assert_eq!(counts.mutes_count, 0);
+        assert_eq!(counts.grok_messages_count, 0);
+        assert!(counts.first_tweet_date.is_some());
+        assert!(counts.last_tweet_date.is_some());
+    }
+
+    #[test]
+    fn test_get_all_counts_unicode_text() {
+        let mut storage = Storage::open_memory().unwrap();
+
+        storage
+            .store_tweets(&[create_test_tweet("1", "Unicode test 🦀🚀")])
+            .unwrap();
+
+        let counts = storage.get_all_counts().unwrap();
+        assert_eq!(counts.tweets_count, 1);
+        assert_eq!(counts.likes_count, 0);
+        assert_eq!(counts.dms_count, 0);
+        assert_eq!(counts.dm_conversations_count, 0);
+        assert_eq!(counts.followers_count, 0);
+        assert_eq!(counts.following_count, 0);
+        assert_eq!(counts.blocks_count, 0);
+        assert_eq!(counts.mutes_count, 0);
+        assert_eq!(counts.grok_messages_count, 0);
+        assert!(counts.first_tweet_date.is_some());
+        assert!(counts.last_tweet_date.is_some());
+    }
+
+    #[test]
     fn test_get_all_counts() {
         let mut storage = Storage::open_memory().unwrap();
 

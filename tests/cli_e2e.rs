@@ -24,6 +24,7 @@
 use assert_cmd::Command;
 use assert_cmd::cargo::cargo_bin_cmd;
 use predicates::prelude::*;
+use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -139,6 +140,42 @@ fn parse_search_results(output: &std::process::Output) -> Vec<SearchResult> {
         String::from_utf8_lossy(&output.stderr)
     );
     serde_json::from_str(json_slice).expect(&parse_message)
+}
+
+fn parse_stats_json(output: &std::process::Output) -> Value {
+    assert!(
+        output.status.success(),
+        "xf stats failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let missing_json_message = format!(
+        "Expected JSON output, got: {stdout}\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json_start = stdout
+        .char_indices()
+        .find(|(_, ch)| *ch == '{' || *ch == '[')
+        .map(|(idx, _)| idx)
+        .expect(&missing_json_message);
+
+    let json_slice = &stdout[json_start..];
+    let parse_message = format!(
+        "Failed to parse JSON output\nstdout: {stdout}\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_str(json_slice).expect(&parse_message)
+}
+
+fn extract_stat_value(output: &str, label: &str) -> Option<String> {
+    output.lines().find_map(|line| {
+        let line = line.trim_end();
+        line.find(label).map(|idx| {
+            let value = line[idx + label.len()..].trim();
+            value.replace(',', "")
+        })
+    })
 }
 
 fn format_id_scores(results: &[SearchResult]) -> String {
@@ -863,6 +900,129 @@ fn test_stats_nonexistent_db() {
 
     test_log!(
         "test_stats_nonexistent_db completed in {:?}",
+        start.elapsed()
+    );
+}
+
+#[test]
+fn test_stats_text_output_counts() {
+    test_log!("Starting test_stats_text_output_counts");
+    let start = Instant::now();
+
+    let (_archive_temp, _output_dir, db_path, index_path) = create_indexed_archive();
+
+    let mut cmd = xf_cmd();
+    let output = cmd
+        .arg("stats")
+        .arg("--no-color")
+        .arg("--db")
+        .arg(&db_path)
+        .arg("--index")
+        .arg(&index_path)
+        .env("NO_COLOR", "1")
+        .output()
+        .expect("Failed to run stats command");
+
+    assert!(
+        output.status.success(),
+        "xf stats failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let expectations = [
+        ("Tweets:", "3"),
+        ("Likes:", "2"),
+        ("DM Conversations:", "0"),
+        ("DM Messages:", "0"),
+        ("Grok Messages:", "0"),
+        ("Followers:", "3"),
+        ("Following:", "2"),
+        ("Blocks:", "0"),
+        ("Mutes:", "0"),
+    ];
+
+    for (label, expected) in expectations {
+        let value = extract_stat_value(&stdout, label)
+            .unwrap_or_else(|| panic!("Missing stats line for label: {label}"));
+        assert_eq!(value, expected, "Mismatch for {label}");
+    }
+
+    test_log!(
+        "test_stats_text_output_counts completed in {:?}",
+        start.elapsed()
+    );
+}
+
+#[test]
+fn test_stats_json_output_counts() {
+    test_log!("Starting test_stats_json_output_counts");
+    let start = Instant::now();
+
+    let (_archive_temp, _output_dir, db_path, index_path) = create_indexed_archive();
+
+    let mut cmd = xf_cmd();
+    let output = cmd
+        .arg("stats")
+        .arg("--format")
+        .arg("json")
+        .arg("--db")
+        .arg(&db_path)
+        .arg("--index")
+        .arg(&index_path)
+        .output()
+        .expect("Failed to run stats command");
+
+    let json = parse_stats_json(&output);
+    assert_eq!(json["tweets_count"].as_i64(), Some(3));
+    assert_eq!(json["likes_count"].as_i64(), Some(2));
+    assert_eq!(json["dm_conversations_count"].as_i64(), Some(0));
+    assert_eq!(json["dms_count"].as_i64(), Some(0));
+    assert_eq!(json["grok_messages_count"].as_i64(), Some(0));
+    assert_eq!(json["followers_count"].as_i64(), Some(3));
+    assert_eq!(json["following_count"].as_i64(), Some(2));
+    assert_eq!(json["blocks_count"].as_i64(), Some(0));
+    assert_eq!(json["mutes_count"].as_i64(), Some(0));
+    assert!(json["first_tweet_date"].is_string());
+    assert!(json["last_tweet_date"].is_string());
+
+    test_log!(
+        "test_stats_json_output_counts completed in {:?}",
+        start.elapsed()
+    );
+}
+
+#[test]
+fn test_stats_json_detailed_output() {
+    test_log!("Starting test_stats_json_detailed_output");
+    let start = Instant::now();
+
+    let (_archive_temp, _output_dir, db_path, index_path) = create_indexed_archive();
+
+    let mut cmd = xf_cmd();
+    let output = cmd
+        .arg("stats")
+        .arg("--format")
+        .arg("json")
+        .arg("--detailed")
+        .arg("--db")
+        .arg(&db_path)
+        .arg("--index")
+        .arg(&index_path)
+        .output()
+        .expect("Failed to run stats command");
+
+    let json = parse_stats_json(&output);
+    let stats = json
+        .get("stats")
+        .and_then(|value| value.as_object())
+        .expect("Missing stats object in detailed output");
+    assert_eq!(stats.get("tweets_count").and_then(Value::as_i64), Some(3));
+    assert_eq!(stats.get("likes_count").and_then(Value::as_i64), Some(2));
+    assert!(json.get("detailed").and_then(Value::as_array).is_some());
+
+    test_log!(
+        "test_stats_json_detailed_output completed in {:?}",
         start.elapsed()
     );
 }
