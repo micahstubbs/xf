@@ -1,8 +1,88 @@
 # Performance Baseline
 
+## Latest Results (Release Build)
+
+Date: 2026-01-12T17:30:00Z (UTC)
+
+### Environment
+
+- Commit: `c5b1f1bd083f30b80f66ac7062bbbbd18a4fb392`
+- Binary: `./target/release/xf` (release build with LTO + opt-level=z)
+- OS: Linux threadripperje 6.17.0-8-generic x86_64
+- CPU: AMD Ryzen Threadripper PRO 5975WX 32-Cores (64 threads)
+- Memory: 499 GiB total
+- Rust: `rustc 1.94.0-nightly (fecb335cb 2026-01-07)`
+
+### Dataset
+
+- Corpus: `tests/fixtures/perf_corpus`
+- Total records: 17,500
+  - Tweets: 10,000
+  - Likes: 5,000
+  - DMs: 2,000 (100 conversations)
+  - Grok messages: 500
+- Total indexed: 17,000 documents
+
+### Latency Baselines (Release Build, 20 runs, warm cache)
+
+| Command | p50 | p95 | p99 |
+| --- | ---:| ---:| ---:|
+| `xf search "rust" --limit 100` (hybrid) | 69.5 ms | 74.6 ms | 74.6 ms |
+| `xf search "rust" --mode lexical --limit 100` | 9.9 ms | 11.2 ms | 11.2 ms |
+| `xf search "rust" --mode semantic --limit 100` | 72.3 ms | 75.0 ms | 75.0 ms |
+
+### Indexing Baseline (Release Build, 5 runs)
+
+| p50 | p95 | p99 |
+| ---:| ---:| ---:|
+| 819.4 ms | 834.8 ms | 834.8 ms |
+
+**Breakdown per data type (from indexing output):**
+- Tweets: ~290 ms
+- Likes: ~75 ms
+- DMs: ~60 ms
+- Grok: ~9 ms
+
+### Memory & CPU (Release Build)
+
+**Indexing (17,500 records):**
+- Elapsed time: 0.78s
+- User time: 1.38s (parallelization: 256% CPU utilization)
+- System time: 0.63s
+- Max RSS: 94,532 KB (~92.3 MB)
+
+**Hybrid Search:**
+- Elapsed time: 0.06s
+- User time: 0.03s
+- System time: 0.03s
+- Max RSS: 47,772 KB (~46.7 MB)
+
+### Performance vs Targets
+
+| Metric | Target | Actual | Status |
+| --- | --- | --- | --- |
+| Hybrid search latency | <50ms | 69.5ms (p50) | Above target |
+| Lexical search latency | <20ms | 9.9ms (p50) | **PASS** |
+| Semantic search latency | <30ms | 72.3ms (p50) | Above target |
+| Indexing 17.5K docs | <120s | 0.82s | **PASS** |
+| Memory (indexing) | <200MB | 92.3 MB | **PASS** |
+| Memory (search) | <200MB | 46.7 MB | **PASS** |
+
+### Notes
+
+- Hybrid and semantic search are still above the 50ms target. The bottleneck appears to be vector index loading from SQLite on each search. Further optimization with persistent mmap'd vector index may be needed.
+- Lexical search is very fast (sub-10ms) and meets targets.
+- Indexing is extremely fast (sub-1s) and well under the 120s target.
+- Memory usage is reasonable at ~92 MB for indexing and ~47 MB for search.
+- CPU parallelization during indexing is effective (256% CPU utilization on multi-core).
+
+---
+
+## Previous Results (Debug Build)
+
 Date: 2026-01-12T09:43:27Z (UTC)
 
-## Environment
+### Environment
 
 - Commit: `0895cd25a6466af52c1b620c83f3913c7e9e82e1`
 - Binary: `./target/debug/xf` (debug build)

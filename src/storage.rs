@@ -2381,6 +2381,8 @@ mod tests {
     use super::*;
     use crate::model::TweetUrl;
     use chrono::Duration;
+    use rusqlite::params;
+    use std::time::Instant;
 
     fn create_test_tweet(id: &str, text: &str) -> Tweet {
         Tweet {
@@ -3220,6 +3222,120 @@ mod tests {
         assert_eq!(counts.grok_messages_count, 1);
         assert_eq!(counts.first_tweet_date, Some(early_date));
         assert_eq!(counts.last_tweet_date, Some(late_date));
+    }
+
+    #[test]
+    #[ignore = "Large-count regression test; run manually for perf validation"]
+    fn test_get_all_counts_large_counts() {
+        let storage = Storage::open_memory().unwrap();
+
+        let tx = storage.conn.unchecked_transaction().unwrap();
+        let created_at = "2024-01-01T00:00:00Z";
+        for i in 0..120_000u32 {
+            let id = format!("tweet_{i}");
+            tx.execute(
+                "INSERT INTO tweets (id, created_at, full_text) VALUES (?1, ?2, ?3)",
+                params![id, created_at, "bulk tweet"],
+            )
+            .unwrap();
+        }
+        tx.commit().unwrap();
+
+        let counts = storage.get_all_counts().unwrap();
+        assert_eq!(counts.tweets_count, 120_000);
+        assert_eq!(counts.likes_count, 0);
+        assert_eq!(counts.dms_count, 0);
+        assert!(counts.first_tweet_date.is_some());
+        assert!(counts.last_tweet_date.is_some());
+    }
+
+    #[test]
+    #[ignore = "Perf comparison is environment-dependent; run manually"]
+    fn test_get_all_counts_perf_vs_individual_queries() {
+        let storage = Storage::open_memory().unwrap();
+
+        let tx = storage.conn.unchecked_transaction().unwrap();
+        let created_at = "2024-01-01T00:00:00Z";
+        for i in 0..50_000u32 {
+            let id = format!("tweet_{i}");
+            tx.execute(
+                "INSERT INTO tweets (id, created_at, full_text) VALUES (?1, ?2, ?3)",
+                params![id, created_at, "bulk tweet"],
+            )
+            .unwrap();
+        }
+        tx.commit().unwrap();
+
+        let iterations = 25;
+        let mut all_counts_total = Duration::zero();
+        for _ in 0..iterations {
+            let start = Instant::now();
+            let _ = storage.get_all_counts().unwrap();
+            all_counts_total += Duration::from_std(start.elapsed()).unwrap();
+        }
+
+        let mut individual_total = Duration::zero();
+        for _ in 0..iterations {
+            let start = Instant::now();
+            let _tweets: i64 = storage
+                .conn
+                .query_row("SELECT COUNT(*) FROM tweets", [], |row| row.get(0))
+                .unwrap();
+            let _likes: i64 = storage
+                .conn
+                .query_row("SELECT COUNT(*) FROM likes", [], |row| row.get(0))
+                .unwrap();
+            let _dms: i64 = storage
+                .conn
+                .query_row("SELECT COUNT(*) FROM direct_messages", [], |row| row.get(0))
+                .unwrap();
+            let _dm_conversations: i64 = storage
+                .conn
+                .query_row("SELECT COUNT(*) FROM dm_conversations", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            let _followers: i64 = storage
+                .conn
+                .query_row("SELECT COUNT(*) FROM followers", [], |row| row.get(0))
+                .unwrap();
+            let _following: i64 = storage
+                .conn
+                .query_row("SELECT COUNT(*) FROM following", [], |row| row.get(0))
+                .unwrap();
+            let _blocks: i64 = storage
+                .conn
+                .query_row("SELECT COUNT(*) FROM blocks", [], |row| row.get(0))
+                .unwrap();
+            let _mutes: i64 = storage
+                .conn
+                .query_row("SELECT COUNT(*) FROM mutes", [], |row| row.get(0))
+                .unwrap();
+            let _grok: i64 = storage
+                .conn
+                .query_row("SELECT COUNT(*) FROM grok_messages", [], |row| row.get(0))
+                .unwrap();
+            let _first: Option<String> = storage
+                .conn
+                .query_row("SELECT MIN(created_at) FROM tweets", [], |row| row.get(0))
+                .unwrap();
+            let _last: Option<String> = storage
+                .conn
+                .query_row("SELECT MAX(created_at) FROM tweets", [], |row| row.get(0))
+                .unwrap();
+            individual_total += Duration::from_std(start.elapsed()).unwrap();
+        }
+
+        let all_avg_us = all_counts_total.num_microseconds().unwrap_or(0) / i64::from(iterations);
+        let ind_avg_us = individual_total.num_microseconds().unwrap_or(0) / i64::from(iterations);
+
+        eprintln!(
+            "get_all_counts avg {all_avg_us}us vs individual {ind_avg_us}us (iters={iterations})"
+        );
+        assert!(
+            all_counts_total <= individual_total,
+            "Expected get_all_counts to be faster (avg {all_avg_us}us vs {ind_avg_us}us)",
+        );
     }
 
     #[test]
