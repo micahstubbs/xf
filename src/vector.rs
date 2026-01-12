@@ -60,7 +60,30 @@ fn parse_vector_index_header(bytes: &[u8]) -> Result<VectorIndexHeader> {
     })
 }
 
+/// Encode `doc_type` string to u8 for compact storage.
+/// Returns None for unknown types.
+fn encode_doc_type(doc_type: &str) -> Option<u8> {
+    match doc_type {
+        "tweet" => Some(0),
+        "like" => Some(1),
+        "dm" => Some(2),
+        "grok" => Some(3),
+        _ => None,
+    }
+}
+
+/// Decode `doc_type` u8 to string.
 #[allow(dead_code)]
+const fn decode_doc_type(value: u8) -> Option<&'static str> {
+    match value {
+        0 => Some("tweet"),
+        1 => Some("like"),
+        2 => Some("dm"),
+        3 => Some("grok"),
+        _ => None,
+    }
+}
+
 fn validate_doc_type(value: u8) -> Result<()> {
     ensure!(value <= 3, "invalid doc_type encoding");
     Ok(())
@@ -138,6 +161,146 @@ fn validate_vector_index_layout(bytes: &[u8]) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Default filename for the vector index file.
+pub const VECTOR_INDEX_FILENAME: &str = "vector.idx";
+
+/// Write a vector index file from embeddings.
+///
+/// This creates a compact binary file that can be memory-mapped for fast
+/// semantic search without scanning `SQLite`.
+///
+/// # Arguments
+///
+/// * `index_path` - Directory where the vector index file will be written.
+/// * `storage` - Storage instance to load embeddings from.
+///
+/// # File Format
+///
+/// The file has the following structure:
+/// - Header (32 bytes): magic, version, dimension, record count, offsets pointer
+/// - Offset table: array of u64 offsets to each record
+/// - Records: `doc_type` (u8), reserved (u8), `doc_id_len` (u16), `doc_id`, embedding (F16)
+///
+/// Records are sorted by (`doc_type`, `doc_id`) for deterministic ordering.
+///
+/// # Errors
+///
+/// Returns an error if loading embeddings fails or if file I/O fails.
+pub fn write_vector_index(
+    index_path: &std::path::Path,
+    storage: &Storage,
+) -> Result<WriteVectorIndexStats> {
+    use std::fs::File;
+    use std::io::{BufWriter, Write};
+
+    // Load all embeddings from storage as raw F16 bytes
+    let mut embeddings = storage.load_all_embeddings_raw()?;
+    if embeddings.is_empty() {
+        return Ok(WriteVectorIndexStats {
+            record_count: 0,
+            file_size: 0,
+        });
+    }
+
+    // Sort deterministically: by doc_type code, then by doc_id
+    embeddings.sort_by(|a, b| {
+        let type_a = encode_doc_type(&a.1).unwrap_or(255);
+        let type_b = encode_doc_type(&b.1).unwrap_or(255);
+        type_a.cmp(&type_b).then_with(|| a.0.cmp(&b.0))
+    });
+
+    // Determine dimension from first embedding (bytes / 2 since F16)
+    let embedding_bytes = embeddings[0].2.len();
+    let dimension = embedding_bytes / 2; // F16 = 2 bytes per float
+    let record_count = embeddings.len() as u64;
+
+    // Calculate layout
+    let offsets_start = VECTOR_INDEX_HEADER_LEN as u64;
+    let offsets_bytes = record_count * 8;
+    let records_start = offsets_start + offsets_bytes;
+
+    // Build offset table and record bytes
+    let mut offsets: Vec<u64> = Vec::with_capacity(embeddings.len());
+    let mut record_data: Vec<u8> = Vec::new();
+    let mut current_offset = records_start;
+
+    for (doc_id, doc_type, embedding_f16) in &embeddings {
+        offsets.push(current_offset);
+
+        let doc_type_code = encode_doc_type(doc_type).unwrap_or(0);
+        let doc_id_bytes = doc_id.as_bytes();
+        let doc_id_len = u16::try_from(doc_id_bytes.len())
+            .map_err(|_| anyhow::anyhow!("doc_id exceeds maximum length of 65535 bytes"))?;
+
+        // Record: [doc_type(1), reserved(1), doc_id_len(2), doc_id, embedding]
+        record_data.push(doc_type_code);
+        record_data.push(0); // reserved
+        record_data.extend_from_slice(&doc_id_len.to_le_bytes());
+        record_data.extend_from_slice(doc_id_bytes);
+
+        // Embedding is already F16 bytes from load_all_embeddings_raw
+        record_data.extend_from_slice(embedding_f16);
+
+        let record_len = 4 + doc_id_bytes.len() + embedding_bytes;
+        current_offset += record_len as u64;
+    }
+
+    // Write to temp file, then rename atomically
+    let final_path = index_path.join(VECTOR_INDEX_FILENAME);
+    let temp_path = index_path.join(format!("{VECTOR_INDEX_FILENAME}.tmp"));
+
+    let file = File::create(&temp_path)?;
+    let mut writer = BufWriter::new(file);
+
+    // Write header (32 bytes)
+    let dimension_u32 = u32::try_from(dimension)
+        .map_err(|_| anyhow::anyhow!("embedding dimension exceeds u32 maximum"))?;
+    writer.write_all(&VECTOR_INDEX_MAGIC)?;
+    writer.write_all(&VECTOR_INDEX_VERSION.to_le_bytes())?;
+    writer.write_all(&[VECTOR_INDEX_DOC_TYPE_ENCODING])?; // doc_type_encoding
+    writer.write_all(&[0u8])?; // padding
+    writer.write_all(&dimension_u32.to_le_bytes())?;
+    writer.write_all(&record_count.to_le_bytes())?;
+    writer.write_all(&offsets_start.to_le_bytes())?;
+    writer.write_all(&[0u8; 4])?; // reserved
+
+    // Write offset table
+    for offset in &offsets {
+        writer.write_all(&offset.to_le_bytes())?;
+    }
+
+    // Write record data
+    writer.write_all(&record_data)?;
+
+    // Flush and sync
+    writer.flush()?;
+    let file = writer.into_inner()?;
+    file.sync_all()?;
+    drop(file);
+
+    // Get file size before rename
+    let file_size = std::fs::metadata(&temp_path)?.len();
+
+    // Atomic rename
+    std::fs::rename(&temp_path, &final_path)?;
+
+    #[allow(clippy::cast_possible_truncation)]
+    Ok(WriteVectorIndexStats {
+        // Safe: record_count comes from embeddings.len() which is already usize
+        record_count: record_count as usize,
+        file_size,
+    })
+}
+
+/// Statistics from writing a vector index file.
+#[derive(Debug, Clone, Copy)]
+pub struct WriteVectorIndexStats {
+    /// Number of embedding records written.
+    pub record_count: usize,
+    /// Total file size in bytes.
+    pub file_size: u64,
 }
 
 /// Result of a vector search.
@@ -728,5 +891,181 @@ mod tests {
         let wrong_query = vec![1.0, 0.0, 0.0, 0.0, 0.0]; // 5 dimensions
         let results = index.search_top_k(&wrong_query, 10, None);
         assert!(results.is_empty());
+    }
+
+    // Tests for doc_type encoding
+    #[test]
+    fn test_encode_doc_type() {
+        assert_eq!(encode_doc_type("tweet"), Some(0));
+        assert_eq!(encode_doc_type("like"), Some(1));
+        assert_eq!(encode_doc_type("dm"), Some(2));
+        assert_eq!(encode_doc_type("grok"), Some(3));
+        assert_eq!(encode_doc_type("unknown"), None);
+    }
+
+    #[test]
+    fn test_decode_doc_type() {
+        assert_eq!(decode_doc_type(0), Some("tweet"));
+        assert_eq!(decode_doc_type(1), Some("like"));
+        assert_eq!(decode_doc_type(2), Some("dm"));
+        assert_eq!(decode_doc_type(3), Some("grok"));
+        assert_eq!(decode_doc_type(4), None);
+    }
+
+    #[test]
+    fn test_doc_type_roundtrip() {
+        for doc_type in &["tweet", "like", "dm", "grok"] {
+            let encoded = encode_doc_type(doc_type).unwrap();
+            let decoded = decode_doc_type(encoded).unwrap();
+            assert_eq!(*doc_type, decoded);
+        }
+    }
+
+    // Tests for write_vector_index
+    #[test]
+    #[allow(clippy::cast_precision_loss)]
+    fn test_write_vector_index_empty() {
+        let storage = Storage::open_memory().unwrap();
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        let stats = write_vector_index(temp_dir.path(), &storage).unwrap();
+        assert_eq!(stats.record_count, 0);
+        assert_eq!(stats.file_size, 0);
+
+        // No file should be created for empty index
+        assert!(!temp_dir.path().join(VECTOR_INDEX_FILENAME).exists());
+    }
+
+    #[test]
+    #[allow(clippy::cast_precision_loss)]
+    fn test_write_vector_index_single_embedding() {
+        let storage = Storage::open_memory().unwrap();
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        // Store a single embedding
+        let embedding: Vec<f32> = (0..384).map(|i| i as f32 / 384.0).collect();
+        storage
+            .store_embedding("doc1", "tweet", &embedding, None)
+            .unwrap();
+
+        let stats = write_vector_index(temp_dir.path(), &storage).unwrap();
+        assert_eq!(stats.record_count, 1);
+        assert!(stats.file_size > 0);
+
+        // File should exist and pass validation
+        let file_path = temp_dir.path().join(VECTOR_INDEX_FILENAME);
+        assert!(file_path.exists());
+
+        let bytes = std::fs::read(&file_path).unwrap();
+        validate_vector_index_layout(&bytes).unwrap();
+    }
+
+    #[test]
+    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+    fn test_write_vector_index_deterministic_ordering() {
+        let storage = Storage::open_memory().unwrap();
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        // Store embeddings in non-sorted order
+        let embedding: Vec<f32> = (0..384).map(|i| i as f32 / 384.0).collect();
+        storage
+            .store_embedding("z_doc", "dm", &embedding, None)
+            .unwrap();
+        storage
+            .store_embedding("a_doc", "tweet", &embedding, None)
+            .unwrap();
+        storage
+            .store_embedding("m_doc", "like", &embedding, None)
+            .unwrap();
+
+        write_vector_index(temp_dir.path(), &storage).unwrap();
+
+        let file_path = temp_dir.path().join(VECTOR_INDEX_FILENAME);
+        let bytes = std::fs::read(&file_path).unwrap();
+
+        // Parse and verify ordering: should be sorted by doc_type (tweet=0, like=1, dm=2)
+        // then by doc_id within each type
+        let header = parse_vector_index_header(&bytes).unwrap();
+        assert_eq!(header.record_count, 3);
+
+        // Read first record's doc_type (should be tweet = 0)
+        let first_offset = u64::from_le_bytes(
+            bytes[VECTOR_INDEX_HEADER_LEN..VECTOR_INDEX_HEADER_LEN + 8]
+                .try_into()
+                .unwrap(),
+        ) as usize;
+        assert_eq!(bytes[first_offset], 0); // tweet
+
+        // Second record should be like = 1
+        let second_offset = u64::from_le_bytes(
+            bytes[VECTOR_INDEX_HEADER_LEN + 8..VECTOR_INDEX_HEADER_LEN + 16]
+                .try_into()
+                .unwrap(),
+        ) as usize;
+        assert_eq!(bytes[second_offset], 1); // like
+
+        // Third record should be dm = 2
+        let third_offset = u64::from_le_bytes(
+            bytes[VECTOR_INDEX_HEADER_LEN + 16..VECTOR_INDEX_HEADER_LEN + 24]
+                .try_into()
+                .unwrap(),
+        ) as usize;
+        assert_eq!(bytes[third_offset], 2); // dm
+    }
+
+    #[test]
+    #[allow(clippy::cast_precision_loss)]
+    fn test_write_vector_index_multiple_runs_identical() {
+        let storage = Storage::open_memory().unwrap();
+        let temp_dir1 = tempfile::tempdir().unwrap();
+        let temp_dir2 = tempfile::tempdir().unwrap();
+
+        // Store some embeddings
+        let embedding: Vec<f32> = (0..384).map(|i| i as f32 / 384.0).collect();
+        storage
+            .store_embedding("doc1", "tweet", &embedding, None)
+            .unwrap();
+        storage
+            .store_embedding("doc2", "like", &embedding, None)
+            .unwrap();
+
+        // Write twice
+        write_vector_index(temp_dir1.path(), &storage).unwrap();
+        write_vector_index(temp_dir2.path(), &storage).unwrap();
+
+        // Files should be byte-for-byte identical
+        let bytes1 = std::fs::read(temp_dir1.path().join(VECTOR_INDEX_FILENAME)).unwrap();
+        let bytes2 = std::fs::read(temp_dir2.path().join(VECTOR_INDEX_FILENAME)).unwrap();
+        assert_eq!(
+            bytes1, bytes2,
+            "Multiple writes should produce identical output"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::cast_precision_loss)]
+    fn test_write_vector_index_header_values() {
+        let storage = Storage::open_memory().unwrap();
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        // Store embeddings with dimension 384
+        let embedding: Vec<f32> = (0..384).map(|i| i as f32 / 384.0).collect();
+        storage
+            .store_embedding("doc1", "tweet", &embedding, None)
+            .unwrap();
+        storage
+            .store_embedding("doc2", "tweet", &embedding, None)
+            .unwrap();
+
+        write_vector_index(temp_dir.path(), &storage).unwrap();
+
+        let bytes = std::fs::read(temp_dir.path().join(VECTOR_INDEX_FILENAME)).unwrap();
+        let header = parse_vector_index_header(&bytes).unwrap();
+
+        assert_eq!(header.version, VECTOR_INDEX_VERSION);
+        assert_eq!(header.doc_type_encoding, VECTOR_INDEX_DOC_TYPE_ENCODING);
+        assert_eq!(header.dimension, 384);
+        assert_eq!(header.record_count, 2);
+        assert_eq!(header.offsets_start, VECTOR_INDEX_HEADER_LEN as u64);
     }
 }

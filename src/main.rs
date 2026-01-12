@@ -29,7 +29,7 @@ use xf::hybrid::{self, SearchMode};
 use xf::repl;
 use xf::search;
 use xf::stats_analytics::{self, ContentStats, EngagementStats, TemporalStats};
-use xf::vector::VectorIndex;
+use xf::vector::{VectorIndex, write_vector_index};
 use xf::{
     ArchiveParser, ArchiveStats, CONTENT_DIVIDER_WIDTH, Cli, Commands, DataType, ExportFormat,
     ExportTarget, HEADER_DIVIDER_WIDTH, ListTarget, OutputFormat, SearchEngine, SearchResult,
@@ -1046,6 +1046,17 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
     // Generate embeddings for semantic search
     xf::generate_embeddings(&storage, !cli.quiet)?;
 
+    // Write vector index file for fast semantic search
+    let vector_stats = write_vector_index(&index_path, &storage)?;
+    if !cli.quiet && vector_stats.record_count > 0 {
+        println!(
+            "  {} Vector index written ({} records, {})",
+            "✓".green(),
+            format_number_usize(vector_stats.record_count),
+            format_bytes(vector_stats.file_size)
+        );
+    }
+
     let total_elapsed = format_duration(index_start.elapsed());
 
     println!();
@@ -1900,7 +1911,21 @@ fn cmd_stats(cli: &Cli, args: &cli::StatsArgs) -> Result<()> {
     }
 
     let storage = Storage::open(&db_path)?;
-    let stats = storage.get_stats()?;
+    let counts = storage.get_all_counts()?;
+    let stats = ArchiveStats {
+        tweets_count: counts.tweets_count,
+        likes_count: counts.likes_count,
+        dms_count: counts.dms_count,
+        dm_conversations_count: counts.dm_conversations_count,
+        followers_count: counts.followers_count,
+        following_count: counts.following_count,
+        blocks_count: counts.blocks_count,
+        mutes_count: counts.mutes_count,
+        grok_messages_count: counts.grok_messages_count,
+        first_tweet_date: counts.first_tweet_date,
+        last_tweet_date: counts.last_tweet_date,
+        index_built_at: Utc::now(),
+    };
 
     // --detailed shows all analytics (temporal + engagement + content)
     let show_temporal = args.temporal || args.detailed;

@@ -2257,6 +2257,30 @@ impl Storage {
         Ok(embeddings)
     }
 
+    /// Load all embeddings in raw F16 byte format for vector index writing.
+    ///
+    /// Returns tuples of (`doc_id`, `doc_type`, raw F16 bytes).
+    /// This preserves exact values without float conversion drift.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database query fails.
+    pub fn load_all_embeddings_raw(&self) -> Result<Vec<(String, String, Vec<u8>)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT doc_id, doc_type, embedding FROM embeddings")?;
+
+        let rows = stmt.query_map([], |row| {
+            let doc_id: String = row.get(0)?;
+            let doc_type: String = row.get(1)?;
+            let bytes: Vec<u8> = row.get(2)?;
+            Ok((doc_id, doc_type, bytes))
+        })?;
+
+        let embeddings: Vec<_> = rows.filter_map(std::result::Result::ok).collect();
+        Ok(embeddings)
+    }
+
     /// Load embeddings filtered by document type.
     ///
     /// # Errors
