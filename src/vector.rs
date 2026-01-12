@@ -816,6 +816,7 @@ impl VectorIndex {
     /// Uses rayon to parallelize the search across multiple CPU cores.
     /// Falls back to sequential search for small indices.
     #[cfg(feature = "parallel-search")]
+    #[must_use]
     pub fn search_top_k_parallel(
         &self,
         query: &[f32],

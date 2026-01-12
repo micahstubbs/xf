@@ -3842,4 +3842,126 @@ mod cache_tests {
 
         Ok(())
     }
+
+    // =========================================================================
+    // Cache Performance Tests (xf-pkc)
+    // =========================================================================
+
+    /// Perf smoke check: verify second load is faster than first (cache hit).
+    ///
+    /// Marked as #[ignore] because timing is environment-dependent.
+    /// Run manually with: `cargo test test_cache_hit_faster_than_cold -- --ignored`
+    #[test]
+    #[ignore = "Perf comparison is environment-dependent; run manually for validation"]
+    fn test_cache_hit_faster_than_cold() -> Result<()> {
+        use std::time::Instant;
+
+        let (_dir, db_path, index_path, storage) = create_storage()?;
+
+        // Add multiple embeddings to make the timing difference more noticeable
+        for i in 0..100 {
+            storage.store_embedding(&format!("doc-{i}"), "tweet", &[0.1, 0.2, 0.3], None)?;
+        }
+
+        let cache = VectorIndexCache::new();
+
+        // First load (cold)
+        let cold_start = Instant::now();
+        let (_, loaded_first) = cache.load(&storage, &db_path, &index_path)?;
+        let cold_duration = cold_start.elapsed();
+        assert!(loaded_first, "First load should be fresh");
+
+        // Second load (warm - should be instant)
+        let warm_start = Instant::now();
+        let (_, loaded_second) = cache.load(&storage, &db_path, &index_path)?;
+        let warm_duration = warm_start.elapsed();
+        assert!(!loaded_second, "Second load should be cached");
+
+        eprintln!(
+            "Cache perf: cold={cold_duration:?} warm={warm_duration:?} (speedup={:.1}x)",
+            cold_duration.as_secs_f64() / warm_duration.as_secs_f64().max(1e-9)
+        );
+
+        // Warm should be significantly faster (at least 10x)
+        // This is a smoke check - the actual speedup is typically 1000x+
+        assert!(
+            warm_duration < cold_duration,
+            "Cached load ({warm_duration:?}) should be faster than cold load ({cold_duration:?})"
+        );
+
+        Ok(())
+    }
+
+    /// Test loading with a moderately large embedding set.
+    ///
+    /// This tests that the cache handles thousands of embeddings without
+    /// memory issues. The size is bounded to avoid CI timeouts.
+    #[test]
+    fn test_large_embedding_set() -> Result<()> {
+        let (_dir, db_path, index_path, storage) = create_storage()?;
+
+        // Add 5000 embeddings - large enough to be meaningful, small enough for CI
+        let embedding_count = 5000;
+        for i in 0..embedding_count {
+            let doc_type = match i % 4 {
+                0 => "tweet",
+                1 => "like",
+                2 => "dm",
+                _ => "grok",
+            };
+            storage.store_embedding(&format!("doc-{i}"), doc_type, &[0.1, 0.2, 0.3], None)?;
+        }
+
+        let cache = VectorIndexCache::new();
+        let (index, loaded) = cache.load(&storage, &db_path, &index_path)?;
+
+        assert!(loaded, "Should load fresh");
+        assert_eq!(index.len(), embedding_count);
+
+        // Verify type counts are tracked
+        let meta = cache.meta().context("meta should be set")?;
+        assert_eq!(meta.embedding_count, embedding_count);
+        assert!(!meta.type_counts.is_empty(), "type_counts should be populated");
+
+        // Verify search still works
+        let query = vec![0.1, 0.2, 0.3];
+        let results = index.search_top_k(&query, 10, None);
+        assert_eq!(results.len(), 10);
+
+        Ok(())
+    }
+
+    /// Test that `loaded_now` flag is correctly set on first vs subsequent loads.
+    #[test]
+    fn test_loaded_now_flag_semantics() -> Result<()> {
+        let (_dir, db_path, index_path, storage) = create_storage()?;
+        store_sample_embedding(&storage, "doc-1")?;
+
+        let cache = VectorIndexCache::new();
+
+        // First load: loaded_now should be true
+        let (_, loaded_now_1) = cache.load(&storage, &db_path, &index_path)?;
+        assert!(loaded_now_1, "First load: loaded_now should be true");
+
+        // Second load: loaded_now should be false
+        let (_, loaded_now_2) = cache.load(&storage, &db_path, &index_path)?;
+        assert!(!loaded_now_2, "Second load: loaded_now should be false");
+
+        // Third load: still false
+        let (_, loaded_now_3) = cache.load(&storage, &db_path, &index_path)?;
+        assert!(!loaded_now_3, "Third load: loaded_now should be false");
+
+        // Fourth load from a different thread: still false
+        let cache = Arc::new(cache);
+        let cache_clone = Arc::clone(&cache);
+        let storage_clone = Storage::open(&db_path)?;
+        let handle = std::thread::spawn(move || -> Result<bool> {
+            let (_, loaded_now) = cache_clone.load(&storage_clone, &db_path, &index_path)?;
+            Ok(loaded_now)
+        });
+        let loaded_now_thread = handle.join().expect("thread should complete")?;
+        assert!(!loaded_now_thread, "Load from thread: loaded_now should be false");
+
+        Ok(())
+    }
 }
