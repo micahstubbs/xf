@@ -735,6 +735,7 @@ fn bench_rrf_fuse_only(c: &mut Criterion) {
             reset_alloc_counts();
             let fused = rrf_fuse(&lexical, &semantic, 50, 0);
             black_box(&fused);
+            drop(fused);
             let (allocs, alloc_bytes, deallocs, dealloc_bytes) = alloc_counts();
             eprintln!(
                 "rrf_fuse allocs size={size}: allocs={allocs} bytes={alloc_bytes} deallocs={deallocs} dealloc_bytes={dealloc_bytes}"
