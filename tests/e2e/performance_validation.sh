@@ -257,14 +257,14 @@ if [ -f "$DB_PATH" ]; then
 fi
 
 # Stats tests
-run_cmd "stats_text" env NO_COLOR=1 XF_DB="$DB_PATH" XF_INDEX="$INDEX_PATH" "$XF_BIN" stats
+run_cmd "stats_text" env NO_COLOR=1 XF_DB="$DB_PATH" XF_INDEX="$INDEX_PATH" "$XF_BIN" --quiet stats
 if [ $LAST_STATUS -ne 0 ]; then
   fail "stats command failed"
 else
   pass "stats command succeeded"
 fi
 
-run_cmd "stats_json" env NO_COLOR=1 XF_DB="$DB_PATH" XF_INDEX="$INDEX_PATH" "$XF_BIN" stats --format json
+run_cmd "stats_json" env NO_COLOR=1 XF_DB="$DB_PATH" XF_INDEX="$INDEX_PATH" "$XF_BIN" --quiet stats --format json
 if [ $LAST_STATUS -ne 0 ]; then
   fail "stats --format json failed"
 else
@@ -278,7 +278,7 @@ if command -v jq >/dev/null 2>&1; then
   fi
 fi
 
-run_cmd "stats_detailed_json" env NO_COLOR=1 XF_DB="$DB_PATH" XF_INDEX="$INDEX_PATH" "$XF_BIN" stats --detailed --format json
+run_cmd "stats_detailed_json" env NO_COLOR=1 XF_DB="$DB_PATH" XF_INDEX="$INDEX_PATH" "$XF_BIN" --quiet stats --detailed --format json
 if [ $LAST_STATUS -ne 0 ]; then
   fail "stats --detailed --format json failed"
 else
@@ -286,7 +286,7 @@ else
 fi
 
 # Search tests
-run_cmd "search_hybrid" env NO_COLOR=1 XF_DB="$DB_PATH" XF_INDEX="$INDEX_PATH" "$XF_BIN" search "rust" --limit 100 --format json
+run_cmd "search_hybrid" env NO_COLOR=1 XF_DB="$DB_PATH" XF_INDEX="$INDEX_PATH" "$XF_BIN" --quiet search "rust" --limit 100 --format json
 if [ $LAST_STATUS -ne 0 ]; then
   fail "hybrid search failed"
 else
@@ -296,7 +296,7 @@ if command -v jq >/dev/null 2>&1; then
   log "Hybrid result count: $(jq 'length' "$LAST_STDOUT" 2>/dev/null || echo 'n/a')"
 fi
 
-run_cmd "search_lexical" env NO_COLOR=1 XF_DB="$DB_PATH" XF_INDEX="$INDEX_PATH" "$XF_BIN" search "machine" --mode lexical --limit 100 --format json
+run_cmd "search_lexical" env NO_COLOR=1 XF_DB="$DB_PATH" XF_INDEX="$INDEX_PATH" "$XF_BIN" --quiet search "machine" --mode lexical --limit 100 --format json
 if [ $LAST_STATUS -ne 0 ]; then
   fail "lexical search failed"
 else
@@ -306,7 +306,7 @@ if command -v jq >/dev/null 2>&1; then
   log "Lexical result count: $(jq 'length' "$LAST_STDOUT" 2>/dev/null || echo 'n/a')"
 fi
 
-run_cmd "search_semantic" env NO_COLOR=1 XF_DB="$DB_PATH" XF_INDEX="$INDEX_PATH" "$XF_BIN" search "stress" --mode semantic --limit 100 --format json
+run_cmd "search_semantic" env NO_COLOR=1 XF_DB="$DB_PATH" XF_INDEX="$INDEX_PATH" "$XF_BIN" --quiet search "stress" --mode semantic --limit 100 --format json
 if [ $LAST_STATUS -ne 0 ]; then
   fail "semantic search failed"
 else
@@ -316,31 +316,35 @@ if command -v jq >/dev/null 2>&1; then
   log "Semantic result count: $(jq 'length' "$LAST_STDOUT" 2>/dev/null || echo 'n/a')"
 fi
 
-run_cmd "search_hybrid_golden" env NO_COLOR=1 XF_DB="$DB_PATH" XF_INDEX="$INDEX_PATH" "$XF_BIN" search "rust" --limit 20 --format json
-if [ $LAST_STATUS -ne 0 ]; then
-  fail "hybrid search (golden) failed"
+if [ "${SKIP_GOLDEN:-}" = "1" ]; then
+  log "Skipping golden output checks (SKIP_GOLDEN=1)"
 else
-  pass "hybrid search (golden) succeeded"
-fi
+  run_cmd "search_hybrid_golden" env NO_COLOR=1 XF_DB="$DB_PATH" XF_INDEX="$INDEX_PATH" "$XF_BIN" --quiet search "rust" --limit 20 --format json
+  if [ $LAST_STATUS -ne 0 ]; then
+    fail "hybrid search (golden) failed"
+  else
+    pass "hybrid search (golden) succeeded"
+  fi
 
-run_cmd "search_lexical_golden" env NO_COLOR=1 XF_DB="$DB_PATH" XF_INDEX="$INDEX_PATH" "$XF_BIN" search "machine" --mode lexical --limit 20 --format json
-if [ $LAST_STATUS -ne 0 ]; then
-  fail "lexical search (golden) failed"
-else
-  pass "lexical search (golden) succeeded"
-fi
+  run_cmd "search_lexical_golden" env NO_COLOR=1 XF_DB="$DB_PATH" XF_INDEX="$INDEX_PATH" "$XF_BIN" --quiet search "machine" --mode lexical --limit 20 --format json
+  if [ $LAST_STATUS -ne 0 ]; then
+    fail "lexical search (golden) failed"
+  else
+    pass "lexical search (golden) succeeded"
+  fi
 
-# Isomorphism checks
-GOLDEN_DIR="$ROOT_DIR/tests/fixtures/golden_outputs"
-compare_json "search_hybrid_rust" "$WORK_DIR/search_hybrid_golden.out" "$GOLDEN_DIR/search_hybrid_rust.json"
-compare_json "search_lexical_machine" "$WORK_DIR/search_lexical_golden.out" "$GOLDEN_DIR/search_lexical_machine.json"
-compare_text "stats_basic" "$WORK_DIR/stats_text.out" "$GOLDEN_DIR/stats_basic.txt"
-compare_json "stats_detailed" "$WORK_DIR/stats_detailed_json.out" "$GOLDEN_DIR/stats_detailed.json"
+  # Isomorphism checks
+  GOLDEN_DIR="$ROOT_DIR/tests/fixtures/golden_outputs"
+  compare_json "search_hybrid_rust" "$WORK_DIR/search_hybrid_golden.out" "$GOLDEN_DIR/search_hybrid_rust.json"
+  compare_json "search_lexical_machine" "$WORK_DIR/search_lexical_golden.out" "$GOLDEN_DIR/search_lexical_machine.json"
+  compare_text "stats_basic" "$WORK_DIR/stats_text.out" "$GOLDEN_DIR/stats_basic.txt"
+  compare_json "stats_detailed" "$WORK_DIR/stats_detailed_json.out" "$GOLDEN_DIR/stats_detailed.json"
+fi
 
 # Cache effectiveness check (warm vs cold)
-run_cmd "cache_cold" env NO_COLOR=1 XF_DB="$DB_PATH" XF_INDEX="$INDEX_PATH" "$XF_BIN" search "rust" --limit 100 --format json
+run_cmd "cache_cold" env NO_COLOR=1 XF_DB="$DB_PATH" XF_INDEX="$INDEX_PATH" "$XF_BIN" --quiet search "rust" --limit 100 --format json
 cold_duration=$LAST_DURATION
-run_cmd "cache_warm" env NO_COLOR=1 XF_DB="$DB_PATH" XF_INDEX="$INDEX_PATH" "$XF_BIN" search "rust" --limit 100 --format json
+run_cmd "cache_warm" env NO_COLOR=1 XF_DB="$DB_PATH" XF_INDEX="$INDEX_PATH" "$XF_BIN" --quiet search "rust" --limit 100 --format json
 warm_duration=$LAST_DURATION
 if [ "$warm_duration" -lt "$cold_duration" ]; then
   pass "cache warm search faster (${cold_duration}ms -> ${warm_duration}ms)"
@@ -351,12 +355,26 @@ fi
 # Memory usage
 if [ -x /usr/bin/time ]; then
   TIME_STDERR="$WORK_DIR/time_search.err"
-  if /usr/bin/time -v env NO_COLOR=1 XF_DB="$DB_PATH" XF_INDEX="$INDEX_PATH" "$XF_BIN" search "rust" --limit 100 --format json >"$WORK_DIR/time_search.out" 2>"$TIME_STDERR"; then
-    log "Memory/time report:"
+  if /usr/bin/time -v env NO_COLOR=1 XF_DB="$DB_PATH" XF_INDEX="$INDEX_PATH" "$XF_BIN" --quiet search "rust" --limit 100 --format json >"$WORK_DIR/time_search.out" 2>"$TIME_STDERR"; then
+    log "Memory/time report (hybrid, no filter):"
     log "$(grep -E 'Elapsed|User time|System time|Maximum resident set size' "$TIME_STDERR" || true)"
-    pass "memory usage captured"
+    base_rss_kb=$(awk -F: '/Maximum resident set size/ {gsub(/^[ \t]+/, "", $2); print $2}' "$TIME_STDERR")
   else
     fail "memory usage capture failed"
+  fi
+
+  TIME_STDERR_FILTER="$WORK_DIR/time_search_filtered.err"
+  if /usr/bin/time -v env NO_COLOR=1 XF_DB="$DB_PATH" XF_INDEX="$INDEX_PATH" "$XF_BIN" --quiet search "rust" --limit 100 --types dm --format json >"$WORK_DIR/time_search_filtered.out" 2>"$TIME_STDERR_FILTER"; then
+    log "Memory/time report (hybrid, --types dm):"
+    log "$(grep -E 'Elapsed|User time|System time|Maximum resident set size' "$TIME_STDERR_FILTER" || true)"
+    filtered_rss_kb=$(awk -F: '/Maximum resident set size/ {gsub(/^[ \t]+/, "", $2); print $2}' "$TIME_STDERR_FILTER")
+    if [ -n "${base_rss_kb:-}" ] && [ -n "${filtered_rss_kb:-}" ]; then
+      rss_delta=$((filtered_rss_kb - base_rss_kb))
+      log "RSS delta (filtered - baseline): ${rss_delta} kB"
+    fi
+    pass "filtered memory usage captured"
+  else
+    fail "filtered memory usage capture failed"
   fi
 else
   log "WARN: /usr/bin/time not available; skipping memory capture"
@@ -366,12 +384,16 @@ fi
 SEARCH_HYBRID_METRICS=""
 SEARCH_LEXICAL_METRICS=""
 SEARCH_SEMANTIC_METRICS=""
+SEARCH_HYBRID_FILTERED_METRICS=""
+SEARCH_SEMANTIC_FILTERED_METRICS=""
 STATS_METRICS=""
 
-SEARCH_HYBRID_METRICS=$(measure_cmd "search_hybrid" env NO_COLOR=1 XF_DB="$DB_PATH" XF_INDEX="$INDEX_PATH" "$XF_BIN" search "rust" --limit 100 --format json | tail -n 1)
-SEARCH_LEXICAL_METRICS=$(measure_cmd "search_lexical" env NO_COLOR=1 XF_DB="$DB_PATH" XF_INDEX="$INDEX_PATH" "$XF_BIN" search "machine" --mode lexical --limit 100 --format json | tail -n 1)
-SEARCH_SEMANTIC_METRICS=$(measure_cmd "search_semantic" env NO_COLOR=1 XF_DB="$DB_PATH" XF_INDEX="$INDEX_PATH" "$XF_BIN" search "stress" --mode semantic --limit 100 --format json | tail -n 1)
-STATS_METRICS=$(measure_cmd "stats" env NO_COLOR=1 XF_DB="$DB_PATH" XF_INDEX="$INDEX_PATH" "$XF_BIN" stats | tail -n 1)
+SEARCH_HYBRID_METRICS=$(measure_cmd "search_hybrid" env NO_COLOR=1 XF_DB="$DB_PATH" XF_INDEX="$INDEX_PATH" "$XF_BIN" --quiet search "rust" --limit 100 --format json | tail -n 1)
+SEARCH_LEXICAL_METRICS=$(measure_cmd "search_lexical" env NO_COLOR=1 XF_DB="$DB_PATH" XF_INDEX="$INDEX_PATH" "$XF_BIN" --quiet search "machine" --mode lexical --limit 100 --format json | tail -n 1)
+SEARCH_SEMANTIC_METRICS=$(measure_cmd "search_semantic" env NO_COLOR=1 XF_DB="$DB_PATH" XF_INDEX="$INDEX_PATH" "$XF_BIN" --quiet search "stress" --mode semantic --limit 100 --format json | tail -n 1)
+SEARCH_HYBRID_FILTERED_METRICS=$(measure_cmd "search_hybrid_types_dm" env NO_COLOR=1 XF_DB="$DB_PATH" XF_INDEX="$INDEX_PATH" "$XF_BIN" --quiet search "rust" --limit 100 --types dm --format json | tail -n 1)
+SEARCH_SEMANTIC_FILTERED_METRICS=$(measure_cmd "search_semantic_types_dm" env NO_COLOR=1 XF_DB="$DB_PATH" XF_INDEX="$INDEX_PATH" "$XF_BIN" --quiet search "stress" --mode semantic --limit 100 --types dm --format json | tail -n 1)
+STATS_METRICS=$(measure_cmd "stats" env NO_COLOR=1 XF_DB="$DB_PATH" XF_INDEX="$INDEX_PATH" "$XF_BIN" --quiet stats | tail -n 1)
 
 log "=== Summary ==="
 log "Passed: $PASS_COUNT"
@@ -379,7 +401,7 @@ log "Failed: $FAIL_COUNT"
 
 if [ "${UPDATE_BASELINE_DOC:-}" = "1" ]; then
   BASELINE_DOC="$ROOT_DIR/docs/performance_baseline.md"
-  export BASELINE_DOC SEARCH_HYBRID_METRICS SEARCH_LEXICAL_METRICS SEARCH_SEMANTIC_METRICS STATS_METRICS
+  export BASELINE_DOC SEARCH_HYBRID_METRICS SEARCH_LEXICAL_METRICS SEARCH_SEMANTIC_METRICS SEARCH_HYBRID_FILTERED_METRICS SEARCH_SEMANTIC_FILTERED_METRICS STATS_METRICS
   log "Updating baseline doc at $BASELINE_DOC"
   python3 - <<'PY'
 import os
@@ -390,6 +412,8 @@ commit = os.popen(f"git -C {os.environ.get('ROOT_DIR','.')} rev-parse HEAD").rea
 search_hybrid = os.environ.get("SEARCH_HYBRID_METRICS", "")
 search_lexical = os.environ.get("SEARCH_LEXICAL_METRICS", "")
 search_semantic = os.environ.get("SEARCH_SEMANTIC_METRICS", "")
+search_hybrid_filtered = os.environ.get("SEARCH_HYBRID_FILTERED_METRICS", "")
+search_semantic_filtered = os.environ.get("SEARCH_SEMANTIC_FILTERED_METRICS", "")
 stats_metrics = os.environ.get("STATS_METRICS", "")
 
 baseline_text = ""
@@ -445,6 +469,20 @@ if search_semantic:
     deltas = format_delta((float(p50), float(p95), float(p99)), baseline) if baseline else None
     if deltas:
         delta_rows.append(("xf search \"stress\" --mode semantic --limit 100", *deltas))
+if search_hybrid_filtered:
+    p50, p95, p99 = search_hybrid_filtered.split()
+    section += f"| `xf search \"rust\" --limit 100 --types dm` | {p50} | {p95} | {p99} |\n"
+    baseline = find_baseline("xf search \"rust\" --limit 100 --types dm")
+    deltas = format_delta((float(p50), float(p95), float(p99)), baseline) if baseline else None
+    if deltas:
+        delta_rows.append(("xf search \"rust\" --limit 100 --types dm", *deltas))
+if search_semantic_filtered:
+    p50, p95, p99 = search_semantic_filtered.split()
+    section += f"| `xf search \"stress\" --mode semantic --limit 100 --types dm` | {p50} | {p95} | {p99} |\n"
+    baseline = find_baseline("xf search \"stress\" --mode semantic --limit 100 --types dm")
+    deltas = format_delta((float(p50), float(p95), float(p99)), baseline) if baseline else None
+    if deltas:
+        delta_rows.append(("xf search \"stress\" --mode semantic --limit 100 --types dm", *deltas))
 if stats_metrics:
     p50, p95, p99 = stats_metrics.split()
     section += f"| `xf stats` | {p50} | {p95} | {p99} |\n"

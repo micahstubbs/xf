@@ -31,13 +31,6 @@ Date: 2026-01-12T17:55:36Z (UTC)
 | `xf search "machine" --mode lexical --limit 100` | 13.0 ms | 15.05 ms | 15.81 ms |
 | `xf search "stress" --mode semantic --limit 100` | 77.5 ms | 115.15 ms | 117.43 ms |
 
-### Type-Filtered Search (DM only, 20 runs, warm cache)
-
-| Command | p50 | p95 | p99 |
-| --- | ---:| ---:| ---:|
-| `xf search "rust" --limit 100 --types dm` (hybrid) | 67.0 ms | 70.1 ms | 71.62 ms |
-| `xf search "stress" --mode semantic --limit 100 --types dm` | 68.0 ms | 72.05 ms | 72.81 ms |
-
 ### Indexing Baseline (Release Build, 5 runs)
 
 | p50 | p95 | p99 |
@@ -85,7 +78,14 @@ Date: 2026-01-12T17:55:36Z (UTC)
 
 Type filtering allows searching specific document types (tweet, dm, like, grok).
 
-**Hybrid Search with --types filter (20 runs, warm cache):**
+**Perf validation (release build, 20 runs, warm cache):**
+
+| Command | p50 | p95 | p99 |
+| --- | ---:| ---:| ---:|
+| `xf search "rust" --limit 100 --types dm` (hybrid) | 67.0 ms | 70.1 ms | 71.62 ms |
+| `xf search "stress" --mode semantic --limit 100 --types dm` | 68.0 ms | 72.05 ms | 72.81 ms |
+
+**Hybrid Search with --types filter (search_perf benchmark):**
 
 | Filter | p50 | p95 | p99 |
 | --- | ---:| ---:| ---:|
@@ -95,7 +95,7 @@ Type filtering allows searching specific document types (tweet, dm, like, grok).
 | --types like | 67.5 ms | 72.8 ms | 73.0 ms |
 | --types grok | 66.3 ms | 68.9 ms | 69.1 ms |
 
-**Semantic Search with --types filter (20 runs, warm cache):**
+**Semantic Search with --types filter (search_perf benchmark):**
 
 | Filter | p50 | p95 | p99 |
 | --- | ---:| ---:| ---:|
@@ -110,7 +110,7 @@ Type filtering allows searching specific document types (tweet, dm, like, grok).
 ### Notes
 
 - Hybrid and semantic search are still above the 50ms target. The bottleneck appears to be vector index loading from SQLite on each search. Further optimization with persistent mmap'd vector index may be needed.
-- Lexical search is very fast (sub-10ms) and meets targets.
+- Lexical search is fast (low teens) and meets targets.
 - Indexing is extremely fast (sub-1s) and well under the 120s target.
 - Memory usage is reasonable at ~92 MB for indexing and ~47 MB for search.
 - CPU parallelization during indexing is effective (256% CPU utilization on multi-core).
