@@ -841,7 +841,7 @@ impl SearchEngine {
                 name: "Index Directory".to_string(),
                 status: CheckStatus::Error,
                 message: format!("Index path is not a directory: {}", index_path.display()),
-                suggestion: Some("Run 'xf reindex' to rebuild the index".to_string()),
+                suggestion: Some("Run 'xf index --force' to rebuild the index".to_string()),
             };
         }
 
@@ -852,7 +852,7 @@ impl SearchEngine {
                 name: "Index Directory".to_string(),
                 status: CheckStatus::Error,
                 message: "Missing meta.json - index may be corrupted".to_string(),
-                suggestion: Some("Run 'xf reindex' to rebuild the index".to_string()),
+                suggestion: Some("Run 'xf index --force' to rebuild the index".to_string()),
             };
         }
 
@@ -879,7 +879,7 @@ impl SearchEngine {
                 name: "Index Version".to_string(),
                 status: CheckStatus::Error,
                 message: format!("Index metadata unreadable: {err}"),
-                suggestion: Some("Run 'xf reindex' to rebuild the index".to_string()),
+                suggestion: Some("Run 'xf index --force' to rebuild the index".to_string()),
             },
         }
     }
@@ -889,14 +889,14 @@ impl SearchEngine {
         let (status, suggestion) = if segment_count == 0 {
             (
                 CheckStatus::Warning,
-                Some("Run 'xf reindex' to rebuild the index".to_string()),
+                Some("Run 'xf index --force' to rebuild the index".to_string()),
             )
         } else if segment_count <= 10 {
             (CheckStatus::Pass, None)
         } else {
             (
                 CheckStatus::Warning,
-                Some("Run 'xf optimize' to merge segments".to_string()),
+                Some("Run 'xf index --force' to rebuild and compact the index".to_string()),
             )
         };
 
@@ -933,7 +933,7 @@ impl SearchEngine {
                     None
                 } else {
                     Some(
-                        "Run 'xf reindex' to sync index contents (ignore if you skipped data types)"
+                        "Run 'xf index --force' to rebuild the index (ignore if you skipped data types)"
                             .to_string(),
                     )
                 };
@@ -972,7 +972,7 @@ impl SearchEngine {
                 };
 
                 let suggestion = if duration_ms >= 10 {
-                    Some("Consider 'xf optimize' for faster queries".to_string())
+                    Some("Consider rebuilding the index with 'xf index --force'".to_string())
                 } else {
                     None
                 };
@@ -990,7 +990,7 @@ impl SearchEngine {
                 name: "Sample Query".to_string(),
                 status: CheckStatus::Error,
                 message: format!("Query failed: {err}"),
-                suggestion: Some("Index may be corrupted. Try 'xf reindex'".to_string()),
+                suggestion: Some("Index may be corrupted. Try 'xf index --force'".to_string()),
             },
         }
     }
@@ -1015,7 +1015,7 @@ impl SearchEngine {
                     CheckStatus::Pass
                 };
                 let suggestion = if is_large {
-                    Some("Large index. Consider 'xf optimize' to reduce size".to_string())
+                    Some("Large index. Consider 'xf index --force' to rebuild".to_string())
                 } else {
                     None
                 };

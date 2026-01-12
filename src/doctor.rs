@@ -558,7 +558,7 @@ pub fn benchmark_index_load(index_path: &Path) -> HealthCheck {
     } else if median < thresholds::LOAD_SLOW_MS {
         (
             CheckStatus::Warning,
-            Some("Index load is slow. Consider running 'xf optimize'".to_string()),
+            Some("Index load is slow. Consider rebuilding with 'xf index --force'".to_string()),
         )
     } else {
         (
@@ -695,7 +695,10 @@ fn evaluate_query_latency(latency: &LatencyStats) -> (CheckStatus, Option<String
     } else if p95 < thresholds::QUERY_SLOW_MS {
         (
             CheckStatus::Warning,
-            Some("Query latency is elevated. Consider 'xf optimize'".to_string()),
+            Some(
+                "Query latency is elevated. Consider rebuilding with 'xf index --force'"
+                    .to_string(),
+            ),
         )
     } else {
         (
