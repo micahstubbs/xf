@@ -732,6 +732,16 @@ impl VectorIndex {
         self.vectors.is_empty()
     }
 
+    /// Get counts of embeddings by document type.
+    #[must_use]
+    pub fn type_counts(&self) -> std::collections::HashMap<String, usize> {
+        let mut counts = std::collections::HashMap::new();
+        for (_, doc_type, _) in &self.vectors {
+            *counts.entry(doc_type.clone()).or_insert(0) += 1;
+        }
+        counts
+    }
+
     /// Get the embedding dimension.
     #[must_use]
     pub const fn dimension(&self) -> usize {

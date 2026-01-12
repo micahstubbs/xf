@@ -250,7 +250,7 @@ fn expected_hybrid_scores(
 
     fused
         .into_iter()
-        .map(|hit| (hit.doc_id, hit.score))
+        .map(|hit| (hit.doc_id.to_string(), hit.score))
         .collect()
 }
 

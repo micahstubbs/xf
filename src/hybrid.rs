@@ -21,21 +21,21 @@
 //! 2. Appears in both lists (bonus)
 //! 3. Document ID (ascending)
 
-use crate::model::SearchResult;
+use crate::model::{SearchResult, SearchResultType};
 use crate::vector::VectorSearchResult;
 use clap::ValueEnum;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct DocKey {
-    id: String,
-    doc_type: String,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct DocKey<'a> {
+    id: &'a str,
+    doc_type: &'a str,
 }
 
-impl DocKey {
+impl<'a> DocKey<'a> {
     #[allow(clippy::missing_const_for_fn)]
-    fn new(id: String, doc_type: String) -> Self {
+    fn new(id: &'a str, doc_type: &'a str) -> Self {
         Self { id, doc_type }
     }
 }
@@ -97,17 +97,26 @@ struct HybridScore {
 
 /// Fused search hit combining information from both sources.
 #[derive(Debug, Clone)]
-pub struct FusedHit {
+pub struct FusedHit<'a> {
     /// Document ID.
-    pub doc_id: String,
+    pub doc_id: &'a str,
     /// Document type.
-    pub doc_type: String,
+    pub doc_type: &'a str,
     /// Fused RRF score.
     pub score: f32,
-    /// Original lexical result (if present).
-    pub lexical: Option<SearchResult>,
+    /// Index into the lexical results (if present).
+    pub lexical_rank: Option<usize>,
     /// Whether this hit appeared in both lexical and semantic results.
     pub in_both: bool,
+}
+
+const fn result_type_str(result_type: SearchResultType) -> &'static str {
+    match result_type {
+        SearchResultType::Tweet => "tweet",
+        SearchResultType::Like => "like",
+        SearchResultType::DirectMessage => "dm",
+        SearchResultType::GrokMessage => "grok",
+    }
 }
 
 /// Fuse lexical and semantic search results using RRF.
@@ -124,47 +133,45 @@ pub struct FusedHit {
 /// Fused results sorted by RRF score, with deterministic tie-breaking.
 #[must_use]
 #[allow(clippy::cast_precision_loss)]
-pub fn rrf_fuse(
-    lexical: &[SearchResult],
-    semantic: &[VectorSearchResult],
+pub fn rrf_fuse<'a>(
+    lexical: &'a [SearchResult],
+    semantic: &'a [VectorSearchResult],
     limit: usize,
     offset: usize,
-) -> Vec<FusedHit> {
+) -> Vec<FusedHit<'a>> {
     if limit == 0 {
         return Vec::new();
     }
 
-    let mut scores: HashMap<DocKey, HybridScore> = HashMap::new();
-    let mut lexical_results: HashMap<DocKey, SearchResult> = HashMap::new();
+    let mut scores: HashMap<DocKey<'a>, HybridScore> = HashMap::new();
 
     // Process lexical results (rank 0, 1, 2, ...)
     for (rank, hit) in lexical.iter().enumerate() {
-        let doc_type = hit.result_type.to_string();
-        let key = DocKey::new(hit.id.clone(), doc_type.clone());
-        let entry = scores.entry(key.clone()).or_default();
+        let doc_type = result_type_str(hit.result_type);
+        let key = DocKey::new(hit.id.as_str(), doc_type);
+        let entry = scores.entry(key).or_default();
         entry.rrf += 1.0 / (RRF_K + rank as f32 + 1.0);
         entry.lexical_rank = Some(rank);
-        lexical_results.insert(key, hit.clone());
     }
 
     // Process semantic results (rank 0, 1, 2, ...)
     for (rank, hit) in semantic.iter().enumerate() {
-        let key = DocKey::new(hit.doc_id.clone(), hit.doc_type.clone());
+        let key = DocKey::new(hit.doc_id.as_str(), hit.doc_type.as_str());
         let entry = scores.entry(key).or_default();
         entry.rrf += 1.0 / (RRF_K + rank as f32 + 1.0);
         entry.semantic_rank = Some(rank);
     }
 
     // Convert to fused hits
-    let mut fused: Vec<FusedHit> = scores
+    let mut fused: Vec<FusedHit<'a>> = scores
         .into_iter()
         .map(|(key, score)| {
             let in_both = score.lexical_rank.is_some() && score.semantic_rank.is_some();
             FusedHit {
-                doc_type: key.doc_type.clone(),
-                lexical: lexical_results.remove(&key),
                 doc_id: key.id,
+                doc_type: key.doc_type,
                 score: score.rrf,
+                lexical_rank: score.lexical_rank,
                 in_both,
             }
         })
@@ -182,8 +189,8 @@ pub fn rrf_fuse(
                 _ => Ordering::Equal,
             })
             // Level 3: Document ID (ascending) for determinism
-            .then_with(|| a.doc_id.cmp(&b.doc_id))
-            .then_with(|| a.doc_type.cmp(&b.doc_type))
+            .then_with(|| a.doc_id.cmp(b.doc_id))
+            .then_with(|| a.doc_type.cmp(b.doc_type))
     });
 
     // Apply offset and limit

@@ -102,7 +102,7 @@ impl VectorIndexCache {
         let index = VectorIndex::load_from_file_or_storage(index_path, storage)?;
 
         // Collect stats for staleness checking
-        let type_counts: HashMap<String, usize> = HashMap::new();
+        let type_counts = index.type_counts();
         let embedding_count = index.len();
 
         let db_mtime = db_path
@@ -1330,11 +1330,11 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
             let mut lookups = Vec::new();
             let mut lookup_indices = Vec::new();
             for (idx, hit) in fused.iter().enumerate() {
-                if hit.lexical.is_none() {
+                if hit.lexical_rank.is_none() {
                     let lookup = if hit.doc_type.is_empty() {
-                        search::DocLookup::new(&hit.doc_id)
+                        search::DocLookup::new(hit.doc_id)
                     } else {
-                        search::DocLookup::with_type(&hit.doc_id, &hit.doc_type)
+                        search::DocLookup::with_type(hit.doc_id, hit.doc_type)
                     };
                     lookups.push(lookup);
                     lookup_indices.push(idx);
@@ -1353,9 +1353,10 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
             }
 
             let mut results = Vec::new();
-            for (idx, hit) in fused.into_iter().enumerate() {
+            for (idx, hit) in fused.iter().enumerate() {
                 // Prefer lexical result (has full data)
-                if let Some(mut result) = hit.lexical {
+                if let Some(rank) = hit.lexical_rank {
+                    let mut result = lexical_results[rank].clone();
                     result.score = hit.score;
                     results.push(result);
                 } else if let Some(mut result) = fetched_by_index[idx].take() {
