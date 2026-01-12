@@ -161,7 +161,7 @@ struct ScoredEntry {
 
 impl PartialEq for ScoredEntry {
     fn eq(&self, other: &Self) -> bool {
-        self.score == other.score && self.doc_id == other.doc_id
+        self.score == other.score && self.doc_id == other.doc_id && self.doc_type == other.doc_type
     }
 }
 
@@ -181,6 +181,7 @@ impl Ord for ScoredEntry {
             .score
             .total_cmp(&self.score)
             .then_with(|| self.doc_id.cmp(&other.doc_id))
+            .then_with(|| self.doc_type.cmp(&other.doc_type))
     }
 }
 
@@ -298,11 +299,12 @@ impl VectorIndex {
             })
             .collect();
 
-        // Sort by score descending, then doc_id ascending for determinism
+        // Sort by score descending, then doc_id + doc_type ascending for determinism
         results.sort_by(|a, b| {
             b.score
                 .total_cmp(&a.score)
                 .then_with(|| a.doc_id.cmp(&b.doc_id))
+                .then_with(|| a.doc_type.cmp(&b.doc_type))
         });
 
         results
@@ -383,6 +385,7 @@ impl VectorIndex {
             b.score
                 .total_cmp(&a.score)
                 .then_with(|| a.doc_id.cmp(&b.doc_id))
+                .then_with(|| a.doc_type.cmp(&b.doc_type))
         });
 
         results
@@ -657,6 +660,23 @@ mod tests {
             assert_eq!(results1[i].doc_id, results2[i].doc_id);
             assert_eq!(results2[i].doc_id, results3[i].doc_id);
         }
+    }
+
+    #[test]
+    fn test_search_deterministic_with_same_id_types() {
+        let mut index = VectorIndex::new(4);
+        let mut v = vec![1.0, 0.0, 0.0, 0.0];
+        l2_normalize(&mut v);
+
+        index.add("same".to_string(), "tweet".to_string(), v.clone());
+        index.add("same".to_string(), "like".to_string(), v.clone());
+
+        let results = index.search_top_k(&v, 2, None);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].doc_id, "same");
+        assert_eq!(results[1].doc_id, "same");
+        assert_eq!(results[0].doc_type, "like");
+        assert_eq!(results[1].doc_type, "tweet");
     }
 
     #[test]
