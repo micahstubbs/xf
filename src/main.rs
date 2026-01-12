@@ -179,6 +179,7 @@ fn main() -> Result<()> {
         .with_env_filter(EnvFilter::from_default_env().add_directive(log_level.into()))
         .with_target(false)
         .without_time()
+        .with_writer(std::io::stderr)
         .init();
 
     // Run the appropriate command

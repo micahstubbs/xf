@@ -209,11 +209,13 @@ pub fn init_logging(config: &LogConfig) {
 
     match config.format {
         LogFormat::Pretty => {
+            let stderr_fn = || std::io::stderr();
             let layer = fmt::layer()
                 .pretty()
                 .with_ansi(config.colors)
                 .with_target(config.target)
-                .with_span_events(span_events);
+                .with_span_events(span_events)
+                .with_writer(stderr_fn);
 
             if config.timestamps {
                 tracing_subscriber::registry()
@@ -230,11 +232,13 @@ pub fn init_logging(config: &LogConfig) {
             }
         }
         LogFormat::Compact => {
+            let stderr_fn = || std::io::stderr();
             let layer = fmt::layer()
                 .compact()
                 .with_ansi(config.colors)
                 .with_target(config.target)
-                .with_span_events(span_events);
+                .with_span_events(span_events)
+                .with_writer(stderr_fn);
 
             if config.timestamps {
                 tracing_subscriber::registry()
@@ -251,6 +255,7 @@ pub fn init_logging(config: &LogConfig) {
             }
         }
         LogFormat::Full => {
+            let stderr_fn = || std::io::stderr();
             let layer = fmt::layer()
                 .with_ansi(config.colors)
                 .with_target(config.target)
@@ -258,7 +263,8 @@ pub fn init_logging(config: &LogConfig) {
                 .with_thread_ids(true)
                 .with_thread_names(true)
                 .with_file(true)
-                .with_line_number(true);
+                .with_line_number(true)
+                .with_writer(stderr_fn);
 
             tracing_subscriber::registry()
                 .with(env_filter)
