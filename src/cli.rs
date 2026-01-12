@@ -154,17 +154,17 @@ pub struct SearchArgs {
     #[arg(long, short = 's', default_value = "relevance")]
     pub sort: SortOrder,
 
-    /// Show only tweets from this date onwards
+    /// Show only results from this date onwards
     #[arg(
         long,
-        long_help = "Show only tweets from this date onwards.\n\nFormats: 2024-01-15, 2024-01, \"last week\", \"3 days ago\", \"yesterday\"\nExample: --since \"last month\""
+        long_help = "Show only results from this date onwards (tweets, DMs, Grok). Likes without timestamps are excluded.\n\nFormats: 2024-01-15, 2024-01, \"last week\", \"3 days ago\", \"yesterday\"\nExample: --since \"last month\""
     )]
     pub since: Option<String>,
 
-    /// Show only tweets until this date
+    /// Show only results until this date
     #[arg(
         long,
-        long_help = "Show only tweets until this date.\n\nFormats: 2024-01-15, 2024-01, \"last week\", \"3 days ago\", \"yesterday\"\nExample: --until \"yesterday\""
+        long_help = "Show only results until this date (tweets, DMs, Grok). Likes without timestamps are excluded.\n\nFormats: 2024-01-15, 2024-01, \"last week\", \"3 days ago\", \"yesterday\"\nExample: --until \"yesterday\""
     )]
     pub until: Option<String>,
 

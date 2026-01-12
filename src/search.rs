@@ -11,7 +11,7 @@ use chrono::{DateTime, Utc};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 use tantivy::collector::TopDocs;
-use tantivy::query::{BooleanQuery, Occur, Query, QueryParser, TermQuery};
+use tantivy::query::{AllQuery, BooleanQuery, Occur, Query, QueryParser, TermQuery};
 use tantivy::schema::{
     FAST, Field, INDEXED, IndexRecordOption, STORED, STRING, Schema, TextFieldIndexing,
     TextOptions, Value,
@@ -383,10 +383,17 @@ impl SearchEngine {
             self.get_fields();
 
         // Build query
-        let query_parser = QueryParser::for_index(&self.index, vec![text_field, prefix_field]);
-        let base_query = query_parser
-            .parse_query(query_str)
-            .map_err(|e| anyhow::anyhow!("Invalid search query: {e}"))?;
+        let trimmed = query_str.trim();
+        let mut enable_highlights = true;
+        let base_query: Box<dyn Query> = if trimmed.is_empty() {
+            enable_highlights = false;
+            Box::new(AllQuery)
+        } else {
+            let query_parser = QueryParser::for_index(&self.index, vec![text_field, prefix_field]);
+            query_parser
+                .parse_query(trimmed)
+                .map_err(|e| anyhow::anyhow!("Invalid search query: {e}"))?
+        };
 
         // Apply type filter if specified
         let query: Box<dyn Query> = if let Some(types) = doc_types {
@@ -416,8 +423,12 @@ impl SearchEngine {
         // Execute search
         let top_docs = searcher.search(&query, &TopDocs::with_limit(limit))?;
 
-        // Create snippet generator for highlighting
-        let snippet_generator = SnippetGenerator::create(&searcher, &query, text_field)?;
+        // Create snippet generator for highlighting when query has terms
+        let snippet_generator = if enable_highlights {
+            Some(SnippetGenerator::create(&searcher, &query, text_field)?)
+        } else {
+            None
+        };
 
         // Collect results
         let mut results = Vec::with_capacity(top_docs.len());
@@ -458,15 +469,17 @@ impl SearchEngine {
                 _ => SearchResultType::Tweet,
             };
 
-            // Generate highlighted snippet
-            let snippet = snippet_generator.snippet_from_doc(&doc);
-            let highlights = if snippet.is_empty() {
-                vec![]
-            } else {
-                // Get the highlighted HTML snippet and extract fragments
-                let html = snippet.to_html();
-                vec![html]
-            };
+            let highlights = snippet_generator
+                .as_ref()
+                .map_or_else(Vec::new, |generator| {
+                    let snippet = generator.snippet_from_doc(&doc);
+                    if snippet.is_empty() {
+                        vec![]
+                    } else {
+                        let html = snippet.to_html();
+                        vec![html]
+                    }
+                });
 
             results.push(SearchResult {
                 result_type,
@@ -973,6 +986,24 @@ mod tests {
         let results = engine.search("hello", None, 10).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id, "123");
+    }
+
+    #[test]
+    fn test_search_engine_empty_query_returns_all() {
+        let engine = SearchEngine::open_memory().unwrap();
+        let mut writer = engine.writer(15_000_000).unwrap();
+
+        let tweets = vec![
+            create_test_tweet("1", "First tweet"),
+            create_test_tweet("2", "Second tweet"),
+        ];
+
+        engine.index_tweets(&mut writer, &tweets).unwrap();
+        writer.commit().unwrap();
+        engine.reload().unwrap();
+
+        let results = engine.search("", None, 10).unwrap();
+        assert_eq!(results.len(), 2);
     }
 
     #[test]

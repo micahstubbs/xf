@@ -114,7 +114,7 @@ impl Storage {
                 "Migrating database from version {} to {}",
                 current_version, SCHEMA_VERSION
             );
-            
+
             // For Version 2, we introduced `content_hash` to the embeddings table.
             // Since this is a derived data table, the safest migration is to drop and recreate it
             // to ensure the schema matches our expectations.
@@ -373,7 +373,8 @@ impl Storage {
             // Batch delete for performance: one DELETE with IN clause instead of N individual DELETEs.
             if !tweets.is_empty() {
                 for chunk in tweets.chunks(SQLITE_BATCH_SIZE) {
-                    let placeholders: String = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+                    let placeholders: String =
+                        chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
                     let delete_sql =
                         format!("DELETE FROM fts_tweets WHERE tweet_id IN ({placeholders})");
                     let mut delete_stmt = tx.prepare_cached(&delete_sql)?;
@@ -431,21 +432,16 @@ impl Storage {
         let mut count = 0;
 
         {
-            // FTS5 batch delete for likes with text
-            let likes_with_text: Vec<_> = likes.iter().filter(|l| l.full_text.is_some()).collect();
-            if !likes_with_text.is_empty() {
-                for chunk in likes_with_text.chunks(SQLITE_BATCH_SIZE) {
-                    let placeholders: String = chunk
-                        .iter()
-                        .map(|_| "?")
-                        .collect::<Vec<_>>()
-                        .join(",");
+            // FTS5 batch delete for all likes to avoid stale rows when text is removed.
+            let like_ids: Vec<_> = likes.iter().map(|l| l.tweet_id.as_str()).collect();
+            if !like_ids.is_empty() {
+                for chunk in like_ids.chunks(SQLITE_BATCH_SIZE) {
+                    let placeholders: String =
+                        chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
                     let delete_sql =
                         format!("DELETE FROM fts_likes WHERE tweet_id IN ({placeholders})");
                     let mut delete_stmt = tx.prepare_cached(&delete_sql)?;
-                    delete_stmt.execute(rusqlite::params_from_iter(
-                        chunk.iter().map(|l| &l.tweet_id),
-                    ))?;
+                    delete_stmt.execute(rusqlite::params_from_iter(chunk.iter()))?;
                 }
             }
 
@@ -486,11 +482,8 @@ impl Storage {
                 .collect();
             if !all_msg_ids.is_empty() {
                 for chunk in all_msg_ids.chunks(SQLITE_BATCH_SIZE) {
-                    let placeholders: String = chunk
-                        .iter()
-                        .map(|_| "?")
-                        .collect::<Vec<_>>()
-                        .join(",");
+                    let placeholders: String =
+                        chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
                     let delete_sql = format!("DELETE FROM fts_dms WHERE dm_id IN ({placeholders})");
                     let mut delete_stmt = tx.prepare_cached(&delete_sql)?;
                     delete_stmt.execute(rusqlite::params_from_iter(chunk.iter()))?;
@@ -978,9 +971,7 @@ impl Storage {
     fn check_integrity(&self) -> HealthCheck {
         match self
             .conn
-            .query_row("PRAGMA integrity_check", [], |row| {
-                row.get::<_, String>(0)
-            })
+            .query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
         {
             Ok(result) => {
                 if result == "ok" {
@@ -2419,6 +2410,23 @@ mod tests {
         let results = storage.search_likes("rust", 10).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].tweet_id, "like1");
+    }
+
+    #[test]
+    fn test_store_likes_removes_stale_fts_entries() {
+        let mut storage = Storage::open_memory().unwrap();
+
+        let likes = vec![create_test_like("like1", Some("Rust content"))];
+        storage.store_likes(&likes).unwrap();
+
+        let results = storage.search_likes("rust", 10).unwrap();
+        assert_eq!(results.len(), 1);
+
+        let likes_updated = vec![create_test_like("like1", None)];
+        storage.store_likes(&likes_updated).unwrap();
+
+        let results = storage.search_likes("rust", 10).unwrap();
+        assert_eq!(results.len(), 0);
     }
 
     #[test]

@@ -266,28 +266,58 @@ impl ArchiveParser {
         value.as_str().and_then(|s| s.parse().ok())
     }
 
-    /// Parse all likes from like.js.
+    /// Parse all likes from like.js or likes.js.
     ///
     /// # Errors
     ///
     /// Returns an error if the likes file cannot be read or parsed.
     pub fn parse_likes(&self) -> Result<Vec<Like>> {
-        info!("Parsing like.js...");
-        let data = self.read_data_file("like.js")?;
+        info!("Parsing likes...");
 
-        let likes: Vec<Like> = data
-            .as_array()
-            .unwrap_or(&vec![])
-            .par_iter()
-            .filter_map(|item| {
-                let like = &item["like"];
-                Some(Like {
-                    tweet_id: like["tweetId"].as_str()?.to_string(),
-                    full_text: like["fullText"].as_str().map(String::from),
-                    expanded_url: like["expandedUrl"].as_str().map(String::from),
+        let mut files = Vec::new();
+        let like_path = self.archive_path.join("data").join("like.js");
+        if like_path.exists() {
+            files.push(like_path);
+        }
+        let likes_path = self.archive_path.join("data").join("likes.js");
+        if likes_path.exists() {
+            files.push(likes_path);
+        }
+
+        if files.is_empty() {
+            info!("No like files found.");
+            return Ok(Vec::new());
+        }
+
+        let mut likes = Vec::new();
+        let mut seen_ids: HashSet<String> = HashSet::new();
+
+        for path in files {
+            let content = std::fs::read_to_string(&path)
+                .with_context(|| format!("Failed to read {}", path.display()))?;
+            let data = self.parse_js_file(&content)?;
+            let Some(items) = data.as_array() else {
+                continue;
+            };
+
+            let file_likes: Vec<Like> = items
+                .par_iter()
+                .filter_map(|item| {
+                    let like = &item["like"];
+                    Some(Like {
+                        tweet_id: like["tweetId"].as_str()?.to_string(),
+                        full_text: like["fullText"].as_str().map(String::from),
+                        expanded_url: like["expandedUrl"].as_str().map(String::from),
+                    })
                 })
-            })
-            .collect();
+                .collect();
+
+            for like in file_likes {
+                if seen_ids.insert(like.tweet_id.clone()) {
+                    likes.push(like);
+                }
+            }
+        }
 
         info!("Parsed {} likes", likes.len());
         Ok(likes)
@@ -1137,6 +1167,35 @@ mod tests {
         );
         assert_eq!(likes[1].tweet_id, "9876543211");
         assert_eq!(likes[1].full_text, None);
+    }
+
+    #[test]
+    fn test_parse_likes_fallback_likes_js() {
+        let temp_dir = TempDir::new().unwrap();
+        let data_dir = temp_dir.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+
+        let content = r#"window.YTD.likes.part0 = [
+            {
+                "like": {
+                    "tweetId": "111222333",
+                    "fullText": "Likes file variant",
+                    "expandedUrl": "https://example.com/likes"
+                }
+            }
+        ]"#;
+        std::fs::write(data_dir.join("likes.js"), content).unwrap();
+
+        let parser = ArchiveParser::new(temp_dir.path());
+        let likes = parser.parse_likes().unwrap();
+
+        assert_eq!(likes.len(), 1);
+        assert_eq!(likes[0].tweet_id, "111222333");
+        assert_eq!(likes[0].full_text, Some("Likes file variant".to_string()));
+        assert_eq!(
+            likes[0].expanded_url,
+            Some("https://example.com/likes".to_string())
+        );
     }
 
     #[test]
