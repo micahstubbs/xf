@@ -1347,12 +1347,16 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
                     type_strs.as_deref(),
                 );
 
+                let lookups: Vec<_> = semantic_hits
+                    .iter()
+                    .map(|hit| search::DocLookup::with_type(&hit.doc_id, &hit.doc_type))
+                    .collect();
+                let fetched = search_engine.get_by_ids(&lookups)?;
+
                 // Look up full results from search engine by doc_id + type
                 let mut results = Vec::new();
-                for hit in semantic_hits {
-                    if let Ok(Some(mut result)) =
-                        search_engine.get_by_id_and_type(&hit.doc_id, &hit.doc_type)
-                    {
+                for (hit, result) in semantic_hits.into_iter().zip(fetched) {
+                    if let Some(mut result) = result {
                         result.score = hit.score;
                         results.push(result);
                     }
@@ -1401,23 +1405,40 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
             );
 
             // Convert fused hits back to SearchResults
+            let mut lookups = Vec::new();
+            let mut lookup_indices = Vec::new();
+            for (idx, hit) in fused.iter().enumerate() {
+                if hit.lexical.is_none() {
+                    let lookup = if hit.doc_type.is_empty() {
+                        search::DocLookup::new(&hit.doc_id)
+                    } else {
+                        search::DocLookup::with_type(&hit.doc_id, &hit.doc_type)
+                    };
+                    lookups.push(lookup);
+                    lookup_indices.push(idx);
+                }
+            }
+
+            let fetched = if lookups.is_empty() {
+                Vec::new()
+            } else {
+                search_engine.get_by_ids(&lookups)?
+            };
+
+            let mut fetched_by_index = vec![None; fused.len()];
+            for (idx, result) in lookup_indices.into_iter().zip(fetched) {
+                fetched_by_index[idx] = result;
+            }
+
             let mut results = Vec::new();
-            for hit in fused {
+            for (idx, hit) in fused.into_iter().enumerate() {
                 // Prefer lexical result (has full data)
                 if let Some(mut result) = hit.lexical {
                     result.score = hit.score;
                     results.push(result);
-                } else {
-                    // Look up from search engine using doc_type when available
-                    let lookup = if hit.doc_type.is_empty() {
-                        search_engine.get_by_id(&hit.doc_id)
-                    } else {
-                        search_engine.get_by_id_and_type(&hit.doc_id, &hit.doc_type)
-                    };
-                    if let Ok(Some(mut result)) = lookup {
-                        result.score = hit.score;
-                        results.push(result);
-                    }
+                } else if let Some(mut result) = fetched_by_index[idx].take() {
+                    result.score = hit.score;
+                    results.push(result);
                 }
             }
 
