@@ -1789,6 +1789,9 @@ fn apply_search_filters(
 ) {
     if since.is_some() || until.is_some() {
         results.retain(|r| {
+            if matches!(r.result_type, SearchResultType::Like) {
+                return false;
+            }
             if let Some(since_dt) = since {
                 if r.created_at < since_dt {
                     return false;
@@ -1862,6 +1865,47 @@ fn apply_search_sort(results: &mut [SearchResult], sort: &SortOrder) {
                 }
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod search_filter_tests {
+    use super::apply_search_filters;
+    use chrono::{TimeZone, Utc};
+    use xf::{SearchResult, SearchResultType};
+
+    fn make_result(
+        result_type: SearchResultType,
+        created_at: chrono::DateTime<Utc>,
+    ) -> SearchResult {
+        SearchResult {
+            result_type,
+            id: "id".to_string(),
+            text: "text".to_string(),
+            created_at,
+            score: 1.0,
+            highlights: Vec::new(),
+            metadata: serde_json::json!({}),
+        }
+    }
+
+    #[test]
+    fn date_filters_exclude_likes_without_timestamps() {
+        let mut results = vec![
+            make_result(SearchResultType::Like, Utc.timestamp_opt(0, 0).unwrap()),
+            make_result(
+                SearchResultType::Tweet,
+                Utc.with_ymd_and_hms(2024, 1, 15, 12, 0, 0)
+                    .single()
+                    .unwrap(),
+            ),
+        ];
+
+        let until = Some(Utc.with_ymd_and_hms(2024, 2, 1, 0, 0, 0).single().unwrap());
+        apply_search_filters(&mut results, None, until, false, false);
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].result_type, SearchResultType::Tweet);
     }
 }
 
