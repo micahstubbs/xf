@@ -58,6 +58,11 @@ memchr = "2.7"
 aho-corasick = "1.1"
 unicode-normalization = "0.1"
 
+# Semantic search / embeddings
+half = "2.4"            # F16 quantization for vector storage
+wide = "0.7"            # Portable SIMD for fast dot products
+ring = "0.17"           # SHA256 for content hashing
+
 # Parallelism
 rayon = "1.10"
 crossbeam-channel = "0.5"
@@ -86,6 +91,9 @@ assert_cmd = "2.0"
 predicates = "3.1"
 tempfile = "3.14"
 criterion = { version = "0.5", features = ["html_reports"] }
+
+[features]
+parallel-search = []
 
 [[bench]]
 name = "search_perf"

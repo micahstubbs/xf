@@ -1,41 +1,141 @@
 # xf
 
-**Ultra-fast CLI for searching and querying your X data archive.**
+<div align="center">
+  <img src="xf_illustration.webp" alt="xf - Ultra-fast CLI for searching your X data archive">
+</div>
 
-Ever wanted to instantly search through years of your tweets, likes, and DMs? `xf` indexes your X (formerly Twitter) data export and provides blazingly fast full-text search with sub-millisecond query latency.
+<div align="center">
+
+[![CI](https://github.com/Dicklesworthstone/xf/actions/workflows/ci.yml/badge.svg)](https://github.com/Dicklesworthstone/xf/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
+</div>
+
+Ultra-fast CLI for searching and querying your X data archive with sub-millisecond latency.
+
+<div align="center">
+<h3>Quick Install</h3>
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/xf/main/install.sh | bash
+```
+
+<p><em>Works on Linux and macOS. Auto-detects your platform and downloads the right binary.</em></p>
+</div>
+
+---
+
+## TL;DR
+
+**The Problem**: X lets you download all your data, but actually *finding* anything in that archive is painful. The built-in HTML viewer is slow and clunky, there's no real search, and your data is scattered across separate files.
+
+**The Solution**: `xf` indexes your X (formerly Twitter) data export and provides blazingly fast full-text search across tweets, likes, DMs, and Grok conversations—all from the command line.
+
+### Why Use xf?
+
+| Feature | What It Does |
+|---------|--------------|
+| **Sub-Millisecond Search** | Tantivy-powered full-text search with BM25 ranking |
+| **Search Everything** | Tweets, likes, DMs, and Grok conversations in one place |
+| **Rich Query Syntax** | Phrases, wildcards, boolean operators (`AND`, `OR`, `NOT`) |
+| **DM Context** | View full conversation threads with search matches highlighted |
+| **Multiple Formats** | JSON, CSV, compact, or colorized terminal output |
+| **Privacy-First** | All data stays local on your machine—nothing sent anywhere |
+| **Fast Indexing** | ~10,000 documents/second with parallel parsing |
+
+### Quick Example
+
+```bash
+# Index your archive (one-time setup, ~5 seconds)
+$ xf index ~/x-archive
+
+# Search across everything
+$ xf search "machine learning"
+
+# Search only your DMs with full conversation context
+$ xf search "meeting tomorrow" --types dm --context
+
+# Export results as JSON
+$ xf search "rust async" --format json --limit 50
+```
+---
+## Prepared Blurb for AGENTS.md Files:
+```
+## xf — X Archive Search
+
+Ultra-fast local search for X (Twitter) data archives. Parses `window.YTD.*` JavaScript format from X data exports. Sub-millisecond full-text search via Tantivy + SQLite storage.
+
+### Core Workflow
+
+```bash
+# 1. Index archive (one-time, ~5-30 seconds)
+xf index ~/x-archive
+xf index ~/x-archive --force          # Rebuild from scratch
+xf index ~/x-archive --only tweet,dm  # Index specific types
+xf index ~/x-archive --skip grok      # Skip specific types
+
+# 2. Search
+xf search "machine learning"          # Search all indexed content
+xf search "meeting" --types dm        # DMs only
+xf search "rust async" --types tweet  # Tweets only
+xf search "article" --types like      # Liked tweets only
+xf search "claude" --types grok       # Grok conversations only
+
+Search Syntax
+
+xf search "exact phrase"              # Phrase match (quotes matter)
+xf search "rust AND async"            # Boolean AND
+xf search "python OR javascript"      # Boolean OR
+xf search "python NOT snake"          # Exclusion
+xf search "rust*"                     # Wildcard prefix
+
+Key Flags
+
+--format json                         # Machine-readable output (use this!)
+--format csv                          # Spreadsheet export
+--limit 50                            # Results count (default: 20)
+--offset 20                           # Pagination
+--context                             # Full DM conversation thread (--types dm only)
+--since "2024-01-01"                  # Date filter (supports natural language)
+--until "last week"                   # Date filter
+--sort date|date_desc|relevance|engagement
+
+Other Commands
+
+xf stats                              # Archive overview (counts, date range)
+xf stats --detailed                   # Full analytics (temporal, engagement, content)
+xf stats --format json                # Machine-readable stats
+xf tweet <id>                         # Show specific tweet by ID
+xf tweet <id> --engagement            # Include engagement metrics
+xf list tweets --limit 20             # Browse indexed tweets
+xf list dms                           # Browse DM conversations
+xf doctor                             # Health checks (archive, DB, index)
+xf shell                              # Interactive REPL
+
+Data Types
+
+tweet (your posts), like (liked tweets), dm (direct messages), grok (AI chats), follower, following, block, mute
+
+Storage
+
+- Database: ~/.local/share/xf/xf.db (override: XF_DB env)
+- Index: ~/.local/share/xf/xf_index/ (override: XF_INDEX env)
+- Archive format: Expects data/ directory with tweets.js, like.js, direct-messages.js, etc.
+
+Notes
+
+- First search after restart may be slower (index loading). Subsequent searches <1ms.
+- --context only works with --types dm — shows full conversation around matches.
+- All data stays local. No network access.
+```
+
+---
 
 ## Origins & Authors
 
-This project was created by Jeffrey Emanuel after realizing that X's data export, while comprehensive, lacks any useful search functionality. The built-in HTML viewer is slow and clunky. `xf` solves this by building a proper search index.
+This project was created by Jeffrey Emanuel after realizing that X's data export, while comprehensive, lacks any useful search functionality.
 
 - **[Jeffrey Emanuel](https://github.com/Dicklesworthstone)** - Creator and maintainer
-
-## Why This Exists
-
-X lets you download all your data, but actually *finding* anything in that archive is painful:
-
-- **The built-in viewer is slow**: Opening `Your archive.html` loads everything into the browser
-- **No real search**: You can't search across tweets, likes, and DMs simultaneously
-- **No CLI access**: Power users want to grep/search from the terminal
-- **Data is scattered**: Tweets, likes, DMs, and Grok chats are in separate files
-
-`xf` solves all of this:
-
-- **Sub-millisecond queries** via Tantivy (Lucene-like search engine written in Rust)
-- **Unified search** across all content types
-- **BM25 ranking** for relevance-sorted results
-- **Multiple output formats** for scripting and integration
-- **Privacy-first**: All data stays local on your machine
-
-## Features
-
-- **Instant Search**: Sub-millisecond query latency via Tantivy
-- **Full-Text Search**: BM25 ranking with phrase queries, wildcards, and boolean operators
-- **Search Everything**: Tweets, likes, DMs, and Grok conversations
-- **DM Context**: View full conversation context with search matches highlighted
-- **Rich CLI**: Colorized output, progress bars, multiple output formats
-- **SQLite Storage**: Metadata queries and statistics
-- **Privacy-First**: All data stays local on your machine
 
 ## Getting Your X Data Archive
 

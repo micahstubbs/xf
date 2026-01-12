@@ -15,7 +15,7 @@ use std::collections::{HashSet, VecDeque};
 use std::path::Path;
 use tracing::info;
 
-const SCHEMA_VERSION: i32 = 1;
+const SCHEMA_VERSION: i32 = 2;
 const fn epoch_utc() -> DateTime<Utc> {
     DateTime::<Utc>::from_timestamp(0, 0).unwrap()
 }
@@ -36,6 +36,8 @@ fn parse_rfc3339_opt(value: Option<String>) -> Option<DateTime<Utc>> {
 pub struct Storage {
     conn: Connection,
 }
+
+type EmbeddingRecord = (String, String, Vec<f32>, Option<[u8; 32]>);
 
 impl Storage {
     /// Open or create the database at the given path.
@@ -258,6 +260,17 @@ impl Storage {
                 grok_id,
                 message
             );
+
+            -- Embeddings for semantic search
+            CREATE TABLE IF NOT EXISTS embeddings (
+                doc_id TEXT PRIMARY KEY,
+                doc_type TEXT NOT NULL,
+                embedding BLOB NOT NULL,
+                content_hash BLOB,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_embeddings_type ON embeddings(doc_type);
+            CREATE INDEX IF NOT EXISTS idx_embeddings_hash ON embeddings(content_hash);
             ",
         )?;
 
@@ -1657,6 +1670,282 @@ impl Storage {
             .collect();
 
         Ok(mutes)
+    }
+
+    /// Get all Grok messages, optionally limited.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database query fails.
+    pub fn get_all_grok_messages(&self, limit: Option<usize>) -> Result<Vec<GrokMessage>> {
+        let query = limit.map_or_else(
+            || {
+                r"SELECT chat_id, message, sender, created_at, grok_mode
+                FROM grok_messages ORDER BY created_at DESC"
+                    .to_string()
+            },
+            |lim| {
+                format!(
+                    r"SELECT chat_id, message, sender, created_at, grok_mode
+                FROM grok_messages ORDER BY created_at DESC LIMIT {lim}"
+                )
+            },
+        );
+
+        let mut stmt = self.conn.prepare(&query)?;
+        let messages = stmt
+            .query_map([], |row| {
+                Ok(GrokMessage {
+                    chat_id: row.get(0)?,
+                    message: row.get(1)?,
+                    sender: row.get(2)?,
+                    created_at: parse_rfc3339_or_epoch(row.get::<_, Option<String>>(3)?),
+                    grok_mode: row.get(4)?,
+                })
+            })?
+            .filter_map(std::result::Result::ok)
+            .collect();
+
+        Ok(messages)
+    }
+
+    // ============================================================
+    // Embeddings (Semantic Search)
+    // ============================================================
+
+    /// Store an embedding for a document.
+    ///
+    /// The embedding is stored as a BLOB with F16 quantization.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database insert fails.
+    pub fn store_embedding(
+        &self,
+        doc_id: &str,
+        doc_type: &str,
+        embedding: &[f32],
+        content_hash: Option<&[u8; 32]>,
+    ) -> Result<()> {
+        use half::f16;
+
+        // Convert f32 to f16 for storage (50% smaller)
+        let f16_bytes: Vec<u8> = embedding
+            .iter()
+            .flat_map(|&f| f16::from_f32(f).to_le_bytes())
+            .collect();
+
+        self.conn.execute(
+            r"
+            INSERT OR REPLACE INTO embeddings
+            (doc_id, doc_type, embedding, content_hash, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            ",
+            params![
+                doc_id,
+                doc_type,
+                f16_bytes,
+                content_hash.map(<[u8; 32]>::as_slice),
+                Utc::now().to_rfc3339(),
+            ],
+        )?;
+
+        Ok(())
+    }
+
+    /// Store multiple embeddings in a batch.
+    ///
+    /// More efficient than calling `store_embedding` repeatedly.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any database insert fails.
+    pub fn store_embeddings_batch(&self, embeddings: &[EmbeddingRecord]) -> Result<usize> {
+        use half::f16;
+
+        let tx = self.conn.unchecked_transaction()?;
+        let mut count = 0;
+
+        {
+            let mut stmt = tx.prepare(
+                r"
+                INSERT OR REPLACE INTO embeddings
+                (doc_id, doc_type, embedding, content_hash, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                ",
+            )?;
+
+            let now = Utc::now().to_rfc3339();
+
+            for (doc_id, doc_type, embedding, content_hash) in embeddings {
+                let f16_bytes: Vec<u8> = embedding
+                    .iter()
+                    .flat_map(|&f| f16::from_f32(f).to_le_bytes())
+                    .collect();
+
+                stmt.execute(params![
+                    doc_id,
+                    doc_type,
+                    f16_bytes,
+                    content_hash.as_ref().map(<[u8; 32]>::as_slice),
+                    &now,
+                ])?;
+                count += 1;
+            }
+        }
+
+        tx.commit()?;
+        Ok(count)
+    }
+
+    /// Get an embedding by document ID.
+    ///
+    /// Returns the embedding as f32 values (converted from stored F16).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database query fails.
+    ///
+    /// # Panics
+    ///
+    /// Panics if stored embedding bytes are not aligned to 2-byte F16 chunks.
+    pub fn get_embedding(&self, doc_id: &str) -> Result<Option<Vec<f32>>> {
+        use half::f16;
+
+        let result: rusqlite::Result<Vec<u8>> = self.conn.query_row(
+            "SELECT embedding FROM embeddings WHERE doc_id = ?",
+            params![doc_id],
+            |row| row.get(0),
+        );
+
+        match result {
+            Ok(bytes) => {
+                // Convert F16 bytes back to f32
+                let floats: Vec<f32> = bytes
+                    .chunks_exact(2)
+                    .map(|chunk| {
+                        let arr: [u8; 2] = chunk.try_into().unwrap();
+                        f16::from_le_bytes(arr).to_f32()
+                    })
+                    .collect();
+                Ok(Some(floats))
+            }
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Load all embeddings for vector search.
+    ///
+    /// Returns tuples of (`doc_id`, `doc_type`, embedding).
+    /// Embeddings are converted to f32 for fast dot product computation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database query fails.
+    ///
+    /// # Panics
+    ///
+    /// Panics if stored embedding bytes are not aligned to 2-byte F16 chunks.
+    pub fn load_all_embeddings(&self) -> Result<Vec<(String, String, Vec<f32>)>> {
+        use half::f16;
+
+        let mut stmt = self
+            .conn
+            .prepare("SELECT doc_id, doc_type, embedding FROM embeddings")?;
+
+        let rows = stmt.query_map([], |row| {
+            let doc_id: String = row.get(0)?;
+            let doc_type: String = row.get(1)?;
+            let bytes: Vec<u8> = row.get(2)?;
+
+            // Convert F16 bytes to f32
+            let floats: Vec<f32> = bytes
+                .chunks_exact(2)
+                .map(|chunk| {
+                    let arr: [u8; 2] = chunk.try_into().unwrap();
+                    f16::from_le_bytes(arr).to_f32()
+                })
+                .collect();
+
+            Ok((doc_id, doc_type, floats))
+        })?;
+
+        let embeddings: Vec<_> = rows.filter_map(std::result::Result::ok).collect();
+        Ok(embeddings)
+    }
+
+    /// Load embeddings filtered by document type.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database query fails.
+    ///
+    /// # Panics
+    ///
+    /// Panics if stored embedding bytes are not aligned to 2-byte F16 chunks.
+    pub fn load_embeddings_by_type(&self, doc_type: &str) -> Result<Vec<(String, Vec<f32>)>> {
+        use half::f16;
+
+        let mut stmt = self
+            .conn
+            .prepare("SELECT doc_id, embedding FROM embeddings WHERE doc_type = ?")?;
+
+        let rows = stmt.query_map(params![doc_type], |row| {
+            let doc_id: String = row.get(0)?;
+            let bytes: Vec<u8> = row.get(1)?;
+
+            let floats: Vec<f32> = bytes
+                .chunks_exact(2)
+                .map(|chunk| {
+                    let arr: [u8; 2] = chunk.try_into().unwrap();
+                    f16::from_le_bytes(arr).to_f32()
+                })
+                .collect();
+
+            Ok((doc_id, floats))
+        })?;
+
+        let embeddings: Vec<_> = rows.filter_map(std::result::Result::ok).collect();
+        Ok(embeddings)
+    }
+
+    /// Check if an embedding exists by content hash.
+    ///
+    /// Useful for skipping re-embedding of unchanged content.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database query fails.
+    pub fn embedding_exists_by_hash(&self, content_hash: &[u8; 32]) -> Result<bool> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM embeddings WHERE content_hash = ?",
+            params![content_hash.as_slice()],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    /// Get the total count of embeddings.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database query fails.
+    pub fn embedding_count(&self) -> Result<i64> {
+        let count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM embeddings", [], |row| row.get(0))?;
+        Ok(count)
+    }
+
+    /// Delete all embeddings.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database delete fails.
+    pub fn clear_embeddings(&self) -> Result<()> {
+        self.conn.execute("DELETE FROM embeddings", [])?;
+        Ok(())
     }
 }
 

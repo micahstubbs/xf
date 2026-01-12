@@ -1,0 +1,224 @@
+//! Embedder trait and types for text embedding.
+//!
+//! Provides a common interface for converting text into dense vectors
+//! for semantic similarity search.
+
+use thiserror::Error;
+
+/// Errors that can occur during embedding operations.
+#[derive(Debug, Error)]
+pub enum EmbedderError {
+    /// The embedder is not available (e.g., model files missing).
+    #[error("embedder unavailable: {0}")]
+    Unavailable(String),
+
+    /// Failed to generate an embedding.
+    #[error("embedding failed: {0}")]
+    EmbeddingFailed(String),
+
+    /// Invalid input provided to the embedder.
+    #[error("invalid input: {0}")]
+    InvalidInput(String),
+
+    /// Internal error during embedding.
+    #[error("internal error: {0}")]
+    Internal(String),
+}
+
+/// Result type for embedder operations.
+pub type EmbedderResult<T> = Result<T, EmbedderError>;
+
+/// Information about an embedder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmbedderInfo {
+    /// Unique identifier for this embedder (e.g., "fnv1a-384", "minilm-384").
+    pub id: String,
+    /// Output dimension of embeddings.
+    pub dimension: usize,
+    /// Whether this is a semantic (ML-based) embedder.
+    pub is_semantic: bool,
+}
+
+/// Trait for text embedding implementations.
+///
+/// Embedders convert text into fixed-dimension dense vectors that can be
+/// compared using cosine similarity (or dot product for normalized vectors).
+///
+/// # Implementations
+///
+/// - [`HashEmbedder`](crate::hash_embedder::HashEmbedder): Fast, deterministic
+///   hash-based embeddings using FNV-1a. Always available, ~0ms per embedding.
+///
+/// - `FastEmbedder` (optional): ML-based semantic embeddings using `MiniLM`.
+///   Requires model files, ~5ms per embedding.
+pub trait Embedder: Send + Sync {
+    /// Embed a single text into a dense vector.
+    ///
+    /// The returned vector is L2-normalized (unit length).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the input is invalid or embedding fails.
+    fn embed(&self, text: &str) -> EmbedderResult<Vec<f32>>;
+
+    /// Embed multiple texts in a batch.
+    ///
+    /// Default implementation calls `embed` for each text.
+    /// Implementations may override for better batching performance.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any input is invalid or embedding fails.
+    fn embed_batch(&self, texts: &[&str]) -> EmbedderResult<Vec<Vec<f32>>> {
+        texts.iter().map(|t| self.embed(t)).collect()
+    }
+
+    /// Get the output dimension of embeddings.
+    fn dimension(&self) -> usize;
+
+    /// Get the unique identifier for this embedder.
+    fn id(&self) -> &str;
+
+    /// Check if this is a semantic (ML-based) embedder.
+    ///
+    /// Hash-based embedders return `false`, ML embedders return `true`.
+    fn is_semantic(&self) -> bool;
+
+    /// Get information about this embedder.
+    fn info(&self) -> EmbedderInfo {
+        EmbedderInfo {
+            id: self.id().to_string(),
+            dimension: self.dimension(),
+            is_semantic: self.is_semantic(),
+        }
+    }
+}
+
+/// L2-normalize a vector in place.
+///
+/// After normalization, the vector has unit length (L2 norm = 1.0).
+/// This allows cosine similarity to be computed as a simple dot product.
+#[inline]
+pub fn l2_normalize(vec: &mut [f32]) {
+    let norm: f32 = vec.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm > f32::EPSILON {
+        for x in vec.iter_mut() {
+            *x /= norm;
+        }
+    }
+}
+
+/// Compute the dot product of two vectors.
+///
+/// For L2-normalized vectors, this equals cosine similarity.
+#[inline]
+#[must_use]
+pub fn dot_product(a: &[f32], b: &[f32]) -> f32 {
+    debug_assert_eq!(a.len(), b.len(), "vectors must have same dimension");
+    a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
+}
+
+/// Compute the dot product using SIMD (8 floats per iteration).
+///
+/// Falls back to scalar for remainder elements.
+///
+/// # Panics
+///
+/// Panics if the internal SIMD chunk conversion fails (should be unreachable
+/// because chunks are always length 8).
+#[inline]
+#[must_use]
+pub fn dot_product_simd(a: &[f32], b: &[f32]) -> f32 {
+    use wide::f32x8;
+
+    debug_assert_eq!(a.len(), b.len(), "vectors must have same dimension");
+
+    let chunks_a = a.chunks_exact(8);
+    let chunks_b = b.chunks_exact(8);
+    let remainder_a = chunks_a.remainder();
+    let remainder_b = chunks_b.remainder();
+
+    let mut sum = f32x8::ZERO;
+    for (ca, cb) in chunks_a.zip(chunks_b) {
+        let arr_a: [f32; 8] = ca.try_into().unwrap();
+        let arr_b: [f32; 8] = cb.try_into().unwrap();
+        sum += f32x8::from(arr_a) * f32x8::from(arr_b);
+    }
+
+    let mut scalar_sum: f32 = sum.reduce_add();
+    for (a, b) in remainder_a.iter().zip(remainder_b) {
+        scalar_sum += a * b;
+    }
+    scalar_sum
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_l2_normalize() {
+        let mut vec = vec![3.0, 4.0];
+        l2_normalize(&mut vec);
+
+        let norm: f32 = vec.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!((norm - 1.0).abs() < 1e-6);
+        assert!((vec[0] - 0.6).abs() < 1e-6);
+        assert!((vec[1] - 0.8).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_l2_normalize_zero_vector() {
+        let mut vec = vec![0.0, 0.0, 0.0];
+        l2_normalize(&mut vec);
+        // Should not panic, vector remains zero
+        assert!(vec.iter().all(|x| *x == 0.0));
+    }
+
+    #[test]
+    fn test_dot_product() {
+        let a = vec![1.0, 2.0, 3.0];
+        let b = vec![4.0, 5.0, 6.0];
+        let result = dot_product(&a, &b);
+        assert!((result - 32.0).abs() < 1e-6); // 1*4 + 2*5 + 3*6 = 32
+    }
+
+    #[test]
+    #[allow(clippy::cast_precision_loss)]
+    fn test_dot_product_simd() {
+        // Test with 16 elements (exactly 2 SIMD chunks)
+        let a: Vec<f32> = (0..16).map(|i| i as f32).collect();
+        let b: Vec<f32> = (0..16).map(|i| (i * 2) as f32).collect();
+
+        let scalar = dot_product(&a, &b);
+        let simd = dot_product_simd(&a, &b);
+
+        assert!((scalar - simd).abs() < 1e-4);
+    }
+
+    #[test]
+    #[allow(clippy::cast_precision_loss)]
+    fn test_dot_product_simd_with_remainder() {
+        // Test with 19 elements (2 chunks + 3 remainder)
+        let a: Vec<f32> = (0..19).map(|i| i as f32).collect();
+        let b: Vec<f32> = (0..19).map(|i| (i + 1) as f32).collect();
+
+        let scalar = dot_product(&a, &b);
+        let simd = dot_product_simd(&a, &b);
+
+        assert!((scalar - simd).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_normalized_dot_is_cosine() {
+        let mut a = vec![1.0, 2.0, 3.0];
+        let mut b = vec![4.0, 5.0, 6.0];
+
+        l2_normalize(&mut a);
+        l2_normalize(&mut b);
+
+        let cosine = dot_product(&a, &b);
+        // Cosine similarity of [1,2,3] and [4,5,6] = 32 / (√14 * √77) ≈ 0.9746
+        assert!((cosine - 0.9746).abs() < 0.001);
+    }
+}

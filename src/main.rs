@@ -17,12 +17,17 @@ use std::time::{Duration, Instant};
 use tracing::{Level, info, warn};
 use tracing_subscriber::EnvFilter;
 
+use xf::canonicalize::canonicalize_for_embedding;
 use xf::cli;
 use xf::config::Config;
 use xf::date_parser;
+use xf::embedder::Embedder;
+use xf::hash_embedder::HashEmbedder;
+use xf::hybrid::{self, SearchMode};
 use xf::repl;
 use xf::search;
 use xf::stats_analytics::{self, ContentStats, EngagementStats, TemporalStats};
+use xf::vector::VectorIndex;
 use xf::{
     ArchiveParser, ArchiveStats, CONTENT_DIVIDER_WIDTH, Cli, Commands, DataType, ExportFormat,
     ExportTarget, HEADER_DIVIDER_WIDTH, ListTarget, OutputFormat, SearchEngine, SearchResult,
@@ -57,31 +62,306 @@ fn main() -> Result<()> {
 
     // Run the appropriate command
     match &cli.command {
-        Commands::Index(args) => cmd_index(&cli, args),
-        Commands::Search(args) => cmd_search(&cli, args),
-        Commands::Stats(args) => cmd_stats(&cli, args),
-        Commands::Tweet(args) => cmd_tweet(&cli, args),
-        Commands::List(args) => cmd_list(&cli, args),
-        Commands::Export(args) => cmd_export(&cli, args),
-        Commands::Config(args) => cmd_config(&cli, args),
-        Commands::Update => {
+        None => {
+            print_quickstart();
+            Ok(())
+        }
+        Some(Commands::Index(args)) => cmd_index(&cli, args),
+        Some(Commands::Search(args)) => cmd_search(&cli, args),
+        Some(Commands::Stats(args)) => cmd_stats(&cli, args),
+        Some(Commands::Tweet(args)) => cmd_tweet(&cli, args),
+        Some(Commands::List(args)) => cmd_list(&cli, args),
+        Some(Commands::Export(args)) => cmd_export(&cli, args),
+        Some(Commands::Config(args)) => cmd_config(&cli, args),
+        Some(Commands::Update) => {
             cmd_update();
             Ok(())
         }
-        Commands::Completions(args) => {
+        Some(Commands::Completions(args)) => {
             cmd_completions(args);
             Ok(())
         }
-        Commands::Doctor(args) => cmd_doctor(&cli, args),
-        Commands::Shell(args) => cmd_shell(&cli, args),
+        Some(Commands::Doctor(args)) => cmd_doctor(&cli, args),
+        Some(Commands::Shell(args)) => cmd_shell(&cli, args),
     }
+}
+
+/// Print a colorful quickstart guide when xf is run with no arguments.
+#[allow(clippy::too_many_lines)]
+fn print_quickstart() {
+    let version = env!("CARGO_PKG_VERSION");
+
+    // Box-drawing characters
+    let tl = "╭"; // top-left
+    let tr = "╮"; // top-right
+    let bl = "╰"; // bottom-left
+    let br = "╯"; // bottom-right
+    let h = "─"; // horizontal
+    let v = "│"; // vertical
+
+    let width = 78;
+    let inner = width - 2;
+
+    // Helper to create a horizontal line
+    let hline =
+        |left: &str, right: &str| -> String { format!("{}{}{}", left, h.repeat(inner), right) };
+
+    // Helper to pad a line to fill the box
+    let pad = |text: &str| -> String {
+        let visible_len = console::measure_text_width(text);
+        let padding = inner.saturating_sub(visible_len);
+        format!("{v} {text}{}{v}", " ".repeat(padding.saturating_sub(1)))
+    };
+
+    // Header
+    println!("{}", hline(tl, tr).bright_cyan());
+    println!("{}", pad(""));
+    println!(
+        "{}",
+        pad(&format!(
+            "{}  {}",
+            "xf".bold().bright_cyan(),
+            format!("v{version}").dimmed()
+        ))
+    );
+    println!(
+        "{}",
+        pad(&"Ultra-fast CLI for searching your X data archive"
+            .italic()
+            .to_string())
+    );
+    println!("{}", pad(""));
+    println!(
+        "{}",
+        format!("{v}{}{v}", h.repeat(inner).dimmed()).bright_cyan()
+    );
+
+    // Quick Start section
+    println!("{}", pad(""));
+    println!(
+        "{}",
+        pad(&format!("{}  Getting Started", "1.".bold().yellow()))
+    );
+    println!("{}", pad(""));
+    println!(
+        "{}",
+        pad(&format!(
+            "   Download your archive from: {}",
+            "x.com/settings/download_your_data".cyan()
+        ))
+    );
+    println!(
+        "{}",
+        pad("   (X emails you when it's ready, usually 24-48 hours)")
+    );
+    println!("{}", pad(""));
+    println!(
+        "{}",
+        pad(&format!("{}  Extract Your Archive", "2.".bold().yellow()))
+    );
+    println!("{}", pad(""));
+    println!(
+        "{}",
+        pad(&format!(
+            "   {}",
+            "unzip ~/Downloads/twitter-2026-01-09-*.zip -d /data/projects/my_twitter_data"
+                .bright_green()
+        ))
+    );
+    println!("{}", pad(""));
+    println!(
+        "{}",
+        pad(&format!("{}  Index Your Data", "3.".bold().yellow()))
+    );
+    println!("{}", pad(""));
+    println!(
+        "{}",
+        pad(&format!(
+            "   {}  {}",
+            "xf index".bright_green(),
+            "# Uses default path: /data/projects/my_twitter_data".dimmed()
+        ))
+    );
+    println!(
+        "{}",
+        pad(&format!(
+            "   {}  {}",
+            "xf index ~/other/path".bright_green(),
+            "# Or specify a custom path".dimmed()
+        ))
+    );
+    println!(
+        "{}",
+        pad("   (Takes ~5-30 seconds depending on archive size)")
+    );
+    println!("{}", pad(""));
+    println!(
+        "{}",
+        format!("{v}{}{v}", h.repeat(inner).dimmed()).bright_cyan()
+    );
+
+    // Example searches section
+    println!("{}", pad(""));
+    println!(
+        "{}",
+        pad(&format!("{}", "Example Searches".bold().bright_magenta()))
+    );
+    println!("{}", pad(""));
+    println!(
+        "{}",
+        pad(&format!(
+            "   {}  {}",
+            "xf search \"machine learning\"".bright_green(),
+            "# Find tweets about ML".dimmed()
+        ))
+    );
+    println!(
+        "{}",
+        pad(&format!(
+            "   {}  {}",
+            "xf search \"dinner plans\" --types dm".bright_green(),
+            "# Search your DMs".dimmed()
+        ))
+    );
+    println!(
+        "{}",
+        pad(&format!(
+            "   {}  {}",
+            "xf search \"conference\" --types dm --context".bright_green(),
+            "# DMs with full convo".dimmed()
+        ))
+    );
+    println!(
+        "{}",
+        pad(&format!(
+            "   {}  {}",
+            "xf search \"interesting article\" --types like".bright_green(),
+            "# Tweets you liked".dimmed()
+        ))
+    );
+    println!(
+        "{}",
+        pad(&format!(
+            "   {}  {}",
+            "xf search \"bug fix\" --since \"last month\"".bright_green(),
+            "# Recent tweets only".dimmed()
+        ))
+    );
+    println!(
+        "{}",
+        pad(&format!(
+            "   {}  {}",
+            "xf search \"project update\" --format json".bright_green(),
+            "# JSON output".dimmed()
+        ))
+    );
+    println!("{}", pad(""));
+    println!(
+        "{}",
+        format!("{v}{}{v}", h.repeat(inner).dimmed()).bright_cyan()
+    );
+
+    // More commands section
+    println!("{}", pad(""));
+    println!(
+        "{}",
+        pad(&format!("{}", "More Commands".bold().bright_magenta()))
+    );
+    println!("{}", pad(""));
+    println!(
+        "{}",
+        pad(&format!(
+            "   {}  {}",
+            "xf stats".bright_green(),
+            "# Archive overview (counts, date range)".dimmed()
+        ))
+    );
+    println!(
+        "{}",
+        pad(&format!(
+            "   {}  {}",
+            "xf stats --detailed".bright_green(),
+            "# Full analytics dashboard".dimmed()
+        ))
+    );
+    println!(
+        "{}",
+        pad(&format!(
+            "   {}  {}",
+            "xf list tweets --limit 20".bright_green(),
+            "# Browse recent tweets".dimmed()
+        ))
+    );
+    println!(
+        "{}",
+        pad(&format!(
+            "   {}  {}",
+            "xf list conversations".bright_green(),
+            "# See all DM threads".dimmed()
+        ))
+    );
+    println!(
+        "{}",
+        pad(&format!(
+            "   {}  {}",
+            "xf tweet 1234567890 --thread".bright_green(),
+            "# View a tweet thread".dimmed()
+        ))
+    );
+    println!(
+        "{}",
+        pad(&format!(
+            "   {}  {}",
+            "xf export tweets --format csv -o tweets.csv".bright_green(),
+            "# Export to CSV".dimmed()
+        ))
+    );
+    println!(
+        "{}",
+        pad(&format!(
+            "   {}  {}",
+            "xf shell".bright_green(),
+            "# Interactive REPL mode".dimmed()
+        ))
+    );
+    println!(
+        "{}",
+        pad(&format!(
+            "   {}  {}",
+            "xf doctor".bright_green(),
+            "# Check archive/index health".dimmed()
+        ))
+    );
+    println!("{}", pad(""));
+    println!(
+        "{}",
+        format!("{v}{}{v}", h.repeat(inner).dimmed()).bright_cyan()
+    );
+
+    // Footer
+    println!("{}", pad(""));
+    println!(
+        "{}",
+        pad(&format!(
+            "Documentation: {}",
+            "https://github.com/Dicklesworthstone/xf".cyan().underline()
+        ))
+    );
+    println!(
+        "{}",
+        pad(&format!(
+            "Run {} for all options",
+            "xf --help".bright_green()
+        ))
+    );
+    println!("{}", pad(""));
+    println!("{}", hline(bl, br).bright_cyan());
 }
 
 fn no_color_env_set() -> bool {
     match std::env::var("NO_COLOR") {
-        Ok(value) => !value.is_empty(),
         Err(std::env::VarError::NotPresent) => false,
-        Err(std::env::VarError::NotUnicode(_)) => true,
+        Ok(_) | Err(std::env::VarError::NotUnicode(_)) => true,
     }
 }
 
@@ -107,7 +387,9 @@ fn get_index_path(cli: &Cli) -> PathBuf {
 
 #[allow(clippy::too_many_lines)]
 fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
-    let archive_path = &args.archive_path;
+    // Use provided path or fall back to default
+    let default_path = PathBuf::from(xf::DEFAULT_ARCHIVE_PATH);
+    let archive_path = args.archive_path.as_ref().unwrap_or(&default_path);
 
     // Validate archive path
     if !archive_path.exists() {
@@ -199,7 +481,7 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
     );
 
     // Determine what to index
-    let data_types = args.only.as_ref().map_or_else(
+    let mut data_types = args.only.as_ref().map_or_else(
         || {
             args.skip.as_ref().map_or_else(DataType::all, |skip| {
                 DataType::all()
@@ -210,6 +492,33 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
         },
         Clone::clone,
     );
+
+    if let Some(only) = &args.only {
+        if only.iter().any(|t| matches!(t, DataType::All)) {
+            data_types = DataType::all();
+        }
+    }
+
+    if let Some(skip) = &args.skip {
+        if skip.iter().any(|t| matches!(t, DataType::All)) {
+            data_types.clear();
+        }
+    }
+
+    if data_types.is_empty() {
+        anyhow::bail!(
+            "{}",
+            format_error(
+                "No data types selected",
+                "Your filters excluded all data types.",
+                &[
+                    "Remove --skip all",
+                    "Use --only tweet,like,dm,grok,follower,following,block,mute",
+                    "Run 'xf index <archive_path>' to index everything",
+                ],
+            )
+        );
+    }
 
     // Progress bar (hidden when stdout is non-tty)
     let use_progress = std::io::stdout().is_terminal();
@@ -356,6 +665,9 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
     writer.commit()?;
     search_engine.reload()?;
 
+    // Generate embeddings for semantic search
+    generate_embeddings(&storage, !cli.quiet)?;
+
     let total_elapsed = format_duration(index_start.elapsed());
 
     println!();
@@ -370,6 +682,165 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
     );
     println!();
     println!("Run {} to search your archive.", "xf search <query>".bold());
+
+    Ok(())
+}
+
+/// Generate embeddings for all documents in the archive.
+///
+/// This function creates embeddings for tweets, likes, DMs, and Grok messages
+/// using the hash-based embedder, storing them in the `SQLite` embeddings table.
+#[allow(clippy::too_many_lines)]
+fn generate_embeddings(storage: &Storage, show_progress: bool) -> Result<()> {
+    use xf::canonicalize::content_hash;
+
+    // Type alias for embedding records: (doc_id, doc_type, embedding, content_hash)
+    type EmbedRecord = (String, String, Vec<f32>, Option<[u8; 32]>);
+
+    const BATCH_SIZE: usize = 100;
+    let embed_start = Instant::now();
+    let embedder = HashEmbedder::default();
+
+    if show_progress {
+        println!();
+        println!("{}", "Generating semantic embeddings...".bold().cyan());
+    }
+
+    // Collect all documents with their text and type
+    let mut docs: Vec<(String, String, String)> = Vec::new(); // (id, text, type)
+
+    // Tweets
+    let tweets = storage.get_all_tweets(None)?;
+    for tweet in &tweets {
+        docs.push((
+            tweet.id.clone(),
+            tweet.full_text.clone(),
+            "tweet".to_string(),
+        ));
+    }
+
+    // Likes (only if they have text)
+    let likes = storage.get_all_likes(None)?;
+    for like in &likes {
+        if let Some(ref text) = like.full_text {
+            if !text.is_empty() {
+                docs.push((like.tweet_id.clone(), text.clone(), "like".to_string()));
+            }
+        }
+    }
+
+    // DMs
+    let dms = storage.get_all_dms(None)?;
+    for dm in &dms {
+        if !dm.text.is_empty() {
+            docs.push((dm.id.clone(), dm.text.clone(), "dm".to_string()));
+        }
+    }
+
+    // Grok messages
+    let grok_msgs = storage.get_all_grok_messages(None)?;
+    for (idx, msg) in grok_msgs.iter().enumerate() {
+        if !msg.message.is_empty() {
+            // Grok messages don't have unique IDs, use chat_id + index
+            let doc_id = format!("grok_{}_{}", msg.chat_id, idx);
+            docs.push((doc_id, msg.message.clone(), "grok".to_string()));
+        }
+    }
+
+    if docs.is_empty() {
+        if show_progress {
+            println!("  {} No documents to embed", "⚠".yellow());
+        }
+        return Ok(());
+    }
+
+    // Create progress bar
+    let pb = if show_progress {
+        let pb = ProgressBar::new(docs.len() as u64);
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template("  {spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} ({eta})")
+                .expect("valid template")
+                .progress_chars("█▓░"),
+        );
+        Some(pb)
+    } else {
+        None
+    };
+
+    // Generate and store embeddings in batches
+    let mut stored_count = 0;
+    let mut skipped_count = 0;
+
+    for chunk in docs.chunks(BATCH_SIZE) {
+        let mut batch: Vec<EmbedRecord> = Vec::new();
+
+        for (doc_id, text, doc_type) in chunk {
+            // Canonicalize text
+            let canonical = canonicalize_for_embedding(text);
+            if canonical.is_empty() {
+                skipped_count += 1;
+                if let Some(ref pb) = pb {
+                    pb.inc(1);
+                }
+                continue;
+            }
+
+            // Compute content hash for deduplication
+            let hash = content_hash(&canonical);
+
+            // Check if we already have this exact content
+            if storage.embedding_exists_by_hash(&hash)? {
+                skipped_count += 1;
+                if let Some(ref pb) = pb {
+                    pb.inc(1);
+                }
+                continue;
+            }
+
+            // Generate embedding
+            match embedder.embed(&canonical) {
+                Ok(embedding) => {
+                    batch.push((doc_id.clone(), doc_type.clone(), embedding, Some(hash)));
+                }
+                Err(e) => {
+                    warn!("Failed to embed doc {}: {}", doc_id, e);
+                    skipped_count += 1;
+                }
+            }
+
+            if let Some(ref pb) = pb {
+                pb.inc(1);
+            }
+        }
+
+        // Store batch
+        if !batch.is_empty() {
+            storage.store_embeddings_batch(&batch)?;
+            stored_count += batch.len();
+        }
+    }
+
+    if let Some(pb) = pb {
+        pb.finish_and_clear();
+    }
+
+    let embed_elapsed = format_duration(embed_start.elapsed());
+    if show_progress {
+        println!(
+            "  {} {} embeddings generated {}",
+            "✓".green(),
+            format_number_usize(stored_count).bold(),
+            format!("({embed_elapsed})").dimmed()
+        );
+        if skipped_count > 0 {
+            println!(
+                "  {} {} skipped (empty or duplicate)",
+                "·".dimmed(),
+                format_number_usize(skipped_count).dimmed()
+            );
+        }
+    }
 
     Ok(())
 }
@@ -447,8 +918,26 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
     }
 
     let search_engine = SearchEngine::open(&index_path)?;
-    let storage = if args.context {
-        Some(Storage::open(&db_path)?)
+    let storage = Storage::open(&db_path)?;
+
+    // Load vector index for semantic/hybrid search
+    let vector_index = if matches!(args.mode, SearchMode::Semantic | SearchMode::Hybrid) {
+        let embeddings = storage.load_all_embeddings()?;
+        if embeddings.is_empty() && matches!(args.mode, SearchMode::Semantic) {
+            anyhow::bail!(
+                "{}",
+                format_error(
+                    "No embeddings found",
+                    "Semantic search requires embeddings. Your archive may need re-indexing.",
+                    &["Run 'xf index <archive_path> --force' to rebuild with embeddings"],
+                )
+            );
+        }
+        let mut index = VectorIndex::new(384); // HashEmbedder dimension
+        for (doc_id, doc_type, embedding) in embeddings {
+            index.add(doc_id, doc_type, embedding);
+        }
+        Some(index)
     } else {
         None
     };
@@ -498,21 +987,128 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
     // Time the search operation
     let search_start = Instant::now();
 
-    let mut fetch_limit = limit_target.min(max_docs);
-    let mut results = loop {
-        let mut batch = search_engine.search(&args.query, doc_types.as_deref(), fetch_limit)?;
-        if needs_post_filter {
-            apply_search_filters(&mut batch, since, until, args.replies_only, args.no_replies);
+    // Perform search based on mode
+    let mut results = match args.mode {
+        SearchMode::Lexical => {
+            // Original lexical-only search
+            let mut fetch_limit = limit_target.min(max_docs);
+            loop {
+                let mut batch =
+                    search_engine.search(&args.query, doc_types.as_deref(), fetch_limit)?;
+                if needs_post_filter {
+                    apply_search_filters(
+                        &mut batch,
+                        since,
+                        until,
+                        args.replies_only,
+                        args.no_replies,
+                    );
+                }
+
+                if batch.len() >= limit_target || fetch_limit >= max_docs {
+                    break batch;
+                }
+
+                let next = fetch_limit
+                    .saturating_mul(2)
+                    .max(fetch_limit.saturating_add(1));
+                fetch_limit = next.min(max_docs);
+            }
         }
 
-        if batch.len() >= limit_target || fetch_limit >= max_docs {
-            break batch;
+        SearchMode::Semantic => {
+            // Semantic-only search using vector similarity
+            let vector_index = vector_index
+                .as_ref()
+                .expect("vector index required for semantic");
+            let embedder = HashEmbedder::default();
+            let canonical_query = canonicalize_for_embedding(&args.query);
+
+            if canonical_query.is_empty() {
+                Vec::new()
+            } else {
+                let query_embedding = embedder.embed(&canonical_query)?;
+
+                // Convert doc_types to string slices for vector search
+                let type_strs: Option<Vec<&str>> = doc_types
+                    .as_ref()
+                    .map(|types| types.iter().map(|t| t.as_str()).collect());
+
+                let semantic_hits = vector_index.search_top_k(
+                    &query_embedding,
+                    limit_target.saturating_mul(hybrid::CANDIDATE_MULTIPLIER),
+                    type_strs.as_deref(),
+                );
+
+                // Look up full results from search engine by doc_id
+                let mut results = Vec::new();
+                for hit in semantic_hits {
+                    if let Ok(Some(result)) = search_engine.get_by_id(&hit.doc_id) {
+                        results.push(result);
+                    }
+                }
+
+                if needs_post_filter {
+                    apply_search_filters(
+                        &mut results,
+                        since,
+                        until,
+                        args.replies_only,
+                        args.no_replies,
+                    );
+                }
+                results
+            }
         }
 
-        let next = fetch_limit
-            .saturating_mul(2)
-            .max(fetch_limit.saturating_add(1));
-        fetch_limit = next.min(max_docs);
+        SearchMode::Hybrid => {
+            // Hybrid search using RRF fusion
+            let embedder = HashEmbedder::default();
+            let canonical_query = canonicalize_for_embedding(&args.query);
+            let candidate_count = hybrid::candidate_count(args.limit, args.offset);
+
+            // Get lexical results
+            let lexical_results =
+                search_engine.search(&args.query, doc_types.as_deref(), candidate_count)?;
+
+            // Get semantic results (if embeddings exist and query canonicalizes)
+            let semantic_results = get_semantic_results(
+                vector_index.as_ref(),
+                &embedder,
+                &canonical_query,
+                doc_types.as_deref(),
+                candidate_count,
+            );
+
+            // Fuse results using RRF
+            let fused =
+                hybrid::rrf_fuse(&lexical_results, &semantic_results, args.limit, args.offset);
+
+            // Convert fused hits back to SearchResults
+            let mut results = Vec::new();
+            for hit in fused {
+                // Prefer lexical result (has full data)
+                if let Some(result) = hit.lexical {
+                    results.push(result);
+                } else {
+                    // Look up from search engine
+                    if let Ok(Some(result)) = search_engine.get_by_id(&hit.doc_id) {
+                        results.push(result);
+                    }
+                }
+            }
+
+            if needs_post_filter {
+                apply_search_filters(
+                    &mut results,
+                    since,
+                    until,
+                    args.replies_only,
+                    args.no_replies,
+                );
+            }
+            results
+        }
     };
 
     apply_search_sort(&mut results, &args.sort);
@@ -552,7 +1148,7 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
     }
 
     if args.context {
-        let contexts = build_dm_context(&results, storage.as_ref().unwrap())?;
+        let contexts = build_dm_context(&results, &storage)?;
         output_dm_context(cli, &contexts)?;
         return Ok(());
     }
@@ -612,6 +1208,34 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Get semantic search results from the vector index.
+///
+/// Returns empty vector if vector index is None, query is empty, or embedding fails.
+fn get_semantic_results(
+    vector_index: Option<&VectorIndex>,
+    embedder: &HashEmbedder,
+    canonical_query: &str,
+    doc_types: Option<&[search::DocType]>,
+    candidate_count: usize,
+) -> Vec<xf::vector::VectorSearchResult> {
+    let Some(vector_index) = vector_index else {
+        return Vec::new();
+    };
+
+    if canonical_query.is_empty() {
+        return Vec::new();
+    }
+
+    let Ok(query_embedding) = embedder.embed(canonical_query) else {
+        return Vec::new();
+    };
+
+    let type_strs: Option<Vec<&str>> =
+        doc_types.map(|types| types.iter().map(|t| t.as_str()).collect());
+
+    vector_index.search_top_k(&query_embedding, candidate_count, type_strs.as_deref())
 }
 
 #[derive(Serialize)]

@@ -12,11 +12,15 @@
 //! - [`search`] - Tantivy-based full-text search engine
 //! - [`storage`] - `SQLite` storage layer
 
+pub mod canonicalize;
 pub mod cli;
 pub mod config;
 pub mod date_parser;
 pub mod doctor;
+pub mod embedder;
 pub mod error;
+pub mod hash_embedder;
+pub mod hybrid;
 pub mod logging;
 pub mod model;
 pub mod parser;
@@ -25,6 +29,7 @@ pub mod repl;
 pub mod search;
 pub mod stats_analytics;
 pub mod storage;
+pub mod vector;
 
 pub use cli::*;
 pub use error::{
@@ -43,6 +48,9 @@ pub const DEFAULT_DB_NAME: &str = "xf.db";
 
 /// Default index directory name
 pub const DEFAULT_INDEX_DIR: &str = "xf_index";
+
+/// Default archive path - if user extracts to this location, xf works without arguments
+pub const DEFAULT_ARCHIVE_PATH: &str = "/data/projects/my_twitter_data";
 
 /// Standard width for content dividers in CLI output
 pub const CONTENT_DIVIDER_WIDTH: usize = 60;

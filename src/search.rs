@@ -44,7 +44,9 @@ pub enum DocType {
 }
 
 impl DocType {
-    const fn as_str(self) -> &'static str {
+    /// Get the string representation of the doc type.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Tweet => "tweet",
             Self::Like => "like",
@@ -478,6 +480,76 @@ impl SearchEngine {
         }
 
         Ok(results)
+    }
+
+    /// Get a single document by its ID.
+    ///
+    /// Returns the document if found, None if not found.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the search operation fails.
+    pub fn get_by_id(&self, doc_id: &str) -> Result<Option<SearchResult>> {
+        let searcher = self.reader.searcher();
+        let (id_field, text_field, _prefix_field, type_field, created_at_field, metadata_field) =
+            self.get_fields();
+
+        // Create a term query for the exact ID
+        let term = Term::from_field_text(id_field, doc_id);
+        let query = TermQuery::new(term, IndexRecordOption::Basic);
+
+        // Execute search (limit 1 since IDs should be unique)
+        let top_docs = searcher.search(&query, &TopDocs::with_limit(1))?;
+
+        if let Some((_score, doc_address)) = top_docs.into_iter().next() {
+            let doc: TantivyDocument = searcher.doc(doc_address)?;
+
+            let id = doc
+                .get_first(id_field)
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+
+            let text = doc
+                .get_first(text_field)
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+
+            let doc_type_str = doc
+                .get_first(type_field)
+                .and_then(|v| v.as_str())
+                .unwrap_or("tweet");
+
+            let created_at_ts = doc
+                .get_first(created_at_field)
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
+
+            let metadata_str = doc
+                .get_first(metadata_field)
+                .and_then(|v| v.as_str())
+                .unwrap_or("{}");
+
+            let result_type = match doc_type_str {
+                "like" => SearchResultType::Like,
+                "dm" => SearchResultType::DirectMessage,
+                "grok" => SearchResultType::GrokMessage,
+                _ => SearchResultType::Tweet,
+            };
+
+            Ok(Some(SearchResult {
+                result_type,
+                id,
+                text,
+                created_at: DateTime::from_timestamp(created_at_ts, 0).unwrap_or_else(epoch_utc),
+                score: 1.0, // ID lookup has no relevance score
+                highlights: vec![],
+                metadata: serde_json::from_str(metadata_str).unwrap_or_default(),
+            }))
+        } else {
+            Ok(None)
+        }
     }
 
     /// Run Tantivy index health checks for `xf doctor`.

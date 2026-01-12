@@ -65,7 +65,7 @@ pub struct Cli {
     pub no_color: bool,
 
     #[command(subcommand)]
-    pub command: Commands,
+    pub command: Option<Commands>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -106,8 +106,8 @@ pub enum Commands {
 
 #[derive(Args, Debug)]
 pub struct IndexArgs {
-    /// Path to the X data archive directory
-    pub archive_path: PathBuf,
+    /// Path to the X data archive directory (defaults to `/data/projects/my_twitter_data`)
+    pub archive_path: Option<PathBuf>,
 
     /// Force full re-index (delete existing data)
     #[arg(long, short = 'F')]
@@ -186,6 +186,10 @@ pub struct SearchArgs {
     /// Fields to include in output
     #[arg(long, value_delimiter = ',')]
     pub fields: Option<Vec<String>>,
+
+    /// Search mode: lexical (keyword), semantic (meaning), or hybrid (both)
+    #[arg(long, short = 'm', default_value = "hybrid")]
+    pub mode: crate::hybrid::SearchMode,
 }
 
 #[derive(Args, Debug)]
