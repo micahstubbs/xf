@@ -88,6 +88,11 @@ fn parse_human_date_with_base(
     match parse_date_string(&normalized, base, Dialect::Us) {
         Ok(dt) => {
             debug!(input = trimmed, "Parsed natural language date");
+            if !has_explicit_time(&normalized) {
+                if let Some(range) = range_for_dates(dt.date_naive(), dt.date_naive()) {
+                    return Ok(range);
+                }
+            }
             Ok(ParsedDate::Point(dt.with_timezone(&Utc)))
         }
         Err(err) => Err(anyhow!(
@@ -165,6 +170,30 @@ fn try_parse_iso_datetime(input: &str) -> Option<DateTime<Utc>> {
     }
 
     None
+}
+
+fn has_explicit_time(input: &str) -> bool {
+    if input.contains(':') {
+        return true;
+    }
+
+    let normalized = input.to_lowercase();
+    for token in normalized
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+    {
+        if matches!(token, "am" | "pm" | "noon" | "midnight") {
+            return true;
+        }
+        if token.len() > 2 {
+            let (num, suffix) = token.split_at(token.len() - 2);
+            if matches!(suffix, "am" | "pm") && num.chars().all(|c| c.is_ascii_digit()) {
+                return true;
+            }
+        }
+    }
+
+    false
 }
 
 fn try_parse_relative(input: &str, base: DateTime<Local>) -> Option<ParsedDate> {
@@ -796,6 +825,16 @@ mod tests {
             .single()
             .unwrap();
         assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn parse_named_date_prefer_end() {
+        let parsed = parse_date_flexible("January 15, 2024", true).expect("parsed date");
+        let local_end = Local
+            .with_ymd_and_hms(2024, 1, 15, 23, 59, 59)
+            .single()
+            .unwrap();
+        assert_eq!(parsed, local_end.with_timezone(&Utc));
     }
 
     #[test]
