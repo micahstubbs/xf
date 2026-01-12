@@ -8,10 +8,11 @@ use crate::model::{DmConversation, GrokMessage, Like, SearchResult, SearchResult
 use crate::storage::Storage;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 use tantivy::collector::TopDocs;
-use tantivy::query::{AllQuery, BooleanQuery, Occur, Query, QueryParser, TermQuery};
+use tantivy::query::{AllQuery, BooleanQuery, Occur, Query, QueryParser, TermQuery, TermSetQuery};
 use tantivy::schema::{
     FAST, Field, INDEXED, IndexRecordOption, STORED, STRING, Schema, TextFieldIndexing,
     TextOptions, Value,
@@ -34,6 +35,112 @@ const fn epoch_utc() -> DateTime<Utc> {
     DateTime::<Utc>::from_timestamp(0, 0).unwrap()
 }
 
+fn build_lookup_query(
+    id_field: Field,
+    type_field: Field,
+    lookups: &[DocLookup<'_>],
+) -> Option<Box<dyn Query>> {
+    let mut untyped_ids: Vec<&str> = Vec::new();
+    let mut typed_ids: HashMap<&str, Vec<&str>> = HashMap::new();
+
+    for lookup in lookups {
+        if let Some(doc_type) = lookup.doc_type {
+            typed_ids.entry(doc_type).or_default().push(lookup.id);
+        } else {
+            untyped_ids.push(lookup.id);
+        }
+    }
+
+    let mut subqueries: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+
+    if !untyped_ids.is_empty() {
+        let terms = untyped_ids
+            .iter()
+            .map(|id| Term::from_field_text(id_field, id));
+        let id_query = TermSetQuery::new(terms);
+        subqueries.push((Occur::Should, Box::new(id_query)));
+    }
+
+    for (doc_type, ids) in typed_ids {
+        let terms = ids.iter().map(|id| Term::from_field_text(id_field, id));
+        let id_query = TermSetQuery::new(terms);
+        let type_query = TermQuery::new(
+            Term::from_field_text(type_field, doc_type),
+            IndexRecordOption::Basic,
+        );
+        let typed_filter_query = BooleanQuery::new(vec![
+            (Occur::Must, Box::new(id_query)),
+            (Occur::Must, Box::new(type_query)),
+        ]);
+        subqueries.push((Occur::Should, Box::new(typed_filter_query)));
+    }
+
+    if subqueries.is_empty() {
+        return None;
+    }
+
+    if subqueries.len() == 1 {
+        Some(subqueries.swap_remove(0).1)
+    } else {
+        Some(Box::new(BooleanQuery::new(subqueries)))
+    }
+}
+
+fn doc_to_search_result(
+    doc: &TantivyDocument,
+    id_field: Field,
+    text_field: Field,
+    type_field: Field,
+    created_at_field: Field,
+    metadata_field: Field,
+) -> (SearchResult, String) {
+    let id = doc
+        .get_first(id_field)
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let text = doc
+        .get_first(text_field)
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let doc_type_str = doc
+        .get_first(type_field)
+        .and_then(|v| v.as_str())
+        .unwrap_or("tweet");
+
+    let created_at_ts = doc
+        .get_first(created_at_field)
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+
+    let metadata_str = doc
+        .get_first(metadata_field)
+        .and_then(|v| v.as_str())
+        .unwrap_or("{}");
+
+    let result_type = match doc_type_str {
+        "like" => SearchResultType::Like,
+        "dm" => SearchResultType::DirectMessage,
+        "grok" => SearchResultType::GrokMessage,
+        _ => SearchResultType::Tweet,
+    };
+
+    let result = SearchResult {
+        result_type,
+        id,
+        text,
+        created_at: DateTime::from_timestamp(created_at_ts, 0).unwrap_or_else(epoch_utc),
+        score: 1.0,
+        highlights: vec![],
+        metadata: serde_json::from_str(metadata_str).unwrap_or_default(),
+    };
+
+    (result, doc_type_str.to_string())
+}
+
 /// Document types stored in the index
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DocType {
@@ -41,6 +148,28 @@ pub enum DocType {
     Like,
     DirectMessage,
     GrokMessage,
+}
+
+/// Document lookup key for batch retrieval.
+#[derive(Debug, Clone, Copy)]
+pub struct DocLookup<'a> {
+    pub id: &'a str,
+    pub doc_type: Option<&'a str>,
+}
+
+impl<'a> DocLookup<'a> {
+    #[must_use]
+    pub const fn new(id: &'a str) -> Self {
+        Self { id, doc_type: None }
+    }
+
+    #[must_use]
+    pub const fn with_type(id: &'a str, doc_type: &'a str) -> Self {
+        Self {
+            id,
+            doc_type: Some(doc_type),
+        }
+    }
 }
 
 impl DocType {
@@ -516,6 +645,70 @@ impl SearchEngine {
     /// Returns an error if the search operation fails.
     pub fn get_by_id_and_type(&self, doc_id: &str, doc_type: &str) -> Result<Option<SearchResult>> {
         self.get_by_id_impl(doc_id, Some(doc_type))
+    }
+
+    /// Get multiple documents by ID in a single query.
+    ///
+    /// Returns results aligned to the input order. Missing IDs yield `None`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the search operation fails.
+    pub fn get_by_ids(&self, lookups: &[DocLookup<'_>]) -> Result<Vec<Option<SearchResult>>> {
+        if lookups.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let searcher = self.reader.searcher();
+        let (id_field, text_field, _prefix_field, type_field, created_at_field, metadata_field) =
+            self.get_fields();
+
+        let Some(query) = build_lookup_query(id_field, type_field, lookups) else {
+            return Ok(vec![None; lookups.len()]);
+        };
+
+        let top_docs = searcher.search(&query, &TopDocs::with_limit(lookups.len()))?;
+
+        let mut results_by_id: HashMap<String, SearchResult> = HashMap::new();
+        let mut results_by_type: HashMap<String, HashMap<String, SearchResult>> = HashMap::new();
+
+        for (_score, doc_address) in top_docs {
+            let doc: TantivyDocument = searcher.doc(doc_address)?;
+            let (result, doc_type) = doc_to_search_result(
+                &doc,
+                id_field,
+                text_field,
+                type_field,
+                created_at_field,
+                metadata_field,
+            );
+
+            let id = result.id.clone();
+            results_by_id
+                .entry(id.clone())
+                .or_insert_with(|| result.clone());
+            results_by_type
+                .entry(id)
+                .or_default()
+                .entry(doc_type)
+                .or_insert(result);
+        }
+
+        let mut ordered = Vec::with_capacity(lookups.len());
+        for lookup in lookups {
+            let result = lookup.doc_type.map_or_else(
+                || results_by_id.get(lookup.id).cloned(),
+                |doc_type| {
+                    results_by_type
+                        .get(lookup.id)
+                        .and_then(|by_type| by_type.get(doc_type))
+                        .cloned()
+                },
+            );
+            ordered.push(result);
+        }
+
+        Ok(ordered)
     }
 
     fn get_by_id_impl(&self, doc_id: &str, doc_type: Option<&str>) -> Result<Option<SearchResult>> {
@@ -1365,6 +1558,98 @@ mod tests {
             .unwrap();
         assert_eq!(like.result_type, SearchResultType::Like);
         assert_eq!(like.text, "like text");
+    }
+
+    #[test]
+    fn test_get_by_ids_empty() {
+        let engine = SearchEngine::open_memory().unwrap();
+        let results = engine.get_by_ids(&[]).unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_get_by_ids_preserves_order_and_duplicates() {
+        let engine = SearchEngine::open_memory().unwrap();
+        let mut writer = engine.writer(15_000_000).unwrap();
+
+        let tweets = vec![
+            create_test_tweet("1", "tweet one"),
+            create_test_tweet("2", "tweet two"),
+        ];
+
+        engine.index_tweets(&mut writer, &tweets).unwrap();
+        writer.commit().unwrap();
+        engine.reload().unwrap();
+
+        let lookups = vec![
+            DocLookup::new("2"),
+            DocLookup::new("1"),
+            DocLookup::new("1"),
+        ];
+
+        let results = engine.get_by_ids(&lookups).unwrap();
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].as_ref().unwrap().id, "2");
+        assert_eq!(results[1].as_ref().unwrap().id, "1");
+        assert_eq!(results[2].as_ref().unwrap().id, "1");
+    }
+
+    #[test]
+    fn test_get_by_ids_missing_ids() {
+        let engine = SearchEngine::open_memory().unwrap();
+        let mut writer = engine.writer(15_000_000).unwrap();
+
+        let tweets = vec![create_test_tweet("1", "tweet one")];
+        engine.index_tweets(&mut writer, &tweets).unwrap();
+        writer.commit().unwrap();
+        engine.reload().unwrap();
+
+        let lookups = vec![DocLookup::new("1"), DocLookup::new("missing")];
+        let results = engine.get_by_ids(&lookups).unwrap();
+
+        assert!(results[0].is_some());
+        assert!(results[1].is_none());
+    }
+
+    #[test]
+    fn test_get_by_ids_mixed_types() {
+        let engine = SearchEngine::open_memory().unwrap();
+        let mut writer = engine.writer(15_000_000).unwrap();
+
+        let tweets = vec![
+            create_test_tweet("42", "tweet text"),
+            create_test_tweet("99", "tweet 99"),
+        ];
+        let likes = vec![create_test_like("42", Some("like text"))];
+
+        engine.index_tweets(&mut writer, &tweets).unwrap();
+        engine.index_likes(&mut writer, &likes).unwrap();
+        writer.commit().unwrap();
+        engine.reload().unwrap();
+
+        let lookups = vec![
+            DocLookup::with_type("42", DocType::Like.as_str()),
+            DocLookup::with_type("42", DocType::Tweet.as_str()),
+            DocLookup::with_type("99", DocType::Tweet.as_str()),
+        ];
+
+        let results = engine.get_by_ids(&lookups).unwrap();
+        assert_eq!(results.len(), 3);
+        assert_eq!(
+            results[0].as_ref().unwrap().result_type,
+            SearchResultType::Like
+        );
+        assert_eq!(results[0].as_ref().unwrap().text, "like text");
+        assert_eq!(
+            results[1].as_ref().unwrap().result_type,
+            SearchResultType::Tweet
+        );
+        assert_eq!(results[1].as_ref().unwrap().text, "tweet text");
+        assert_eq!(
+            results[2].as_ref().unwrap().result_type,
+            SearchResultType::Tweet
+        );
+        assert_eq!(results[2].as_ref().unwrap().text, "tweet 99");
     }
 
     #[test]
