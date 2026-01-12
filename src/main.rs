@@ -3882,8 +3882,8 @@ mod cache_tests {
             cold_duration.as_secs_f64() / warm_duration.as_secs_f64().max(1e-9)
         );
 
-        // Warm should be significantly faster (at least 10x)
-        // This is a smoke check - the actual speedup is typically 1000x+
+        // Warm should be faster - we just verify the cache is working, not a specific speedup.
+        // In practice, speedup is typically 1000x+, but timing tests are environment-dependent.
         assert!(
             warm_duration < cold_duration,
             "Cached load ({warm_duration:?}) should be faster than cold load ({cold_duration:?})"
