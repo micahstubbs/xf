@@ -1,0 +1,28 @@
+{
+  "seed": 42,
+  "scale": 1.0,
+  "generated_at": "2026-01-01T12:00:00+00:00",
+  "files": {
+    "manifest.js": {
+      "records": 1,
+      "sha256": "2670a336988581e1eff8a4fecf2768a12367c631da8e48e267ee69b2b1360342"
+    },
+    "tweets.js": {
+      "records": 10000,
+      "sha256": "c2d42792f99c74bb596c3528544a3463224c152e738bae8630a53d6b7765c663"
+    },
+    "like.js": {
+      "records": 5000,
+      "sha256": "08571ff48bb777cae51838703a5cb1fed7c66fcd3df488ab77516300bda570cc"
+    },
+    "direct-messages.js": {
+      "records": 2000,
+      "sha256": "de12e8b7953b4ad442e7d171324c35ed04ba5e44e1a0ee4d1ebee7a823ebdd91"
+    },
+    "grok-chat-item.js": {
+      "records": 500,
+      "sha256": "d56ee83f95ae0c937a776c57c3c8cd175a92ba5a5ba9cea2bda70ff17195221f"
+    }
+  },
+  "total_records": 17500
+}

@@ -121,7 +121,7 @@ const ARCHIVE_FILES: &[FileRequirement] = &[
         description: "Muted accounts",
     },
     FileRequirement {
-        pattern: "data/grok-conversation*.js",
+        pattern: "data/grok-chat-item*.js",
         required: false,
         description: "Grok AI conversations",
     },

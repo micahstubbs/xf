@@ -59,3 +59,7 @@ junit.xml
 # Logs
 *.log
 logs/
+
+# Python bytecode
+__pycache__/
+*.pyc

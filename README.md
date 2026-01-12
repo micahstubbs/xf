@@ -274,7 +274,7 @@ x-archive/
 │   ├── direct-messages.js # DM conversations
 │   ├── follower.js        # Your followers
 │   ├── following.js       # Accounts you follow
-│   ├── grok-conversation-...  # Grok AI chats (if any)
+│   ├── grok-chat-item.js   # Grok AI chats (if any)
 │   ├── account.js         # Account info
 │   ├── profile.js         # Profile data
 │   └── ...                # Many other data files
@@ -1200,6 +1200,22 @@ cargo test
 
 ```bash
 cargo bench
+```
+
+### Performance Corpus & Golden Outputs
+
+`xf` includes a deterministic performance corpus under `tests/fixtures/perf_corpus/`.
+To regenerate it locally:
+
+```bash
+python3 scripts/generate_perf_corpus.py --seed 42 --output-dir tests/fixtures/perf_corpus
+```
+
+Golden outputs for isomorphism checks live in `tests/fixtures/golden_outputs/` and can
+be refreshed with:
+
+```bash
+./scripts/verify_isomorphism.sh --update
 ```
 
 ## Troubleshooting
