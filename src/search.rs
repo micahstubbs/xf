@@ -503,15 +503,45 @@ impl SearchEngine {
     ///
     /// Returns an error if the search operation fails.
     pub fn get_by_id(&self, doc_id: &str) -> Result<Option<SearchResult>> {
+        self.get_by_id_impl(doc_id, None)
+    }
+
+    /// Get a single document by its ID and type.
+    ///
+    /// Useful when multiple document types can share the same ID
+    /// (e.g., tweets vs likes).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the search operation fails.
+    pub fn get_by_id_and_type(&self, doc_id: &str, doc_type: &str) -> Result<Option<SearchResult>> {
+        self.get_by_id_impl(doc_id, Some(doc_type))
+    }
+
+    fn get_by_id_impl(&self, doc_id: &str, doc_type: Option<&str>) -> Result<Option<SearchResult>> {
         let searcher = self.reader.searcher();
         let (id_field, text_field, _prefix_field, type_field, created_at_field, metadata_field) =
             self.get_fields();
 
-        // Create a term query for the exact ID
-        let term = Term::from_field_text(id_field, doc_id);
-        let query = TermQuery::new(term, IndexRecordOption::Basic);
+        let id_query = TermQuery::new(
+            Term::from_field_text(id_field, doc_id),
+            IndexRecordOption::Basic,
+        );
 
-        // Execute search (limit 1 since IDs should be unique)
+        let query: Box<dyn Query> = if let Some(doc_type) = doc_type {
+            let type_query = TermQuery::new(
+                Term::from_field_text(type_field, doc_type),
+                IndexRecordOption::Basic,
+            );
+            Box::new(BooleanQuery::new(vec![
+                (Occur::Must, Box::new(id_query)),
+                (Occur::Must, Box::new(type_query)),
+            ]))
+        } else {
+            Box::new(id_query)
+        };
+
+        // Execute search (limit 1 since IDs should be unique per type)
         let top_docs = searcher.search(&query, &TopDocs::with_limit(1))?;
 
         if let Some((_score, doc_address)) = top_docs.into_iter().next() {
@@ -1307,6 +1337,34 @@ mod tests {
         assert!(has_tweet);
         assert!(has_like);
         assert!(!has_grok);
+    }
+
+    #[test]
+    fn test_get_by_id_and_type_disambiguates() {
+        let engine = SearchEngine::open_memory().unwrap();
+        let mut writer = engine.writer(15_000_000).unwrap();
+
+        let tweets = vec![create_test_tweet("42", "tweet text")];
+        let likes = vec![create_test_like("42", Some("like text"))];
+
+        engine.index_tweets(&mut writer, &tweets).unwrap();
+        engine.index_likes(&mut writer, &likes).unwrap();
+        writer.commit().unwrap();
+        engine.reload().unwrap();
+
+        let tweet = engine
+            .get_by_id_and_type("42", DocType::Tweet.as_str())
+            .unwrap()
+            .unwrap();
+        assert_eq!(tweet.result_type, SearchResultType::Tweet);
+        assert_eq!(tweet.text, "tweet text");
+
+        let like = engine
+            .get_by_id_and_type("42", DocType::Like.as_str())
+            .unwrap()
+            .unwrap();
+        assert_eq!(like.result_type, SearchResultType::Like);
+        assert_eq!(like.text, "like text");
     }
 
     #[test]
