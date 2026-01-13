@@ -202,18 +202,14 @@ impl ArchiveParser {
     }
 
     fn parse_hashtags(value: &Value) -> Vec<String> {
-        value
-            .as_array()
-            .unwrap_or(&vec![])
+        Self::as_array_or_empty(value)
             .iter()
             .filter_map(|h| h["text"].as_str().map(String::from))
             .collect()
     }
 
     fn parse_user_mentions(value: &Value) -> Vec<UserMention> {
-        value
-            .as_array()
-            .unwrap_or(&vec![])
+        Self::as_array_or_empty(value)
             .iter()
             .filter_map(|m| {
                 Some(UserMention {
@@ -226,9 +222,7 @@ impl ArchiveParser {
     }
 
     fn parse_urls(value: &Value) -> Vec<TweetUrl> {
-        value
-            .as_array()
-            .unwrap_or(&vec![])
+        Self::as_array_or_empty(value)
             .iter()
             .filter_map(|u| {
                 Some(TweetUrl {
@@ -241,9 +235,7 @@ impl ArchiveParser {
     }
 
     fn parse_media(value: &Value) -> Vec<TweetMedia> {
-        value
-            .as_array()
-            .unwrap_or(&vec![])
+        Self::as_array_or_empty(value)
             .iter()
             .filter_map(|m| {
                 Some(TweetMedia {
@@ -257,6 +249,10 @@ impl ArchiveParser {
                 })
             })
             .collect()
+    }
+
+    fn as_array_or_empty(value: &Value) -> &[Value] {
+        value.as_array().map_or(&[], |items| items.as_slice())
     }
 
     fn parse_i64(value: &Value) -> Option<i64> {
