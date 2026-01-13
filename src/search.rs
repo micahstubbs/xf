@@ -686,8 +686,9 @@ impl SearchEngine {
 
         let top_docs = searcher.search(&query, &TopDocs::with_limit(max_docs))?;
 
-        let mut results_by_id: HashMap<String, SearchResult> = HashMap::new();
-        let mut results_by_type: HashMap<String, HashMap<String, SearchResult>> = HashMap::new();
+        // Single map: id -> (doc_type -> result). Eliminates redundant clones.
+        let mut results_by_type: HashMap<String, HashMap<String, SearchResult>> =
+            HashMap::with_capacity(lookups.len());
 
         for (_score, doc_address) in top_docs {
             let doc: TantivyDocument = searcher.doc(doc_address)?;
@@ -700,12 +701,8 @@ impl SearchEngine {
                 metadata_field,
             );
 
-            let id = result.id.clone();
-            results_by_id
-                .entry(id.clone())
-                .or_insert_with(|| result.clone());
             results_by_type
-                .entry(id)
+                .entry(result.id.clone())
                 .or_default()
                 .entry(doc_type)
                 .or_insert(result);
@@ -713,15 +710,14 @@ impl SearchEngine {
 
         let mut ordered = Vec::with_capacity(lookups.len());
         for lookup in lookups {
-            let result = lookup.doc_type.map_or_else(
-                || results_by_id.get(lookup.id).cloned(),
-                |doc_type| {
-                    results_by_type
-                        .get(lookup.id)
-                        .and_then(|by_type| by_type.get(doc_type))
-                        .cloned()
-                },
-            );
+            let result = results_by_type.get(lookup.id).and_then(|by_type| {
+                lookup.doc_type.map_or_else(
+                    // No specific type requested: return any result for this id
+                    || by_type.values().next().cloned(),
+                    // Specific type requested: look it up
+                    |doc_type| by_type.get(doc_type).cloned(),
+                )
+            });
             ordered.push(result);
         }
 
@@ -1084,24 +1080,36 @@ fn directory_size_bytes(path: &Path) -> std::io::Result<u64> {
 /// Generate prefix terms for edge n-gram style matching.
 /// Uses character count (not byte count) to properly handle UTF-8.
 fn generate_prefixes(text: &str) -> String {
-    let words: Vec<&str> = text
-        .split_whitespace()
-        .filter(|w| w.chars().count() >= 2) // Filter by character count, not bytes
-        .take(100) // Limit to prevent huge documents
-        .collect();
+    // Estimate capacity: ~7 prefixes per word on average, ~9 chars each
+    let word_count_estimate = text.split_whitespace().take(100).count();
+    let capacity_estimate = word_count_estimate * 7 * 9;
 
-    let mut prefixes = Vec::new();
-    for word in words {
-        let word_lower = word.to_lowercase();
-        let char_count = word_lower.chars().count();
+    let mut result = String::with_capacity(capacity_estimate);
+    let mut chars_buf: Vec<char> = Vec::with_capacity(32);
+
+    for word in text
+        .split_whitespace()
+        .filter(|w| w.chars().count() >= 2)
+        .take(100)
+    {
+        // Reuse char buffer instead of allocating new String per word
+        chars_buf.clear();
+        chars_buf.extend(word.chars().flat_map(char::to_lowercase));
+        let char_count = chars_buf.len();
+
         // Generate 2-char to 15-char prefixes (by character count)
         for len in 2..=char_count.min(15) {
-            let prefix: String = word_lower.chars().take(len).collect();
-            prefixes.push(prefix);
+            if !result.is_empty() {
+                result.push(' ');
+            }
+            // Write directly to result instead of allocating intermediate String
+            for &c in &chars_buf[..len] {
+                result.push(c);
+            }
         }
     }
 
-    prefixes.join(" ")
+    result
 }
 
 #[cfg(test)]

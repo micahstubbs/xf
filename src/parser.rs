@@ -435,9 +435,7 @@ impl ArchiveParser {
     }
 
     fn parse_dm_urls(value: &Value) -> Vec<TweetUrl> {
-        value
-            .as_array()
-            .unwrap_or(&vec![])
+        Self::as_array_or_empty(value)
             .iter()
             .filter_map(|u| {
                 Some(TweetUrl {
@@ -458,9 +456,7 @@ impl ArchiveParser {
         info!("Parsing follower.js...");
         let data = self.read_data_file("follower.js")?;
 
-        let followers: Vec<Follower> = data
-            .as_array()
-            .unwrap_or(&vec![])
+        let followers: Vec<Follower> = Self::as_array_or_empty(&data)
             .par_iter()
             .filter_map(|item| {
                 let f = &item["follower"];
@@ -484,9 +480,7 @@ impl ArchiveParser {
         info!("Parsing following.js...");
         let data = self.read_data_file("following.js")?;
 
-        let following: Vec<Following> = data
-            .as_array()
-            .unwrap_or(&vec![])
+        let following: Vec<Following> = Self::as_array_or_empty(&data)
             .par_iter()
             .filter_map(|item| {
                 let f = &item["following"];
@@ -510,9 +504,7 @@ impl ArchiveParser {
         info!("Parsing block.js...");
         let data = self.read_data_file("block.js")?;
 
-        let blocks: Vec<Block> = data
-            .as_array()
-            .unwrap_or(&vec![])
+        let blocks: Vec<Block> = Self::as_array_or_empty(&data)
             .par_iter()
             .filter_map(|item| {
                 let b = &item["blocking"];
@@ -536,9 +528,7 @@ impl ArchiveParser {
         info!("Parsing mute.js...");
         let data = self.read_data_file("mute.js")?;
 
-        let mutes: Vec<Mute> = data
-            .as_array()
-            .unwrap_or(&vec![])
+        let mutes: Vec<Mute> = Self::as_array_or_empty(&data)
             .par_iter()
             .filter_map(|item| {
                 let m = &item["muting"];
@@ -610,9 +600,7 @@ impl ArchiveParser {
         info!("Parsing grok-chat-item.js...");
         let data = self.read_data_file("grok-chat-item.js")?;
 
-        let messages: Vec<GrokMessage> = data
-            .as_array()
-            .unwrap_or(&vec![])
+        let messages: Vec<GrokMessage> = Self::as_array_or_empty(&data)
             .par_iter()
             .filter_map(|item| {
                 let g = &item["grokChatItem"];

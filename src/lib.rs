@@ -234,39 +234,38 @@ pub fn generate_embeddings(storage: &Storage, show_progress: bool) -> Result<()>
         println!("{}", "Generating semantic embeddings...".bold().cyan());
     }
 
-    // Collect all documents with their text and type
-    let mut docs: Vec<(String, String, String)> = Vec::new(); // (id, text, type)
+    // Fetch all collections first to pre-allocate
+    let tweets = storage.get_all_tweets(None)?;
+    let likes = storage.get_all_likes(None)?;
+    let dms = storage.get_all_dms(None)?;
+    let grok_msgs = storage.get_all_grok_messages(None)?;
+
+    // Pre-allocate with known capacity
+    let capacity = tweets.len() + likes.len() + dms.len() + grok_msgs.len();
+    let mut docs: Vec<(String, String, &'static str)> = Vec::with_capacity(capacity);
 
     // Tweets
-    let tweets = storage.get_all_tweets(None)?;
     for tweet in &tweets {
-        docs.push((
-            tweet.id.clone(),
-            tweet.full_text.clone(),
-            "tweet".to_string(),
-        ));
+        docs.push((tweet.id.clone(), tweet.full_text.clone(), "tweet"));
     }
 
     // Likes (only if they have text)
-    let likes = storage.get_all_likes(None)?;
     for like in &likes {
         if let Some(ref text) = like.full_text {
             if !text.is_empty() {
-                docs.push((like.tweet_id.clone(), text.clone(), "like".to_string()));
+                docs.push((like.tweet_id.clone(), text.clone(), "like"));
             }
         }
     }
 
     // DMs
-    let dms = storage.get_all_dms(None)?;
     for dm in &dms {
         if !dm.text.is_empty() {
-            docs.push((dm.id.clone(), dm.text.clone(), "dm".to_string()));
+            docs.push((dm.id.clone(), dm.text.clone(), "dm"));
         }
     }
 
     // Grok messages
-    let grok_msgs = storage.get_all_grok_messages(None)?;
     for msg in &grok_msgs {
         if !msg.message.is_empty() {
             // Use same doc_id format as Tantivy indexing (search.rs:344-350)
@@ -277,7 +276,7 @@ pub fn generate_embeddings(storage: &Storage, show_progress: bool) -> Result<()>
                 msg.created_at.timestamp_subsec_nanos(),
                 msg.sender
             );
-            docs.push((doc_id, msg.message.clone(), "grok".to_string()));
+            docs.push((doc_id, msg.message.clone(), "grok"));
         }
     }
 
@@ -316,7 +315,7 @@ pub fn generate_embeddings(storage: &Storage, show_progress: bool) -> Result<()>
 
     for chunk in docs.chunks(EMBED_CHUNK_SIZE) {
         let mut batch: Vec<EmbedRecord> = Vec::new();
-        let mut candidates: Vec<(String, String, String, [u8; 32])> = Vec::new();
+        let mut candidates: Vec<(String, &'static str, String, [u8; 32])> = Vec::new();
 
         for (doc_id, text, doc_type) in chunk {
             // Canonicalize text
@@ -335,7 +334,7 @@ pub fn generate_embeddings(storage: &Storage, show_progress: bool) -> Result<()>
             // Skip if this doc already has the same content hash.
             if let Some(existing_hash) = existing_hashes_by_doc
                 .get(doc_id)
-                .and_then(|by_type| by_type.get(doc_type))
+                .and_then(|by_type| by_type.get(*doc_type))
             {
                 if existing_hash == &hash {
                     skipped_count += 1;
@@ -346,7 +345,7 @@ pub fn generate_embeddings(storage: &Storage, show_progress: bool) -> Result<()>
                 }
             }
 
-            candidates.push((doc_id.clone(), doc_type.clone(), canonical, hash));
+            candidates.push((doc_id.clone(), *doc_type, canonical, hash));
             if let Some(ref pb) = pb {
                 pb.inc(1);
             }
@@ -403,8 +402,8 @@ pub fn generate_embeddings(storage: &Storage, show_progress: bool) -> Result<()>
             // Reuse an existing embedding if identical content exists.
             if let Some(existing_embedding) = batch_cache.get(&hash) {
                 batch.push((
-                    doc_id.clone(),
-                    doc_type.clone(),
+                    doc_id,
+                    doc_type.to_string(),
                     existing_embedding.clone(),
                     Some(hash),
                 ));

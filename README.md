@@ -627,16 +627,16 @@ Each document type has specific fields indexed for search:
 
 ### Embedding Strategy
 
-Each document type is embedded differently:
+All content is stored and indexed in full—nothing is truncated. For vector embeddings, text is canonicalized (Unicode normalization, markdown stripped, whitespace collapsed) before hashing.
 
-| Type | Text Source | Max Length | Notes |
-|------|-------------|------------|-------|
-| Tweet | `full_text` | 280 chars | Twitter's limit |
-| Like | `full_text` | 280 chars | If available |
-| DM | `text` | 2,000 chars | Full message |
-| Grok | `message` | 2,000 chars | Full response |
+| Type | Text Source | Notes |
+|------|-------------|-------|
+| Tweet | `full_text` | Full content including long-form tweets |
+| Like | `full_text` | If available from archive |
+| DM | `text` | Full message text |
+| Grok | `message` | Full response text |
 
-Empty or trivial messages (< 3 chars after canonicalization) are skipped.
+Empty or trivial messages (e.g., "OK", "Thanks") are filtered from embeddings but still searchable via keyword search.
 
 ## Security & Privacy
 
@@ -648,10 +648,10 @@ Empty or trivial messages (< 3 chars after canonicalization) are skipped.
 ┌─────────────────────────────────────────────────────────────┐
 │                     YOUR MACHINE                            │
 │                                                             │
-│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐     │
-│  │  X Archive  │───▶│  xf binary  │───▶│  Local DB   │     │
-│  │  (input)    │    │  (process)  │    │  (output)   │     │
-│  └─────────────┘    └─────────────┘    └─────────────┘     │
+│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐      │
+│  │  X Archive  │───▶│  xf binary  │───▶│  Local DB   │      │
+│  │  (input)    │    │  (process)  │    │  (output)   │      │
+│  └─────────────┘    └─────────────┘    └─────────────┘      │
 │                                                             │
 │  ❌ No network calls                                        │
 │  ❌ No telemetry                                            │
@@ -711,13 +711,13 @@ This permanently deletes all indexed content. The original archive is unaffected
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                       X Data Archive                             │
+│                       X Data Archive                            │
 │   (tweets.js, like.js, direct-messages.js, etc.)                │
 └─────────────────────────────────────────────────────────────────┘
                             │
                             ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│                    Parser (parser.rs)                            │
+│                    Parser (parser.rs)                           │
 │   Handles window.YTD.* JavaScript format with rayon parallelism │
 └─────────────────────────────────────────────────────────────────┘
                             │
@@ -743,7 +743,7 @@ This permanently deletes all indexed content. The original archive is unaffected
         └────────┬─────────┘
                  ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│                      CLI (cli.rs)                                │
+│                      CLI (cli.rs)                               │
 │   clap-based command parsing with rich colored output           │
 └─────────────────────────────────────────────────────────────────┘
 ```

@@ -143,7 +143,8 @@ pub fn rrf_fuse<'a>(
         return Vec::new();
     }
 
-    let mut scores: HashMap<DocKey<'a>, HybridScore> = HashMap::new();
+    let mut scores: HashMap<DocKey<'a>, HybridScore> =
+        HashMap::with_capacity(lexical.len() + semantic.len());
 
     // Process lexical results (rank 0, 1, 2, ...)
     for (rank, hit) in lexical.iter().enumerate() {

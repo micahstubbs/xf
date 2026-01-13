@@ -400,37 +400,74 @@ pub struct VectorSearchResult {
     pub score: f32,
 }
 
-/// Entry in the min-heap for top-k selection.
-#[derive(Debug, Clone)]
-struct ScoredEntry {
+/// Entry in the min-heap for top-k selection (allocation-free).
+///
+/// Stores only the offset into the mmap buffer, deferring String allocation
+/// until after the heap is finalized. This reduces allocations from O(n) to O(k).
+#[derive(Debug, Clone, Copy)]
+struct HeapEntry {
     score: f32,
-    doc_id: String,
-    doc_type: String,
+    /// Offset into the mmap buffer where this record starts.
+    offset: usize,
 }
 
-impl PartialEq for ScoredEntry {
+impl PartialEq for HeapEntry {
     fn eq(&self, other: &Self) -> bool {
-        self.score == other.score && self.doc_id == other.doc_id && self.doc_type == other.doc_type
+        self.score == other.score && self.offset == other.offset
     }
 }
 
-impl Eq for ScoredEntry {}
+impl Eq for HeapEntry {}
 
-impl PartialOrd for ScoredEntry {
+impl PartialOrd for HeapEntry {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl Ord for ScoredEntry {
+impl Ord for HeapEntry {
     fn cmp(&self, other: &Self) -> Ordering {
         // Min-heap: lower score is "greater" (gets popped first)
         // This way we keep the highest scores in the heap
         other
             .score
             .total_cmp(&self.score)
-            .then_with(|| self.doc_id.cmp(&other.doc_id))
-            .then_with(|| self.doc_type.cmp(&other.doc_type))
+            .then_with(|| self.offset.cmp(&other.offset))
+    }
+}
+
+/// Entry in the min-heap for in-memory `VectorIndex` (allocation-free).
+///
+/// Stores only the index into the vectors Vec, deferring String access
+/// until after the heap is finalized.
+#[derive(Debug, Clone, Copy)]
+struct IndexHeapEntry {
+    score: f32,
+    /// Index into the vectors Vec.
+    idx: usize,
+}
+
+impl PartialEq for IndexHeapEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.score == other.score && self.idx == other.idx
+    }
+}
+
+impl Eq for IndexHeapEntry {}
+
+impl PartialOrd for IndexHeapEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for IndexHeapEntry {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // Min-heap: lower score is "greater" (gets popped first)
+        other
+            .score
+            .total_cmp(&self.score)
+            .then_with(|| self.idx.cmp(&other.idx))
     }
 }
 
@@ -517,8 +554,9 @@ impl MmapVectorIndex {
             return Vec::new();
         };
 
-        let mut heap: BinaryHeap<ScoredEntry> = BinaryHeap::with_capacity(k + 1);
+        let mut heap: BinaryHeap<HeapEntry> = BinaryHeap::with_capacity(k + 1);
 
+        // Phase 1: Scan all records, keeping only offsets in heap (no String allocations)
         for chunk in offsets_bytes.chunks_exact(8) {
             let offset = usize::try_from(u64::from_le_bytes([
                 chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
@@ -537,9 +575,9 @@ impl MmapVectorIndex {
                     continue;
                 }
             }
-            let Some(doc_type) = decode_doc_type(doc_type_code) else {
+            if decode_doc_type(doc_type_code).is_none() {
                 continue;
-            };
+            }
 
             let doc_id_len = u16::from_le_bytes([record[2], record[3]]) as usize;
             let doc_id_start = 4usize;
@@ -549,35 +587,45 @@ impl MmapVectorIndex {
                 continue;
             }
 
+            // Validate UTF-8 without allocating
             let doc_id_bytes = &record[doc_id_start..doc_id_end];
-            let Ok(doc_id) = str::from_utf8(doc_id_bytes) else {
+            if str::from_utf8(doc_id_bytes).is_err() {
                 continue;
-            };
+            }
 
             let embedding_bytes = &record[doc_id_end..embedding_end];
             let Some(score) = dot_product_f16_simd(query, embedding_bytes) else {
                 continue;
             };
 
-            heap.push(ScoredEntry {
-                score,
-                doc_id: doc_id.to_string(),
-                doc_type: doc_type.to_string(),
-            });
+            heap.push(HeapEntry { score, offset });
 
             if heap.len() > k {
                 heap.pop();
             }
         }
 
-        let mut results: Vec<VectorSearchResult> = heap
-            .into_iter()
-            .map(|entry| VectorSearchResult {
-                doc_id: entry.doc_id,
-                doc_type: entry.doc_type,
+        // Phase 2: Extract top-k and parse Strings only for final results
+        let mut results: Vec<VectorSearchResult> = Vec::with_capacity(heap.len());
+        for entry in heap {
+            let Some(record) = bytes.get(entry.offset..) else {
+                continue;
+            };
+            let doc_type_code = record[0];
+            let Some(doc_type) = decode_doc_type(doc_type_code) else {
+                continue;
+            };
+            let doc_id_len = u16::from_le_bytes([record[2], record[3]]) as usize;
+            let doc_id_bytes = &record[4..4 + doc_id_len];
+            let Ok(doc_id) = str::from_utf8(doc_id_bytes) else {
+                continue;
+            };
+            results.push(VectorSearchResult {
+                doc_id: doc_id.to_string(),
+                doc_type: doc_type.to_string(),
                 score: entry.score,
-            })
-            .collect();
+            });
+        }
 
         results.sort_by(|a, b| {
             b.score
@@ -786,10 +834,10 @@ impl VectorIndex {
             return Vec::new();
         }
 
-        // Use a min-heap to keep track of top-k
-        let mut heap: BinaryHeap<ScoredEntry> = BinaryHeap::with_capacity(k + 1);
+        // Phase 1: Scan vectors, keeping only indices in heap (no String clones)
+        let mut heap: BinaryHeap<IndexHeapEntry> = BinaryHeap::with_capacity(k + 1);
 
-        for (doc_id, doc_type, embedding) in &self.vectors {
+        for (idx, (_, doc_type, embedding)) in self.vectors.iter().enumerate() {
             // Filter by doc_type if specified
             if let Some(types) = doc_types {
                 if !types.contains(&doc_type.as_str()) {
@@ -800,11 +848,7 @@ impl VectorIndex {
             // Compute similarity using SIMD dot product
             let score = dot_product_simd(query, embedding);
 
-            heap.push(ScoredEntry {
-                score,
-                doc_id: doc_id.clone(),
-                doc_type: doc_type.clone(),
-            });
+            heap.push(IndexHeapEntry { score, idx });
 
             // Keep only top-k by removing the minimum when heap exceeds k
             if heap.len() > k {
@@ -812,15 +856,16 @@ impl VectorIndex {
             }
         }
 
-        // Convert to results and sort by score descending
-        let mut results: Vec<VectorSearchResult> = heap
-            .into_iter()
-            .map(|entry| VectorSearchResult {
-                doc_id: entry.doc_id,
-                doc_type: entry.doc_type,
+        // Phase 2: Extract top-k and clone Strings only for final results
+        let mut results: Vec<VectorSearchResult> = Vec::with_capacity(heap.len());
+        for entry in heap {
+            let (doc_id, doc_type, _) = &self.vectors[entry.idx];
+            results.push(VectorSearchResult {
+                doc_id: doc_id.clone(),
+                doc_type: doc_type.clone(),
                 score: entry.score,
-            })
-            .collect();
+            });
+        }
 
         // Sort by score descending, then doc_id + doc_type ascending for determinism
         results.sort_by(|a, b| {
@@ -854,14 +899,21 @@ impl VectorIndex {
             return self.search_top_k(query, k, doc_types);
         }
 
-        // Parallel scan with thread-local heaps
-        let partial_results: Vec<Vec<ScoredEntry>> = self
+        // Create indexed chunks to preserve absolute indices
+        let indexed_chunks: Vec<_> = self
             .vectors
-            .par_chunks(CHUNK_SIZE)
-            .map(|chunk| {
-                let mut local_heap = BinaryHeap::with_capacity(k + 1);
+            .chunks(CHUNK_SIZE)
+            .enumerate()
+            .map(|(chunk_idx, chunk)| (chunk_idx * CHUNK_SIZE, chunk))
+            .collect();
 
-                for (doc_id, doc_type, embedding) in chunk {
+        // Parallel scan with thread-local heaps using indices (no String clones)
+        let partial_results: Vec<Vec<IndexHeapEntry>> = indexed_chunks
+            .par_iter()
+            .map(|(base_idx, chunk)| {
+                let mut local_heap: BinaryHeap<IndexHeapEntry> = BinaryHeap::with_capacity(k + 1);
+
+                for (offset, (_, doc_type, embedding)) in chunk.iter().enumerate() {
                     if let Some(types) = doc_types {
                         if !types.contains(&doc_type.as_str()) {
                             continue;
@@ -869,12 +921,9 @@ impl VectorIndex {
                     }
 
                     let score = dot_product_simd(query, embedding);
+                    let idx = base_idx + offset;
 
-                    local_heap.push(ScoredEntry {
-                        score,
-                        doc_id: doc_id.clone(),
-                        doc_type: doc_type.clone(),
-                    });
+                    local_heap.push(IndexHeapEntry { score, idx });
 
                     if local_heap.len() > k {
                         local_heap.pop();
@@ -886,7 +935,7 @@ impl VectorIndex {
             .collect();
 
         // Merge thread-local results
-        let mut final_heap = BinaryHeap::with_capacity(k + 1);
+        let mut final_heap: BinaryHeap<IndexHeapEntry> = BinaryHeap::with_capacity(k + 1);
         for entries in partial_results {
             for entry in entries {
                 final_heap.push(entry);
@@ -896,14 +945,16 @@ impl VectorIndex {
             }
         }
 
-        let mut results: Vec<VectorSearchResult> = final_heap
-            .into_iter()
-            .map(|entry| VectorSearchResult {
-                doc_id: entry.doc_id,
-                doc_type: entry.doc_type,
+        // Only clone Strings for the final k results
+        let mut results: Vec<VectorSearchResult> = Vec::with_capacity(final_heap.len());
+        for entry in final_heap {
+            let (doc_id, doc_type, _) = &self.vectors[entry.idx];
+            results.push(VectorSearchResult {
+                doc_id: doc_id.clone(),
+                doc_type: doc_type.clone(),
                 score: entry.score,
-            })
-            .collect();
+            });
+        }
 
         results.sort_by(|a, b| {
             b.score

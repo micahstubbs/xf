@@ -1162,11 +1162,12 @@ fn print_startup_banner(storage: &Storage) {
         "{}",
         "│                                                            │".dimmed()
     );
+    // Inner width is 60 chars. "  " prefix (2) + text (41) = 43, need 17 spaces padding.
     println!(
         "{}  {}{}",
         "│".dimmed(),
         "Type 'help' for commands, 'quit' to exit".dimmed(),
-        "      │".dimmed()
+        "                 │".dimmed()
     );
     println!(
         "{}",
