@@ -7,7 +7,7 @@
 
 use crate::storage::Storage;
 use crate::{Result, format_number_u64};
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{DateTime, Datelike, NaiveDate, Utc};
 use serde::Serialize;
 
 /// Temporal statistics showing activity patterns over time.
@@ -64,8 +64,8 @@ impl TemporalStats {
         // Get hourly distribution
         let hourly_distribution = Self::query_hourly_distribution(storage)?;
 
-        // Get day-of-week distribution
-        let dow_distribution = Self::query_dow_distribution(storage)?;
+        // Compute day-of-week distribution from daily_counts (avoids extra query)
+        let dow_distribution = Self::compute_dow_from_daily(&daily_counts);
 
         // Compute derived metrics
         let (longest_gap_days, longest_gap_start, longest_gap_end) =
@@ -175,35 +175,19 @@ impl TemporalStats {
         Ok(distribution)
     }
 
-    /// Query day-of-week distribution.
-    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-    fn query_dow_distribution(storage: &Storage) -> Result<[u64; 7]> {
-        // SQLite strftime('%w') returns 0=Sunday, 1=Monday, ..., 6=Saturday
-        let query = r"
-            SELECT CAST(strftime('%w', created_at) AS INTEGER) as dow, COUNT(*) as count
-            FROM tweets
-            WHERE created_at IS NOT NULL
-            GROUP BY dow
-            ORDER BY dow
-        ";
-
-        let conn = storage.connection();
-        let mut stmt = conn.prepare(query)?;
-        let rows = stmt.query_map([], |row| {
-            let dow: i64 = row.get(0)?;
-            let count: i64 = row.get(1)?;
-            Ok((dow as usize, count as u64))
-        })?;
-
+    /// Compute day-of-week distribution from daily counts.
+    ///
+    /// This avoids an extra database query by computing DOW from the dates
+    /// we already have in `daily_counts`.
+    fn compute_dow_from_daily(daily_counts: &[DailyCount]) -> [u64; 7] {
         let mut distribution = [0u64; 7];
-        for row in rows {
-            let (dow, count) = row?;
-            if dow < 7 {
-                distribution[dow] = count;
-            }
+        for dc in daily_counts {
+            // chrono weekday: Mon=0, Tue=1, ..., Sun=6
+            // We want: Sun=0, Mon=1, ..., Sat=6 (to match SQLite strftime('%w'))
+            let dow = dc.date.weekday().num_days_from_sunday() as usize;
+            distribution[dow] += dc.count;
         }
-
-        Ok(distribution)
+        distribution
     }
 
     /// Find the longest gap between consecutive days with tweets.
