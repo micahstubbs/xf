@@ -21,6 +21,16 @@ use tantivy::snippet::SnippetGenerator;
 use tantivy::{Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument, Term, doc};
 use tracing::info;
 
+/// Parse metadata JSON, avoiding parse overhead for empty objects.
+#[inline]
+fn parse_metadata(s: &str) -> serde_json::Value {
+    // Fast path: empty metadata is common, skip parsing entirely
+    if s.is_empty() || s == "{}" || s == "null" {
+        return serde_json::Value::Null;
+    }
+    serde_json::from_str(s).unwrap_or_default()
+}
+
 /// Schema field names
 const FIELD_ID: &str = "id";
 const FIELD_TEXT: &str = "text";
@@ -136,7 +146,7 @@ fn doc_to_search_result(
         created_at: DateTime::from_timestamp(created_at_ts, 0).unwrap_or_else(epoch_utc),
         score: 1.0,
         highlights: vec![],
-        metadata: serde_json::from_str(metadata_str).unwrap_or_default(),
+        metadata: parse_metadata(metadata_str),
     };
 
     (result, doc_type_str.to_string())
@@ -622,7 +632,7 @@ impl SearchEngine {
                 created_at: DateTime::from_timestamp(created_at_ts, 0).unwrap_or_else(epoch_utc),
                 score,
                 highlights,
-                metadata: serde_json::from_str(metadata_str).unwrap_or_default(),
+                metadata: parse_metadata(metadata_str),
             });
         }
 
@@ -794,7 +804,7 @@ impl SearchEngine {
                 created_at: DateTime::from_timestamp(created_at_ts, 0).unwrap_or_else(epoch_utc),
                 score: 1.0, // ID lookup has no relevance score
                 highlights: vec![],
-                metadata: serde_json::from_str(metadata_str).unwrap_or_default(),
+                metadata: parse_metadata(metadata_str),
             }))
         } else {
             Ok(None)

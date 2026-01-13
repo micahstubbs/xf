@@ -1594,27 +1594,17 @@ impl Storage {
     ///
     /// Returns an error if the database query fails.
     pub fn get_all_tweets(&self, limit: Option<usize>) -> Result<Vec<Tweet>> {
-        let query = limit.map_or_else(
-            || {
-                r"SELECT id, created_at, full_text, source, favorite_count, retweet_count,
+        // Use parameterized query for better query plan caching.
+        // SQLite treats LIMIT -1 as "no limit", so we use that for unlimited queries.
+        const QUERY: &str = r"SELECT id, created_at, full_text, source, favorite_count, retweet_count,
                    lang, in_reply_to_status_id, in_reply_to_user_id, in_reply_to_screen_name,
                    is_retweet, hashtags_json, mentions_json, urls_json, media_json
-                FROM tweets ORDER BY created_at DESC"
-                    .to_string()
-            },
-            |lim| {
-                format!(
-                    r"SELECT id, created_at, full_text, source, favorite_count, retweet_count,
-                   lang, in_reply_to_status_id, in_reply_to_user_id, in_reply_to_screen_name,
-                   is_retweet, hashtags_json, mentions_json, urls_json, media_json
-                FROM tweets ORDER BY created_at DESC LIMIT {lim}"
-                )
-            },
-        );
+                FROM tweets ORDER BY created_at DESC LIMIT ?";
 
-        let mut stmt = self.conn.prepare(&query)?;
+        let limit_param: i64 = limit.map_or(-1, |l| i64::try_from(l).unwrap_or(i64::MAX));
+        let mut stmt = self.conn.prepare_cached(QUERY)?;
         let tweets = stmt
-            .query_map([], |row| {
+            .query_map([limit_param], |row| {
                 Ok(Tweet {
                     id: row.get(0)?,
                     created_at: parse_rfc3339_or_epoch(row.get::<_, Option<String>>(1)?),
@@ -1646,14 +1636,12 @@ impl Storage {
     ///
     /// Returns an error if the database query fails.
     pub fn get_all_likes(&self, limit: Option<usize>) -> Result<Vec<Like>> {
-        let query = limit.map_or_else(
-            || "SELECT tweet_id, full_text, expanded_url FROM likes".to_string(),
-            |lim| format!("SELECT tweet_id, full_text, expanded_url FROM likes LIMIT {lim}"),
-        );
+        const QUERY: &str = "SELECT tweet_id, full_text, expanded_url FROM likes LIMIT ?";
+        let limit_param: i64 = limit.map_or(-1, |l| i64::try_from(l).unwrap_or(i64::MAX));
 
-        let mut stmt = self.conn.prepare(&query)?;
+        let mut stmt = self.conn.prepare_cached(QUERY)?;
         let likes = stmt
-            .query_map([], |row| {
+            .query_map([limit_param], |row| {
                 Ok(Like {
                     tweet_id: row.get(0)?,
                     full_text: row.get(1)?,
@@ -1672,25 +1660,14 @@ impl Storage {
     ///
     /// Returns an error if the database query fails.
     pub fn get_all_dms(&self, limit: Option<usize>) -> Result<Vec<DirectMessage>> {
-        let query = limit.map_or_else(
-            || {
-                r"SELECT id, conversation_id, sender_id, recipient_id, text,
+        const QUERY: &str = r"SELECT id, conversation_id, sender_id, recipient_id, text,
                    created_at, urls_json, media_urls_json
-                FROM direct_messages ORDER BY created_at DESC"
-                    .to_string()
-            },
-            |lim| {
-                format!(
-                    r"SELECT id, conversation_id, sender_id, recipient_id, text,
-                   created_at, urls_json, media_urls_json
-                FROM direct_messages ORDER BY created_at DESC LIMIT {lim}"
-                )
-            },
-        );
+                FROM direct_messages ORDER BY created_at DESC LIMIT ?";
+        let limit_param: i64 = limit.map_or(-1, |l| i64::try_from(l).unwrap_or(i64::MAX));
 
-        let mut stmt = self.conn.prepare(&query)?;
+        let mut stmt = self.conn.prepare_cached(QUERY)?;
         let dms = stmt
-            .query_map([], |row| {
+            .query_map([limit_param], |row| {
                 Ok(DirectMessage {
                     id: row.get(0)?,
                     conversation_id: row.get(1)?,
@@ -1717,27 +1694,15 @@ impl Storage {
         &self,
         limit: Option<usize>,
     ) -> Result<Vec<DmConversationSummary>> {
-        let query = limit.map_or_else(
-            || {
-                r"SELECT conversation_id, participant_ids, message_count,
+        const QUERY: &str = r"SELECT conversation_id, participant_ids, message_count,
                    first_message_at, last_message_at
                 FROM dm_conversations
-                ORDER BY last_message_at DESC"
-                    .to_string()
-            },
-            |lim| {
-                format!(
-                    r"SELECT conversation_id, participant_ids, message_count,
-                   first_message_at, last_message_at
-                FROM dm_conversations
-                ORDER BY last_message_at DESC LIMIT {lim}"
-                )
-            },
-        );
+                ORDER BY last_message_at DESC LIMIT ?";
+        let limit_param: i64 = limit.map_or(-1, |l| i64::try_from(l).unwrap_or(i64::MAX));
 
-        let mut stmt = self.conn.prepare(&query)?;
+        let mut stmt = self.conn.prepare_cached(QUERY)?;
         let summaries = stmt
-            .query_map([], |row| {
+            .query_map([limit_param], |row| {
                 let participants: String = row.get(1)?;
                 let participant_ids = participants
                     .split(',')
@@ -1766,14 +1731,12 @@ impl Storage {
     ///
     /// Returns an error if the database query fails.
     pub fn get_all_followers(&self, limit: Option<usize>) -> Result<Vec<Follower>> {
-        let query = limit.map_or_else(
-            || "SELECT account_id, user_link FROM followers".to_string(),
-            |lim| format!("SELECT account_id, user_link FROM followers LIMIT {lim}"),
-        );
+        const QUERY: &str = "SELECT account_id, user_link FROM followers LIMIT ?";
+        let limit_param: i64 = limit.map_or(-1, |l| i64::try_from(l).unwrap_or(i64::MAX));
 
-        let mut stmt = self.conn.prepare(&query)?;
+        let mut stmt = self.conn.prepare_cached(QUERY)?;
         let followers = stmt
-            .query_map([], |row| {
+            .query_map([limit_param], |row| {
                 Ok(Follower {
                     account_id: row.get(0)?,
                     user_link: row.get(1)?,
@@ -1791,14 +1754,12 @@ impl Storage {
     ///
     /// Returns an error if the database query fails.
     pub fn get_all_following(&self, limit: Option<usize>) -> Result<Vec<Following>> {
-        let query = limit.map_or_else(
-            || "SELECT account_id, user_link FROM following".to_string(),
-            |lim| format!("SELECT account_id, user_link FROM following LIMIT {lim}"),
-        );
+        const QUERY: &str = "SELECT account_id, user_link FROM following LIMIT ?";
+        let limit_param: i64 = limit.map_or(-1, |l| i64::try_from(l).unwrap_or(i64::MAX));
 
-        let mut stmt = self.conn.prepare(&query)?;
+        let mut stmt = self.conn.prepare_cached(QUERY)?;
         let following = stmt
-            .query_map([], |row| {
+            .query_map([limit_param], |row| {
                 Ok(Following {
                     account_id: row.get(0)?,
                     user_link: row.get(1)?,
@@ -1816,14 +1777,12 @@ impl Storage {
     ///
     /// Returns an error if the database query fails.
     pub fn get_all_blocks(&self, limit: Option<usize>) -> Result<Vec<Block>> {
-        let query = limit.map_or_else(
-            || "SELECT account_id, user_link FROM blocks".to_string(),
-            |lim| format!("SELECT account_id, user_link FROM blocks LIMIT {lim}"),
-        );
+        const QUERY: &str = "SELECT account_id, user_link FROM blocks LIMIT ?";
+        let limit_param: i64 = limit.map_or(-1, |l| i64::try_from(l).unwrap_or(i64::MAX));
 
-        let mut stmt = self.conn.prepare(&query)?;
+        let mut stmt = self.conn.prepare_cached(QUERY)?;
         let blocks = stmt
-            .query_map([], |row| {
+            .query_map([limit_param], |row| {
                 Ok(Block {
                     account_id: row.get(0)?,
                     user_link: row.get(1)?,
@@ -1841,14 +1800,12 @@ impl Storage {
     ///
     /// Returns an error if the database query fails.
     pub fn get_all_mutes(&self, limit: Option<usize>) -> Result<Vec<Mute>> {
-        let query = limit.map_or_else(
-            || "SELECT account_id, user_link FROM mutes".to_string(),
-            |lim| format!("SELECT account_id, user_link FROM mutes LIMIT {lim}"),
-        );
+        const QUERY: &str = "SELECT account_id, user_link FROM mutes LIMIT ?";
+        let limit_param: i64 = limit.map_or(-1, |l| i64::try_from(l).unwrap_or(i64::MAX));
 
-        let mut stmt = self.conn.prepare(&query)?;
+        let mut stmt = self.conn.prepare_cached(QUERY)?;
         let mutes = stmt
-            .query_map([], |row| {
+            .query_map([limit_param], |row| {
                 Ok(Mute {
                     account_id: row.get(0)?,
                     user_link: row.get(1)?,
@@ -1866,23 +1823,13 @@ impl Storage {
     ///
     /// Returns an error if the database query fails.
     pub fn get_all_grok_messages(&self, limit: Option<usize>) -> Result<Vec<GrokMessage>> {
-        let query = limit.map_or_else(
-            || {
-                r"SELECT chat_id, message, sender, created_at, grok_mode
-                FROM grok_messages ORDER BY created_at DESC"
-                    .to_string()
-            },
-            |lim| {
-                format!(
-                    r"SELECT chat_id, message, sender, created_at, grok_mode
-                FROM grok_messages ORDER BY created_at DESC LIMIT {lim}"
-                )
-            },
-        );
+        const QUERY: &str = r"SELECT chat_id, message, sender, created_at, grok_mode
+                FROM grok_messages ORDER BY created_at DESC LIMIT ?";
+        let limit_param: i64 = limit.map_or(-1, |l| i64::try_from(l).unwrap_or(i64::MAX));
 
-        let mut stmt = self.conn.prepare(&query)?;
+        let mut stmt = self.conn.prepare_cached(QUERY)?;
         let messages = stmt
-            .query_map([], |row| {
+            .query_map([limit_param], |row| {
                 Ok(GrokMessage {
                     chat_id: row.get(0)?,
                     message: row.get(1)?,
