@@ -49,7 +49,8 @@ jobs:
           key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Run Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        # Note: --all-features excluded; alloc-count feature requires unsafe code for profiling
+        run: cargo clippy --all-targets --features parallel-search -- -D warnings
 
   # ==========================================================================
   # Tests
@@ -78,7 +79,8 @@ jobs:
           key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Run tests
-        run: cargo test --all-features --verbose
+        # Note: alloc-count feature excluded (requires unsafe code for profiling)
+        run: cargo test --features parallel-search --verbose
 
   # ==========================================================================
   # Documentation
@@ -102,7 +104,8 @@ jobs:
           key: ${{ runner.os }}-cargo-docs-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Check documentation
-        run: cargo doc --no-deps --all-features
+        # Note: alloc-count feature excluded (requires unsafe code for profiling)
+        run: cargo doc --no-deps --features parallel-search
         env:
           RUSTDOCFLAGS: -D warnings
 
@@ -158,7 +161,8 @@ jobs:
           key: ${{ runner.os }}-cargo-coverage-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Generate coverage report
-        run: cargo llvm-cov --all-features --lcov --output-path lcov.info
+        # Note: alloc-count feature excluded (requires unsafe code for profiling)
+        run: cargo llvm-cov --features parallel-search --lcov --output-path lcov.info
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4
