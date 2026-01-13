@@ -24,11 +24,13 @@ use tracing::info;
 /// Parse metadata JSON, avoiding parse overhead for empty objects.
 #[inline]
 fn parse_metadata(s: &str) -> serde_json::Value {
-    // Fast path: empty metadata is common, skip parsing entirely
-    if s.is_empty() || s == "{}" || s == "null" {
-        return serde_json::Value::Null;
+    // Fast path: empty metadata is common, skip parsing entirely.
+    // Preserve original semantics: "{}" → empty object, "null" → null.
+    match s {
+        "{}" => serde_json::Value::Object(serde_json::Map::new()),
+        "null" => serde_json::Value::Null,
+        _ => serde_json::from_str(s).unwrap_or_default(),
     }
-    serde_json::from_str(s).unwrap_or_default()
 }
 
 /// Schema field names
