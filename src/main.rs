@@ -1082,6 +1082,7 @@ fn cmd_index(cli: &Cli, args: &cli::IndexArgs) -> Result<()> {
 fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
     let db_path = get_db_path(cli);
     let index_path = get_index_path(cli);
+    let config = Config::load();
 
     if !db_path.exists() {
         anyhow::bail!(
@@ -1420,9 +1421,15 @@ fn cmd_search(cli: &Cli, args: &cli::SearchArgs) -> Result<()> {
         return Ok(());
     }
 
+    if !config.search.highlight {
+        for result in &mut results {
+            result.highlights.clear();
+        }
+    }
+
     if args.context {
         let contexts = build_dm_context(&results, &storage)?;
-        output_dm_context(cli, &contexts)?;
+        output_dm_context(cli, &contexts, config.search.highlight)?;
         return Ok(());
     }
 
@@ -1623,7 +1630,11 @@ fn build_dm_context(
     Ok(contexts)
 }
 
-fn output_dm_context(cli: &Cli, contexts: &[DmConversationContext]) -> Result<()> {
+fn output_dm_context(
+    cli: &Cli,
+    contexts: &[DmConversationContext],
+    highlight_enabled: bool,
+) -> Result<()> {
     match cli.format {
         OutputFormat::Json => {
             println!("{}", serde_json::to_string(contexts)?);
@@ -1632,7 +1643,7 @@ fn output_dm_context(cli: &Cli, contexts: &[DmConversationContext]) -> Result<()
             println!("{}", serde_json::to_string_pretty(contexts)?);
         }
         OutputFormat::Text => {
-            print_dm_context_text(contexts);
+            print_dm_context_text(contexts, highlight_enabled);
         }
         _ => {
             anyhow::bail!("--context only supports text or json output.");
@@ -1641,7 +1652,7 @@ fn output_dm_context(cli: &Cli, contexts: &[DmConversationContext]) -> Result<()
     Ok(())
 }
 
-fn print_dm_context_text(contexts: &[DmConversationContext]) {
+fn print_dm_context_text(contexts: &[DmConversationContext], highlight_enabled: bool) {
     for context in contexts {
         println!(
             "{} {}",
@@ -1662,7 +1673,7 @@ fn print_dm_context_text(contexts: &[DmConversationContext]) {
 
             let lines = textwrap::wrap(&message.text, 78);
             for line in lines {
-                if message.is_match {
+                if highlight_enabled && message.is_match {
                     println!("  {}", line.yellow().bold());
                 } else {
                     println!("  {line}");
