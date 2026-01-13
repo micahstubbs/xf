@@ -74,7 +74,6 @@ fn encode_doc_type(doc_type: &str) -> Option<u8> {
 }
 
 /// Decode `doc_type` u8 to string.
-#[allow(dead_code)]
 const fn decode_doc_type(value: u8) -> Option<&'static str> {
     match value {
         0 => Some("tweet"),
@@ -82,6 +81,19 @@ const fn decode_doc_type(value: u8) -> Option<&'static str> {
         2 => Some("dm"),
         3 => Some("grok"),
         _ => None,
+    }
+}
+
+/// Intern a `doc_type` string to a static reference.
+///
+/// Returns `&'static str` for known types, avoiding allocations.
+/// Unknown types default to "tweet".
+fn intern_doc_type(doc_type: &str) -> &'static str {
+    match doc_type {
+        "like" => "like",
+        "dm" => "dm",
+        "grok" => "grok",
+        _ => "tweet", // Default for unknown types (including "tweet")
     }
 }
 
@@ -395,7 +407,9 @@ pub struct VectorSearchResult {
     /// Document ID.
     pub doc_id: String,
     /// Document type (tweet, like, dm, grok).
-    pub doc_type: String,
+    ///
+    /// Uses `&'static str` to avoid allocations for the fixed set of types.
+    pub doc_type: &'static str,
     /// Similarity score (cosine similarity, range -1.0 to 1.0).
     pub score: f32,
 }
@@ -622,7 +636,7 @@ impl MmapVectorIndex {
             };
             results.push(VectorSearchResult {
                 doc_id: doc_id.to_string(),
-                doc_type: doc_type.to_string(),
+                doc_type, // Already &'static str from decode_doc_type
                 score: entry.score,
             });
         }
@@ -631,7 +645,7 @@ impl MmapVectorIndex {
             b.score
                 .total_cmp(&a.score)
                 .then_with(|| a.doc_id.cmp(&b.doc_id))
-                .then_with(|| a.doc_type.cmp(&b.doc_type))
+                .then_with(|| a.doc_type.cmp(b.doc_type))
         });
 
         results
@@ -641,7 +655,8 @@ impl MmapVectorIndex {
 /// In-memory vector index for fast similarity search.
 pub struct VectorIndex {
     /// All stored vectors with their metadata.
-    vectors: Vec<(String, String, Vec<f32>)>, // (doc_id, doc_type, embedding)
+    /// Uses `&'static str` for `doc_type` to avoid allocations.
+    vectors: Vec<(String, &'static str, Vec<f32>)>, // (doc_id, doc_type, embedding)
     /// Embedding dimension.
     dimension: usize,
 }
@@ -666,10 +681,13 @@ impl VectorIndex {
 
         let dimension = embeddings.first().map_or(384, |(_, _, v)| v.len());
 
-        Ok(Self {
-            vectors: embeddings,
-            dimension,
-        })
+        // Intern doc_type strings to avoid allocations
+        let vectors = embeddings
+            .into_iter()
+            .map(|(doc_id, doc_type, embedding)| (doc_id, intern_doc_type(&doc_type), embedding))
+            .collect();
+
+        Ok(Self { vectors, dimension })
     }
 
     /// Load embeddings from a vector index file.
@@ -737,10 +755,9 @@ impl VectorIndex {
                 .map_err(|_| anyhow::anyhow!("invalid UTF-8 in doc_id"))?
                 .to_string();
 
-            // Decode doc_type
+            // Decode doc_type (already &'static str)
             let doc_type = decode_doc_type(doc_type_code)
-                .ok_or_else(|| anyhow::anyhow!("unknown doc_type code: {doc_type_code}"))?
-                .to_string();
+                .ok_or_else(|| anyhow::anyhow!("unknown doc_type code: {doc_type_code}"))?;
 
             // Extract and convert embedding F16 -> f32
             let embedding_start = doc_id_start + doc_id_len;
@@ -781,13 +798,16 @@ impl VectorIndex {
     }
 
     /// Add a vector to the index.
-    pub fn add(&mut self, doc_id: String, doc_type: String, embedding: Vec<f32>) {
+    ///
+    /// The `doc_type` is interned to a static reference.
+    pub fn add(&mut self, doc_id: String, doc_type: &str, embedding: Vec<f32>) {
         debug_assert_eq!(
             embedding.len(),
             self.dimension,
             "embedding dimension mismatch"
         );
-        self.vectors.push((doc_id, doc_type, embedding));
+        self.vectors
+            .push((doc_id, intern_doc_type(doc_type), embedding));
     }
 
     /// Get the number of vectors in the index.
@@ -807,7 +827,8 @@ impl VectorIndex {
     pub fn type_counts(&self) -> std::collections::HashMap<String, usize> {
         let mut counts = std::collections::HashMap::new();
         for (_, doc_type, _) in &self.vectors {
-            *counts.entry(doc_type.clone()).or_insert(0) += 1;
+            // doc_type is &'static str, convert to String for API compatibility
+            *counts.entry((*doc_type).to_string()).or_insert(0) += 1;
         }
         counts
     }
@@ -840,7 +861,7 @@ impl VectorIndex {
         for (idx, (_, doc_type, embedding)) in self.vectors.iter().enumerate() {
             // Filter by doc_type if specified
             if let Some(types) = doc_types {
-                if !types.contains(&doc_type.as_str()) {
+                if !types.contains(doc_type) {
                     continue;
                 }
             }
@@ -856,13 +877,13 @@ impl VectorIndex {
             }
         }
 
-        // Phase 2: Extract top-k and clone Strings only for final results
+        // Phase 2: Extract top-k results (doc_type is Copy since it's &'static str)
         let mut results: Vec<VectorSearchResult> = Vec::with_capacity(heap.len());
         for entry in heap {
             let (doc_id, doc_type, _) = &self.vectors[entry.idx];
             results.push(VectorSearchResult {
                 doc_id: doc_id.clone(),
-                doc_type: doc_type.clone(),
+                doc_type,
                 score: entry.score,
             });
         }
@@ -872,7 +893,7 @@ impl VectorIndex {
             b.score
                 .total_cmp(&a.score)
                 .then_with(|| a.doc_id.cmp(&b.doc_id))
-                .then_with(|| a.doc_type.cmp(&b.doc_type))
+                .then_with(|| a.doc_type.cmp(b.doc_type))
         });
 
         results
@@ -915,7 +936,7 @@ impl VectorIndex {
 
                 for (offset, (_, doc_type, embedding)) in chunk.iter().enumerate() {
                     if let Some(types) = doc_types {
-                        if !types.contains(&doc_type.as_str()) {
+                        if !types.contains(doc_type) {
                             continue;
                         }
                     }
@@ -945,13 +966,13 @@ impl VectorIndex {
             }
         }
 
-        // Only clone Strings for the final k results
+        // Only clone doc_id for the final k results (doc_type is Copy)
         let mut results: Vec<VectorSearchResult> = Vec::with_capacity(final_heap.len());
         for entry in final_heap {
             let (doc_id, doc_type, _) = &self.vectors[entry.idx];
             results.push(VectorSearchResult {
                 doc_id: doc_id.clone(),
-                doc_type: doc_type.clone(),
+                doc_type,
                 score: entry.score,
             });
         }
@@ -960,7 +981,7 @@ impl VectorIndex {
             b.score
                 .total_cmp(&a.score)
                 .then_with(|| a.doc_id.cmp(&b.doc_id))
-                .then_with(|| a.doc_type.cmp(&b.doc_type))
+                .then_with(|| a.doc_type.cmp(b.doc_type))
         });
 
         results
@@ -1125,7 +1146,7 @@ mod tests {
 
         let mut v1 = vec![1.0, 0.0, 0.0, 0.0];
         l2_normalize(&mut v1);
-        index.add("doc1".to_string(), "tweet".to_string(), v1);
+        index.add("doc1".to_string(), "tweet", v1);
 
         assert_eq!(index.len(), 1);
         assert!(!index.is_empty());
@@ -1152,9 +1173,9 @@ mod tests {
         l2_normalize(&mut v2);
         l2_normalize(&mut v3);
 
-        index.add("doc1".to_string(), "tweet".to_string(), v1.clone());
-        index.add("doc2".to_string(), "tweet".to_string(), v2);
-        index.add("doc3".to_string(), "like".to_string(), v3);
+        index.add("doc1".to_string(), "tweet", v1.clone());
+        index.add("doc2".to_string(), "tweet", v2);
+        index.add("doc3".to_string(), "like", v3);
 
         // Search with query similar to v1
         let results = index.search_top_k(&v1, 2, None);
@@ -1179,9 +1200,9 @@ mod tests {
         l2_normalize(&mut v2);
         l2_normalize(&mut v3);
 
-        index.add("doc1".to_string(), "tweet".to_string(), v1.clone());
-        index.add("doc2".to_string(), "like".to_string(), v2);
-        index.add("doc3".to_string(), "dm".to_string(), v3);
+        index.add("doc1".to_string(), "tweet", v1.clone());
+        index.add("doc2".to_string(), "like", v2);
+        index.add("doc3".to_string(), "dm", v3);
 
         // Search only tweets
         let results = index.search_top_k(&v1, 10, Some(&["tweet"]));
@@ -1202,7 +1223,7 @@ mod tests {
         for i in 0..10 {
             let mut v = vec![1.0, (i as f32) / 10.0, 0.0, 0.0];
             l2_normalize(&mut v);
-            index.add(format!("doc{i}"), "tweet".to_string(), v);
+            index.add(format!("doc{i}"), "tweet", v);
         }
 
         let query = vec![1.0, 0.0, 0.0, 0.0];
@@ -1216,11 +1237,7 @@ mod tests {
 
         // Add vectors with varying similarities
         for i in 0..20 {
-            index.add(
-                format!("doc{i}"),
-                "tweet".to_string(),
-                create_test_vector(i, 8),
-            );
+            index.add(format!("doc{i}"), "tweet", create_test_vector(i, 8));
         }
 
         let query = create_test_vector(100, 8);
@@ -1243,8 +1260,8 @@ mod tests {
         let mut v = vec![1.0, 0.0, 0.0, 0.0];
         l2_normalize(&mut v);
 
-        index.add("same".to_string(), "tweet".to_string(), v.clone());
-        index.add("same".to_string(), "like".to_string(), v.clone());
+        index.add("same".to_string(), "tweet", v.clone());
+        index.add("same".to_string(), "like", v.clone());
 
         let results = index.search_top_k(&v, 2, None);
         assert_eq!(results.len(), 2);
@@ -1266,9 +1283,9 @@ mod tests {
         l2_normalize(&mut v2);
         l2_normalize(&mut v3);
 
-        index.add("doc1".to_string(), "tweet".to_string(), v1.clone());
-        index.add("doc2".to_string(), "tweet".to_string(), v2);
-        index.add("doc3".to_string(), "tweet".to_string(), v3);
+        index.add("doc1".to_string(), "tweet", v1.clone());
+        index.add("doc2".to_string(), "tweet", v2);
+        index.add("doc3".to_string(), "tweet", v3);
 
         let results = index.search_top_k(&v1, 10, None);
 
@@ -1286,7 +1303,7 @@ mod tests {
         let mut index = VectorIndex::new(4);
         let mut v = vec![1.0, 0.0, 0.0, 0.0];
         l2_normalize(&mut v);
-        index.add("doc1".to_string(), "tweet".to_string(), v.clone());
+        index.add("doc1".to_string(), "tweet", v.clone());
 
         let results = index.search_top_k(&v, 0, None);
         assert!(results.is_empty());
@@ -1297,7 +1314,7 @@ mod tests {
         let mut index = VectorIndex::new(4);
         let mut v = vec![1.0, 0.0, 0.0, 0.0];
         l2_normalize(&mut v);
-        index.add("doc1".to_string(), "tweet".to_string(), v);
+        index.add("doc1".to_string(), "tweet", v);
 
         // Query with wrong dimension
         let wrong_query = vec![1.0, 0.0, 0.0, 0.0, 0.0]; // 5 dimensions

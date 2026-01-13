@@ -11,7 +11,7 @@ use crate::{format_bytes_i64, format_number};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, params};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::HashMap;
 use std::path::Path;
 use tracing::info;
 
@@ -1517,48 +1517,83 @@ impl Storage {
 
     /// Get a tweet thread rooted at the earliest ancestor, including all replies.
     ///
+    /// Uses recursive CTEs to fetch the entire thread in a single query,
+    /// eliminating N+1 query patterns.
+    ///
     /// # Errors
     ///
     /// Returns an error if the database query fails.
     pub fn get_tweet_thread(&self, id: &str) -> Result<Vec<Tweet>> {
-        let Some(mut root) = self.get_tweet(id)? else {
-            return Ok(Vec::new());
-        };
+        // Single recursive CTE query that:
+        // 1. Finds all ancestors of the given tweet (going up the reply chain)
+        // 2. Identifies the root (earliest ancestor)
+        // 3. Finds all descendants from the root (going down)
+        // This eliminates N+1 queries - one query instead of potentially 50+
+        let mut stmt = self.conn.prepare(
+            r"
+            WITH RECURSIVE
+                -- Find all ancestors by traversing up the reply chain
+                ancestors(id, parent_id, depth) AS (
+                    SELECT id, in_reply_to_status_id, 0
+                    FROM tweets WHERE id = ?1
+                    UNION ALL
+                    SELECT t.id, t.in_reply_to_status_id, a.depth + 1
+                    FROM tweets t
+                    JOIN ancestors a ON t.id = a.parent_id
+                    WHERE a.parent_id IS NOT NULL AND a.parent_id != ''
+                      AND a.depth < 100  -- Prevent infinite loops
+                ),
+                -- The root is the ancestor with no parent in our archive
+                root AS (
+                    SELECT id FROM ancestors
+                    WHERE parent_id IS NULL OR parent_id = ''
+                       OR parent_id NOT IN (SELECT id FROM tweets)
+                    ORDER BY depth DESC
+                    LIMIT 1
+                ),
+                -- Find all descendants from the root
+                thread_ids(id) AS (
+                    SELECT id FROM root
+                    UNION ALL
+                    SELECT t.id
+                    FROM tweets t
+                    JOIN thread_ids ti ON t.in_reply_to_status_id = ti.id
+                )
+            SELECT DISTINCT t.id, t.created_at, t.full_text, t.source,
+                   t.favorite_count, t.retweet_count, t.lang,
+                   t.in_reply_to_status_id, t.in_reply_to_user_id,
+                   t.in_reply_to_screen_name, t.is_retweet,
+                   t.hashtags_json, t.mentions_json, t.urls_json, t.media_json
+            FROM tweets t
+            WHERE t.id IN (SELECT id FROM thread_ids)
+            ORDER BY t.created_at ASC
+            ",
+        )?;
 
-        let mut seen = HashSet::new();
-        seen.insert(root.id.clone());
+        let tweets = stmt
+            .query_map(params![id], |row| {
+                Ok(Tweet {
+                    id: row.get(0)?,
+                    created_at: parse_rfc3339_or_epoch(row.get::<_, Option<String>>(1)?),
+                    full_text: row.get(2)?,
+                    source: row.get(3)?,
+                    favorite_count: row.get(4)?,
+                    retweet_count: row.get(5)?,
+                    lang: row.get(6)?,
+                    in_reply_to_status_id: row.get(7)?,
+                    in_reply_to_user_id: row.get(8)?,
+                    in_reply_to_screen_name: row.get(9)?,
+                    is_retweet: row.get::<_, i32>(10)? != 0,
+                    hashtags: serde_json::from_str(&row.get::<_, String>(11)?).unwrap_or_default(),
+                    user_mentions: serde_json::from_str(&row.get::<_, String>(12)?)
+                        .unwrap_or_default(),
+                    urls: serde_json::from_str(&row.get::<_, String>(13)?).unwrap_or_default(),
+                    media: serde_json::from_str(&row.get::<_, String>(14)?).unwrap_or_default(),
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
 
-        while let Some(parent_id) = root.in_reply_to_status_id.clone() {
-            if !seen.insert(parent_id.clone()) {
-                break;
-            }
-            match self.get_tweet(&parent_id)? {
-                Some(parent) => root = parent,
-                None => break,
-            }
-        }
-
-        let mut thread = Vec::new();
-        let mut queue = VecDeque::new();
-        let mut visited = HashSet::new();
-
-        queue.push_back(root);
-
-        while let Some(tweet) = queue.pop_front() {
-            if !visited.insert(tweet.id.clone()) {
-                continue;
-            }
-            let replies = self.get_tweet_replies(&tweet.id)?;
-            for reply in replies {
-                if !visited.contains(&reply.id) {
-                    queue.push_back(reply);
-                }
-            }
-            thread.push(tweet);
-        }
-
-        thread.sort_by_key(|tweet| tweet.created_at);
-        Ok(thread)
+        Ok(tweets)
     }
 
     /// Get all tweets, optionally limited.

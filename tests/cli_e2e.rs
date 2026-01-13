@@ -226,7 +226,7 @@ fn expected_semantic_results(
 
     let lookups: Vec<_> = semantic_hits
         .iter()
-        .map(|hit| DocLookup::with_type(&hit.doc_id, &hit.doc_type))
+        .map(|hit| DocLookup::with_type(&hit.doc_id, hit.doc_type))
         .collect();
     let fetched = search_engine
         .get_by_ids(&lookups)

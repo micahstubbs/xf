@@ -217,7 +217,7 @@ fn make_rrf_inputs(size: usize) -> (Vec<SearchResult>, Vec<VectorSearchResult>) 
 
         semantic.push(VectorSearchResult {
             doc_id,
-            doc_type: doc_type.to_string(),
+            doc_type,
             score: usize_to_f32(size.saturating_sub(i) + 1) / 10.0,
         });
     }

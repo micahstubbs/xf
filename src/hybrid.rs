@@ -157,7 +157,7 @@ pub fn rrf_fuse<'a>(
 
     // Process semantic results (rank 0, 1, 2, ...)
     for (rank, hit) in semantic.iter().enumerate() {
-        let key = DocKey::new(hit.doc_id.as_str(), hit.doc_type.as_str());
+        let key = DocKey::new(hit.doc_id.as_str(), hit.doc_type);
         let entry = scores.entry(key).or_default();
         entry.rrf += 1.0 / (RRF_K + rank as f32 + 1.0);
         entry.semantic_rank = Some(rank);
@@ -230,10 +230,20 @@ mod tests {
         }
     }
 
+    /// Intern a `doc_type` string to `&'static str` for tests.
+    fn intern_doc_type(doc_type: &str) -> &'static str {
+        match doc_type {
+            "like" => "like",
+            "dm" => "dm",
+            "grok" => "grok",
+            _ => "tweet", // Default for "tweet" and unknown types
+        }
+    }
+
     fn make_semantic_hit(doc_id: &str, score: f32, doc_type: &str) -> VectorSearchResult {
         VectorSearchResult {
             doc_id: doc_id.to_string(),
-            doc_type: doc_type.to_string(),
+            doc_type: intern_doc_type(doc_type),
             score,
         }
     }
@@ -280,7 +290,7 @@ mod tests {
         for (rank, hit) in semantic.iter().enumerate() {
             let key = LegacyDocKey {
                 id: hit.doc_id.clone(),
-                doc_type: hit.doc_type.clone(),
+                doc_type: hit.doc_type.to_string(), // &'static str -> String
             };
             let entry = scores.entry(key).or_default();
             entry.rrf += 1.0 / (RRF_K + rank as f32 + 1.0);
