@@ -825,12 +825,17 @@ impl VectorIndex {
     /// Get counts of embeddings by document type.
     #[must_use]
     pub fn type_counts(&self) -> std::collections::HashMap<String, usize> {
-        let mut counts = std::collections::HashMap::new();
+        // Count using static strings first (no allocations during counting)
+        let mut static_counts: std::collections::HashMap<&'static str, usize> =
+            std::collections::HashMap::with_capacity(4);
         for (_, doc_type, _) in &self.vectors {
-            // doc_type is &'static str, convert to String for API compatibility
-            *counts.entry((*doc_type).to_string()).or_insert(0) += 1;
+            *static_counts.entry(*doc_type).or_insert(0) += 1;
         }
-        counts
+        // Convert to String only for the final result (at most 4 entries)
+        static_counts
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect()
     }
 
     /// Get the embedding dimension.

@@ -437,31 +437,38 @@ impl EngagementStats {
     }
 
     /// Query total engagement metrics.
+    ///
+    /// Computes sum, average, and median engagement in two queries, reusing
+    /// the count from the first query to avoid a subquery scan in the median.
     #[allow(clippy::cast_sign_loss, clippy::cast_precision_loss)]
     fn query_engagement_totals(storage: &Storage) -> Result<(u64, u64, f64, u64)> {
         let query = r"
             SELECT
                 COALESCE(SUM(favorite_count), 0) as total_likes,
                 COALESCE(SUM(retweet_count), 0) as total_retweets,
-                COALESCE(AVG(favorite_count + retweet_count), 0) as avg_engagement
+                COALESCE(AVG(favorite_count + retweet_count), 0) as avg_engagement,
+                COUNT(*) as tweet_count
             FROM tweets
         ";
 
         let conn = storage.connection();
-        let (total_likes, total_retweets, avg_engagement): (i64, i64, f64) =
-            conn.query_row(query, [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+        let (total_likes, total_retweets, avg_engagement, tweet_count): (i64, i64, f64, i64) = conn
+            .query_row(query, [], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })?;
 
-        // Query median (approximate using percentile)
+        // Query median using pre-computed offset (avoids subquery scan)
+        let median_offset = tweet_count / 2;
         let median_query = r"
             SELECT favorite_count + retweet_count as engagement
             FROM tweets
             WHERE favorite_count IS NOT NULL
             ORDER BY engagement
-            LIMIT 1 OFFSET (SELECT COUNT(*) / 2 FROM tweets)
+            LIMIT 1 OFFSET ?
         ";
 
         let median: i64 = conn
-            .query_row(median_query, [], |row| row.get(0))
+            .query_row(median_query, [median_offset], |row| row.get(0))
             .unwrap_or(0);
 
         Ok((

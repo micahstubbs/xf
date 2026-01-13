@@ -801,29 +801,21 @@ impl Storage {
 
     /// Get the count of documents expected in the Tantivy index.
     ///
+    /// Uses a single consolidated query instead of 4 separate round-trips.
+    ///
     /// # Errors
     ///
-    /// Returns an error if the count queries fail.
+    /// Returns an error if the count query fails.
     pub fn indexable_document_count(&self) -> Result<i64> {
-        let tweets_count: i64 = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM tweets", [], |row| row.get(0))?;
+        let query = r"
+            SELECT
+                (SELECT COUNT(*) FROM tweets) +
+                (SELECT COUNT(*) FROM likes WHERE full_text IS NOT NULL AND full_text != '') +
+                (SELECT COUNT(*) FROM direct_messages) +
+                (SELECT COUNT(*) FROM grok_messages)
+        ";
 
-        let likes_count: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM likes WHERE full_text IS NOT NULL AND full_text != ''",
-            [],
-            |row| row.get(0),
-        )?;
-
-        let dms_count: i64 =
-            self.conn
-                .query_row("SELECT COUNT(*) FROM direct_messages", [], |row| row.get(0))?;
-
-        let grok_count: i64 =
-            self.conn
-                .query_row("SELECT COUNT(*) FROM grok_messages", [], |row| row.get(0))?;
-
-        Ok(tweets_count + likes_count + dms_count + grok_count)
+        Ok(self.conn.query_row(query, [], |row| row.get(0))?)
     }
 
     /// Run database health checks for `xf doctor`.
