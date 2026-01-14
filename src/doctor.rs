@@ -101,6 +101,11 @@ const ARCHIVE_FILES: &[FileRequirement] = &[
         description: "Likes/favorites",
     },
     FileRequirement {
+        pattern: "data/likes.js",
+        required: false,
+        description: "Likes/favorites (alternate filename)",
+    },
+    FileRequirement {
         pattern: "data/follower.js",
         required: false,
         description: "Followers list",
@@ -219,6 +224,7 @@ pub fn check_json_structure(archive_path: &Path) -> crate::Result<Vec<HealthChec
     let files_to_check = [
         ("data/tweets.js", "Tweets"),
         ("data/like.js", "Likes"),
+        ("data/likes.js", "Likes"),
         ("data/direct-messages.js", "DMs"),
         ("data/follower.js", "Followers"),
         ("data/following.js", "Following"),
