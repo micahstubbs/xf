@@ -650,7 +650,7 @@ impl ArchiveParser {
         // Escape the directory path to safely handle characters like [, ], * in the path itself
         let escaped_dir = glob::Pattern::escape(data_dir.to_string_lossy().as_ref());
         let full_pattern = format!("{}{}{}", escaped_dir, std::path::MAIN_SEPARATOR, pattern);
-        
+
         let mut paths: Vec<_> = glob(&full_pattern)
             .map_err(|e| anyhow::anyhow!("Invalid glob pattern: {e}"))?
             .filter_map(std::result::Result::ok)

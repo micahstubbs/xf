@@ -170,7 +170,7 @@ impl TemporalStats {
         for row in rows {
             let (hour, count) = row?;
             if let Some(h) = hour {
-                if h >= 0 && h < 24 {
+                if (0..24).contains(&h) {
                     distribution[h as usize] = count;
                 }
             }

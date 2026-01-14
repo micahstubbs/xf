@@ -909,11 +909,13 @@ impl ReplSession {
         println!("{}", "─".repeat(CONTENT_DIVIDER_WIDTH));
         println!("{}: {}", "Type".dimmed(), result.result_type);
         println!("{}: {}", "ID".dimmed(), result.id);
-        println!(
-            "{}: {}",
-            "Date".dimmed(),
-            format_relative_date(result.created_at)
-        );
+        if result.created_at.timestamp() > 0 {
+            println!(
+                "{}: {}",
+                "Date".dimmed(),
+                format_relative_date(result.created_at)
+            );
+        }
         println!("{}: {:.2}", "Score".dimmed(), result.score);
         println!();
         println!("{}", result.text);
