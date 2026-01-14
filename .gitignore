@@ -47,6 +47,7 @@ temp_*.rs
 # Test artifacts
 proptest-regressions/
 junit.xml
+test_dir/
 
 # Beads
 .beads/*
