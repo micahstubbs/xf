@@ -136,12 +136,20 @@ pub fn check_required_files(archive_path: &Path) -> crate::Result<Vec<HealthChec
     let mut has_tweets = false;
 
     for req in ARCHIVE_FILES {
-        let full_pattern = archive_path.join(req.pattern);
-        let pattern_str = full_pattern.to_string_lossy();
+        let req_path = Path::new(req.pattern);
+        let req_dir = req_path.parent().unwrap_or_else(|| Path::new(""));
+        let req_filename = req_path
+            .file_name()
+            .ok_or_else(|| crate::XfError::invalid_archive(format!("Invalid pattern: {}", req.pattern)))?
+            .to_string_lossy();
 
-        debug!("Checking for pattern: {}", pattern_str);
+        let search_dir = archive_path.join(req_dir);
+        let escaped_dir = glob::Pattern::escape(search_dir.to_string_lossy().as_ref());
+        let full_pattern = format!("{}{}{}", escaped_dir, std::path::MAIN_SEPARATOR, req_filename);
 
-        let matches: Vec<_> = glob(&pattern_str)
+        debug!("Checking for pattern: {}", full_pattern);
+
+        let matches: Vec<_> = glob(&full_pattern)
             .map_err(|e| crate::XfError::invalid_archive(format!("Invalid glob pattern: {e}")))?
             .filter_map(Result::ok)
             .collect();
@@ -425,8 +433,13 @@ pub fn validate_archive(archive_path: &Path) -> crate::Result<Vec<HealthCheck>> 
     // Duplicate ID and timestamp checks (only if tweets exist)
     // Parse tweets ONCE and run both checks on the same data
     let tweets_path = archive_path.join("data/tweets.js");
+    
+    let data_dir = archive_path.join("data");
+    let escaped_dir = glob::Pattern::escape(data_dir.to_string_lossy().as_ref());
+    let pattern = format!("{}{}{}", escaped_dir, std::path::MAIN_SEPARATOR, "tweets-part*.js");
+
     let has_tweets = tweets_path.exists()
-        || glob(&archive_path.join("data/tweets-part*.js").to_string_lossy())
+        || glob(&pattern)
             .map(|mut g| g.next().is_some())
             .unwrap_or(false);
 
