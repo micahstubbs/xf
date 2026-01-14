@@ -129,7 +129,7 @@ impl TemporalStats {
         let conn = storage.connection();
         let mut stmt = conn.prepare(query)?;
         let rows = stmt.query_map([], |row| {
-            let day_str: String = row.get(0)?;
+            let day_str: Option<String> = row.get(0)?;
             let count: i64 = row.get(1)?;
             Ok((day_str, count as u64))
         })?;
@@ -137,8 +137,10 @@ impl TemporalStats {
         let mut counts = Vec::new();
         for row in rows {
             let (day_str, count) = row?;
-            if let Ok(date) = NaiveDate::parse_from_str(&day_str, "%Y-%m-%d") {
-                counts.push(DailyCount { date, count });
+            if let Some(s) = day_str {
+                if let Ok(date) = NaiveDate::parse_from_str(&s, "%Y-%m-%d") {
+                    counts.push(DailyCount { date, count });
+                }
             }
         }
 
@@ -159,16 +161,18 @@ impl TemporalStats {
         let conn = storage.connection();
         let mut stmt = conn.prepare(query)?;
         let rows = stmt.query_map([], |row| {
-            let hour: i64 = row.get(0)?;
+            let hour: Option<i64> = row.get(0)?;
             let count: i64 = row.get(1)?;
-            Ok((hour as usize, count as u64))
+            Ok((hour, count as u64))
         })?;
 
         let mut distribution = [0u64; 24];
         for row in rows {
             let (hour, count) = row?;
-            if hour < 24 {
-                distribution[hour] = count;
+            if let Some(h) = hour {
+                if h >= 0 && h < 24 {
+                    distribution[h as usize] = count;
+                }
             }
         }
 
@@ -494,17 +498,20 @@ impl EngagementStats {
         let conn = storage.connection();
         let mut stmt = conn.prepare(query)?;
         let rows = stmt.query_map([], |row| {
-            let month: String = row.get(0)?;
+            let month: Option<String> = row.get(0)?;
             let avg: f64 = row.get(1)?;
-            Ok(MonthlyEngagement {
-                month,
-                avg_engagement: avg,
-            })
+            Ok((month, avg))
         })?;
 
         let mut trend = Vec::new();
         for row in rows {
-            trend.push(row?);
+            let (month, avg) = row?;
+            if let Some(m) = month {
+                trend.push(MonthlyEngagement {
+                    month: m,
+                    avg_engagement: avg,
+                });
+            }
         }
 
         Ok(trend)
