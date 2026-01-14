@@ -646,9 +646,12 @@ impl ArchiveParser {
     }
 
     fn collect_data_files(&self, pattern: &str) -> Result<Vec<std::path::PathBuf>> {
-        let full_pattern = self.archive_path.join("data").join(pattern);
-        let pattern_str = full_pattern.to_string_lossy();
-        let mut paths: Vec<_> = glob(&pattern_str)
+        let data_dir = self.archive_path.join("data");
+        // Escape the directory path to safely handle characters like [, ], * in the path itself
+        let escaped_dir = glob::Pattern::escape(data_dir.to_string_lossy().as_ref());
+        let full_pattern = format!("{}{}{}", escaped_dir, std::path::MAIN_SEPARATOR, pattern);
+        
+        let mut paths: Vec<_> = glob(&full_pattern)
             .map_err(|e| anyhow::anyhow!("Invalid glob pattern: {e}"))?
             .filter_map(std::result::Result::ok)
             .collect();
