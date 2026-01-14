@@ -20,7 +20,18 @@ Ultra-fast CLI for searching and querying your X data archive with sub-milliseco
 curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/xf/main/install.sh | bash
 ```
 
-<p><em>Works on Linux and macOS. Auto-detects your platform and downloads the right binary.</em></p>
+**Or via package managers:**
+
+```bash
+# macOS/Linux (Homebrew)
+brew install dicklesworthstone/tap/xf
+
+# Windows (Scoop)
+scoop bucket add dicklesworthstone https://github.com/Dicklesworthstone/scoop-bucket
+scoop install dicklesworthstone/xf
+```
+
+<p><em>Works on Linux, macOS, and Windows. Auto-detects your platform and downloads the right binary.</em></p>
 </div>
 
 ---
