@@ -1093,14 +1093,14 @@ fn directory_size_bytes(path: &Path) -> std::io::Result<u64> {
 /// Uses character count (not byte count) to properly handle UTF-8.
 fn generate_prefixes(text: &str) -> String {
     // Estimate capacity: ~7 prefixes per word on average, ~9 chars each
-    let word_count_estimate = text.split_whitespace().take(100).count();
+    let word_count_estimate = text.split(|c: char| !c.is_alphanumeric()).take(100).count();
     let capacity_estimate = word_count_estimate * 7 * 9;
 
     let mut result = String::with_capacity(capacity_estimate);
     let mut chars_buf: Vec<char> = Vec::with_capacity(32);
 
     for word in text
-        .split_whitespace()
+        .split(|c: char| !c.is_alphanumeric())
         .filter(|w| w.chars().count() >= 2)
         .take(100)
     {
@@ -1165,6 +1165,16 @@ mod tests {
             created_at: Utc::now(),
             grok_mode: None,
         }
+    }
+
+    #[test]
+    fn test_generate_prefixes_punctuation() {
+        let text = "hello,world";
+        let prefixes = generate_prefixes(text);
+        assert!(prefixes.contains("he"));
+        assert!(prefixes.contains("hello"));
+        assert!(prefixes.contains("wo"));
+        assert!(prefixes.contains("world"));
     }
 
     #[test]
@@ -1518,7 +1528,6 @@ mod tests {
             urls: vec![],
             media: vec![],
         }];
-
         engine.index_tweets(&mut writer, &tweets).unwrap();
         writer.commit().unwrap();
         engine.reload().unwrap();
@@ -1654,7 +1663,7 @@ mod tests {
         let mut writer = engine.writer(15_000_000).unwrap();
 
         let tweets = vec![
-            create_test_tweet("42", "tweet text"),
+            create_test_tweet("42", "tweet 42"),
             create_test_tweet("99", "tweet 99"),
         ];
         let likes = vec![create_test_like("42", Some("like text"))];
@@ -1681,7 +1690,7 @@ mod tests {
             results[1].as_ref().unwrap().result_type,
             SearchResultType::Tweet
         );
-        assert_eq!(results[1].as_ref().unwrap().text, "tweet text");
+        assert_eq!(results[1].as_ref().unwrap().text, "tweet 42");
         assert_eq!(
             results[2].as_ref().unwrap().result_type,
             SearchResultType::Tweet
@@ -1698,7 +1707,7 @@ mod tests {
             create_test_tweet("42", "tweet 42"),
             create_test_tweet("99", "tweet 99"),
         ];
-        let likes = vec![create_test_like("42", Some("like 42"))];
+        let likes = vec![create_test_like("42", Some("like text"))];
 
         engine.index_tweets(&mut writer, &tweets).unwrap();
         engine.index_likes(&mut writer, &likes).unwrap();
